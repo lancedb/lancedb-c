@@ -1,0 +1,26 @@
+# Valgrind suppressions for LanceDB C bindings
+# These suppress known false positives from Rust runtime and system libraries
+
+# Suppress tokio:runtime allocations (possibly lost)
+{
+   tokio_runtime_possibly_lost
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:*alloc
+   ...
+   fun:*tokio*runtime*
+   ...
+   obj:*/liblancedb.so
+}
+
+# Suppress regex_automata allocations (possibly lost)
+{
+   regex_automata_cache_possibly_lost
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:*regex_automata*
+   ...
+   obj:*/liblancedb.so
+}
