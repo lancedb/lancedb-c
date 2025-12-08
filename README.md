@@ -82,6 +82,8 @@ The C API provides comprehensive LanceDB functionality:
 ### Connection Management
 - `lancedb_connect()` - Create connection builder
 - `lancedb_connect_builder_execute()` - Execute connection
+- `lancedb_connect_builder_free()` - Free connection builder
+- `lancedb_connection_uri()` - Get database URI
 - `lancedb_connection_free()` - Free connection resources
 
 ### Database Operations
@@ -90,6 +92,10 @@ The C API provides comprehensive LanceDB functionality:
 - `lancedb_connection_drop_table()` - Delete table
 - `lancedb_connection_rename_table()` - Rename table (Cloud only)
 - `lancedb_connection_drop_all_tables()` - Delete all tables
+- `lancedb_connection_create_namespace()` - Create a new namespace
+- `lancedb_connection_drop_namespace()` - Drop a namespace
+- `lancedb_connection_list_namespaces()` - List all namespaces
+- `lancedb_free_namespace_list()` - Free namespace list array
 
 ### Table Operations
 - `lancedb_table_create()` - Create new table with Arrow schema (returns table object)
@@ -101,6 +107,7 @@ The C API provides comprehensive LanceDB functionality:
 - `lancedb_table_delete()` - Delete rows with predicate
 - `lancedb_table_nearest_to()` - Simple vector search function
 - `lancedb_table_free()` - Free table resources
+- `lancedb_free_table_names()` - Free table names array
 
 ### Query Operations
 - `lancedb_query_new()` - Create general query
@@ -117,6 +124,7 @@ The C API provides comprehensive LanceDB functionality:
 - `lancedb_query_execute()` / `lancedb_vector_query_execute()` - Execute query
 - `lancedb_query_result_to_arrow()` - Convert results to Arrow C ABI
 - `lancedb_query_free()` / `lancedb_vector_query_free()` - Free query resources
+- `lancedb_query_result_free()` - Free query result
 
 ### Index Management
 - `lancedb_table_create_vector_index()` - Create vector index
@@ -125,19 +133,17 @@ The C API provides comprehensive LanceDB functionality:
 - `lancedb_table_list_indices()` - List all table indices
 - `lancedb_table_drop_index()` - Drop specific index
 - `lancedb_table_optimize()` - Optimize table (compact/prune/rebuild indices)
-- `lancedb_free_index_list()` - Free index list
+- `lancedb_free_index_list()` - Free index list array
 
 ### Error Handling
-- All functions that return `LanceDBError` now accept an optional `error_message` parameter
+- All functions that return `LanceDBError` accept an optional `error_message` parameter
 - When provided (non-NULL), detailed error messages are populated for debugging
-- Use `lancedb_free_string()` to free error message strings
 - `lancedb_error_to_message()` - Convert error codes to human-readable messages
+- `lancedb_free_string()` - Free strings returned by LanceDB functions (e.g. the `error_message`)
 
-### Utility Functions
-- `lancedb_connection_uri()` - Get database URI
-- `lancedb_free_table_names()` - Free table names array
+### Arrow Utility Functions
 - `lancedb_record_batch_reader_from_arrow()` - Create reader from Arrow C ABI
+- `lancedb_record_batch_reader_free()` - Free record batch reader
 - `lancedb_free_arrow_arrays()` - Free Arrow arrays
 - `lancedb_free_arrow_schema()` - Free Arrow schema
-- `lancedb_free_string()` - Free strings returned by LanceDB functions
 
