@@ -74,7 +74,24 @@ target_compile_options(full PRIVATE ${ARROW_CFLAGS_OTHER})
 set_target_properties(full PROPERTIES
   BUILD_RPATH ${RUST_TARGET_DIR}
 )
-add_custom_target(examples DEPENDS simple full)
+
+# s3 storage example
+add_executable(s3 examples/s3.cpp)
+target_link_libraries(s3
+  lancedb
+  Threads::Threads
+  ${ARROW_LIBRARIES}
+)
+target_include_directories(s3
+  PRIVATE ${ARROW_INCLUDE_DIRS}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_compile_options(s3 PRIVATE ${ARROW_CFLAGS_OTHER})
+set_target_properties(s3 PROPERTIES
+  BUILD_RPATH ${RUST_TARGET_DIR}
+)
+
+add_custom_target(examples DEPENDS simple full s3)
 
 # Optional test framework
 option(BUILD_TESTS "Build tests" OFF)

@@ -106,7 +106,6 @@ int main() {
   }
   LanceDBConnection* db = lancedb_connect_builder_execute(builder);
   if (!db) {
-    lancedb_connect_builder_free(builder);
     std::cerr << "failed to connect to database" << std::endl;
     return 1;
   }
