@@ -122,7 +122,7 @@ static const char* LANCEDB_ERROR_MESSAGES[] = {
  * The returned string is valid for the lifetime of the program.
  * The caller must not free the returned string.
  */
-static const char* lancedb_error_to_message(LanceDBError error) {
+[[maybe_unused]] static const char* lancedb_error_to_message(LanceDBError error) {
     if (error < 0 || error > LANCEDB_UNKNOWN) {
         return "Invalid error code";
     }
@@ -232,6 +232,21 @@ LanceDBConnectBuilder* lancedb_connect(const char* uri);
  * The returned connection must be freed with lancedb_connection_free().
  */
 LanceDBConnection* lancedb_connect_builder_execute(LanceDBConnectBuilder* builder);
+
+
+/**
+ * Set an option for the storage layer
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param key -  null-terminated C string containing the name of the option
+ * @param value -  null-terminated C string containing the value of the option
+ *
+ * On success, the builder is consumed by this function and must not be used after calling.
+ * On failure, a pointer to the original LanceDBConnectBuilder is returned
+ *
+ * The key and value are going through basic validation at this point, and error will happen when trying to execute a builder
+ * with invalid key or value.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuilder* builder, const char* key, const char* value);
 
 /**
  * Free a ConnectBuilder

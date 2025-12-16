@@ -107,6 +107,44 @@ pub unsafe extern "C" fn lancedb_connect_builder_execute(
     }
 }
 
+/// Set an option for the storage layer
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `key` must be a valid null-terminated C string
+/// - `value` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Or the passed in builder pointer on error
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_storage_option(
+    builder: *mut LanceDBConnectBuilder,
+    key: *const c_char,
+    value: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() || key.is_null() || value.is_null() {
+        return builder;
+    }
+
+    let Ok(key_str) = CStr::from_ptr(key).to_str() else {
+        return builder;
+    };
+
+    let Ok(value_str) = CStr::from_ptr(value).to_str() else {
+        return builder;
+    };
+
+    let builder_box = Box::from_raw(builder);
+    let connect_builder = *builder_box.inner;
+    let updated_builder = connect_builder.storage_option(key_str, value_str);
+    let boxed_builder = Box::new(LanceDBConnectBuilder {
+        inner: Box::new(updated_builder),
+    });
+
+    Box::into_raw(boxed_builder)
+}
+
 /// Free a ConnectBuilder
 ///
 /// # Safety
