@@ -10,6 +10,10 @@
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
 #include "lancedb.h"
+#include <random>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
 
 // Helper function to check if directory exists
 int directory_exists(const char* path);
@@ -22,8 +26,22 @@ protected:
   const std::string data_dir;
   const std::string uri;
 
+  static std::string generate_random_dir() {
+    auto now = std::chrono::system_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()).count();
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(1000, 9999);
+
+    std::ostringstream oss;
+    oss << "test_data_" << timestamp << "_" << dis(gen);
+    return oss.str();
+  }
+
 public:
-  BaseFixture() : data_dir("test_data"), uri(data_dir + "/test-lancedb") {
+  BaseFixture() : data_dir(generate_random_dir()), uri(data_dir + "/test-lancedb") {
     if (directory_exists(data_dir.c_str())) {
       remove_directory(data_dir.c_str());
     }
@@ -54,6 +72,7 @@ public:
   }
 
   void create_empty_table(const std::string& table_name);
+  LanceDBTable* create_table_with_data(const std::string& table_name, int num_rows, int start_index);
 };
 
 // Test schema dimensions constant

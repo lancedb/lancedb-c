@@ -111,27 +111,141 @@ if(BUILD_TESTS)
     FetchContent_MakeAvailable(Catch2)
   endif()
 
-  # Add test executable
-  add_executable(lancedb_tests
+  # Add test executable for connection tests (runs with valgrind)
+  add_executable(lancedb_connection_tests
     tests/test_main.cpp
     tests/test_common.cpp
     tests/test_connection.cpp
-    tests/test_table.cpp
   )
-  target_link_libraries(lancedb_tests
+  target_link_libraries(lancedb_connection_tests
     PRIVATE
     lancedb
     Catch2::Catch2
     Threads::Threads
     ${ARROW_LIBRARIES}
   )
-  target_include_directories(lancedb_tests
+  target_include_directories(lancedb_connection_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
-  target_compile_options(lancedb_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_tests PROPERTIES
+  target_compile_options(lancedb_connection_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_connection_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  # Add test executable for table tests (runs with valgrind)
+  add_executable(lancedb_table_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_table.cpp
+  )
+  target_link_libraries(lancedb_table_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_table_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_table_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_table_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  # Add test executable for scalar index tests (runs with valgrind)
+  add_executable(lancedb_index_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_index.cpp
+  )
+  target_link_libraries(lancedb_index_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_index_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_index_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  # Add test executable for vector tests (runs without valgrind)
+  add_executable(lancedb_vector_index_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_vector_index.cpp
+  )
+  target_link_libraries(lancedb_vector_index_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_vector_index_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_vector_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_vector_index_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  # Add test executable for query tests (runs with valgrind)
+  add_executable(lancedb_query_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_query.cpp
+  )
+  target_link_libraries(lancedb_query_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_query_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_query_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  # Add test executable for vector query tests (runs without valgrind)
+  add_executable(lancedb_vector_query_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_vector_query.cpp
+  )
+  target_link_libraries(lancedb_vector_query_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_vector_query_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_vector_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_vector_query_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
@@ -142,22 +256,73 @@ if(BUILD_TESTS)
   find_program(VALGRIND_EXECUTABLE valgrind)
   if(VALGRIND_EXECUTABLE)
     message(STATUS "Valgrind found: ${VALGRIND_EXECUTABLE}")
-    # Run tests with valgrind
-    add_test(NAME lancedb_unit_tests
+    # Run connection tests with valgrind
+    # Only fail on definite leaks, not "possibly lost" from Rust runtime
+    add_test(NAME lancedb_connection_tests
       COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
-        --show-leak-kinds=definite,possible
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
         --track-origins=yes
         --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_output.txt
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_connection.txt
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_tests>
+        $<TARGET_FILE:lancedb_connection_tests>
+    )
+    # Run table tests with valgrind
+    add_test(NAME lancedb_table_tests
+      COMMAND ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_table.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_table_tests>
+    )
+    # Run scalar index tests with valgrind
+    add_test(NAME lancedb_index_tests
+      COMMAND ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_index.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_index_tests>
+    )
+    # Run query tests with valgrind
+    add_test(NAME lancedb_query_tests
+      COMMAND ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_query.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_query_tests>
     )
   else()
     message(WARNING "Valgrind not found, running tests without memory checking")
-    add_test(NAME lancedb_unit_tests COMMAND lancedb_tests)
+    add_test(NAME lancedb_connection_tests COMMAND lancedb_connection_tests)
+    add_test(NAME lancedb_table_tests COMMAND lancedb_table_tests)
+    add_test(NAME lancedb_index_tests COMMAND lancedb_index_tests)
+    add_test(NAME lancedb_vector_index_tests COMMAND lancedb_vector_index_tests)
+    add_test(NAME lancedb_query_tests COMMAND lancedb_query_tests)
+    add_test(NAME lancedb_vector_query_tests COMMAND lancedb_vector_query_tests)
   endif()
+
+  # Run vector index tests WITHOUT valgrind (too slow under valgrind)
+  add_test(NAME lancedb_vector_index_tests COMMAND lancedb_vector_index_tests)
+  # Run vector query tests WITHOUT valgrind (too slow under valgrind)
+  add_test(NAME lancedb_vector_query_tests COMMAND lancedb_vector_query_tests)
 endif()
 
 add_custom_target(clean-all
