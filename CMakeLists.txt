@@ -149,7 +149,7 @@ if(BUILD_TESTS)
         --leak-check=full
         --show-leak-kinds=definite,possible
         --track-origins=yes
-        --error-exitcode=0
+        --error-exitcode=1
         --log-file=${CMAKE_BINARY_DIR}/valgrind_output.txt
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
         $<TARGET_FILE:lancedb_tests>
