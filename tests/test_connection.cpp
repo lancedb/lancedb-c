@@ -15,6 +15,35 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Connection", "[connection]") {
   }
 }
 
+TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
+  SECTION("Use connection builder to set options") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    const auto original_builder = builder;
+    builder = lancedb_connect_builder_storage_option(builder, "hello", "world");
+    REQUIRE(builder != original_builder);
+    LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+    REQUIRE(db != nullptr);
+    lancedb_connection_free(db);
+  }
+  SECTION("Free connection builder") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    lancedb_connect_builder_free(builder);
+  }
+  SECTION("Use connection builder setting invalid options") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    const auto original_builder = builder;
+    builder = lancedb_connect_builder_storage_option(builder, nullptr, "world");
+    REQUIRE(builder == original_builder);
+    REQUIRE(lancedb_connect_builder_storage_option(nullptr, "hello", "world") == nullptr);
+    LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+    REQUIRE(db != nullptr);
+    lancedb_connection_free(db);
+  }
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Tables", "[connection]") {
   constexpr size_t num_tables = 20;
   for (size_t i = 0; i < num_tables; ++i) {
