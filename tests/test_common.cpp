@@ -112,19 +112,19 @@ std::shared_ptr<arrow::RecordBatch> create_test_record_batch(int num_rows, int s
   // Add rows
   for (int i = 0; i < num_rows; i++) {
     int idx = start_index + i;
-    key_builder.Append("key_" + std::to_string(idx)).ok();
+    REQUIRE(key_builder.Append("key_" + std::to_string(idx)).ok());
 
     auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
     for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-      list_builder->Append(static_cast<float>(idx * 10 + j)).ok();
+      REQUIRE(list_builder->Append(static_cast<float>(idx * 10 + j)).ok());
     }
-    data_builder.Append().ok();
+    REQUIRE(data_builder.Append().ok());
   }
 
   // Build arrays
   std::shared_ptr<arrow::Array> key_array, data_array;
-  key_builder.Finish(&key_array).ok();
-  data_builder.Finish(&data_array).ok();
+  REQUIRE(key_builder.Finish(&key_array).ok());
+  REQUIRE(data_builder.Finish(&data_array).ok());
 
   return arrow::RecordBatch::Make(schema, num_rows, {key_array, data_array});
 }

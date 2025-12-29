@@ -269,27 +269,27 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     // Add overlapping keys (should update)
     for (int i = 0; i < 5; i++) {
-      key_builder.Append("key_" + std::to_string(i)).ok();
+      REQUIRE(key_builder.Append("key_" + std::to_string(i)).ok());
       auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
       for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-        list_builder->Append(static_cast<float>(999 + i)).ok();  // Different values
+        REQUIRE(list_builder->Append(static_cast<float>(999 + i)).ok());  // Different values
       }
-      data_builder.Append().ok();
+      REQUIRE(data_builder.Append().ok());
     }
 
     // Add new keys (should insert)
     for (int i = 10; i < 15; i++) {
-      key_builder.Append("key_" + std::to_string(i)).ok();
+      REQUIRE(key_builder.Append("key_" + std::to_string(i)).ok());
       auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
       for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-        list_builder->Append(static_cast<float>(i * 10 + j)).ok();
+        REQUIRE(list_builder->Append(static_cast<float>(i * 10 + j)).ok());
       }
-      data_builder.Append().ok();
+      REQUIRE(data_builder.Append().ok());
     }
 
     std::shared_ptr<arrow::Array> key_array, data_array;
-    key_builder.Finish(&key_array).ok();
-    data_builder.Finish(&data_array).ok();
+    REQUIRE(key_builder.Finish(&key_array).ok());
+    REQUIRE(data_builder.Finish(&data_array).ok());
 
     auto merge_batch = arrow::RecordBatch::Make(schema, 10, {key_array, data_array});
     auto merge_reader = create_reader_from_batch(merge_batch);
@@ -315,7 +315,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
     REQUIRE(lancedb_table_count_rows(table) == 15);
 
     // Version should increment to 3 (was 2 before merge insert)
-    auto  version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table);
     REQUIRE(version == 3);
   }
 
@@ -328,17 +328,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
         std::make_unique<arrow::FloatBuilder>(), TEST_SCHEMA_DIMENSIONS);
 
     for (int i = 0; i < 5; i++) {
-      key_builder.Append("key_" + std::to_string(i)).ok();
+      REQUIRE(key_builder.Append("key_" + std::to_string(i)).ok());
       auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
       for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-        list_builder->Append(static_cast<float>(888 + i)).ok();
+        REQUIRE(list_builder->Append(static_cast<float>(888 + i)).ok());
       }
-      data_builder.Append().ok();
+      REQUIRE(data_builder.Append().ok());
     }
 
     std::shared_ptr<arrow::Array> key_array, data_array;
-    key_builder.Finish(&key_array).ok();
-    data_builder.Finish(&data_array).ok();
+    REQUIRE(key_builder.Finish(&key_array).ok());
+    REQUIRE(data_builder.Finish(&data_array).ok());
 
     auto merge_batch = arrow::RecordBatch::Make(schema, 5, {key_array, data_array});
     auto merge_reader = create_reader_from_batch(merge_batch);
@@ -363,7 +363,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
     REQUIRE(lancedb_table_count_rows(table) == 10);
 
     // Version should increment to 3 (was 2 before merge insert)
-    auto  version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table);
     REQUIRE(version == 3);
   }
 
@@ -376,17 +376,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
         std::make_unique<arrow::FloatBuilder>(), TEST_SCHEMA_DIMENSIONS);
 
     for (int i = 20; i < 25; i++) {
-      key_builder.Append("key_" + std::to_string(i)).ok();
+      REQUIRE(key_builder.Append("key_" + std::to_string(i)).ok());
       auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
       for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-        list_builder->Append(static_cast<float>(i * 10 + j)).ok();
+        REQUIRE(list_builder->Append(static_cast<float>(i * 10 + j)).ok());
       }
-      data_builder.Append().ok();
+      REQUIRE(data_builder.Append().ok());
     }
 
     std::shared_ptr<arrow::Array> key_array, data_array;
-    key_builder.Finish(&key_array).ok();
-    data_builder.Finish(&data_array).ok();
+    REQUIRE(key_builder.Finish(&key_array).ok());
+    REQUIRE(data_builder.Finish(&data_array).ok());
 
     auto merge_batch = arrow::RecordBatch::Make(schema, 5, {key_array, data_array});
     auto merge_reader = create_reader_from_batch(merge_batch);
@@ -453,17 +453,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     // Use exact same data as initial batch (keys 0-4)
     for (int i = 0; i < 5; i++) {
-      key_builder.Append("key_" + std::to_string(i)).ok();
+      REQUIRE(key_builder.Append("key_" + std::to_string(i)).ok());
       auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
       for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-        list_builder->Append(static_cast<float>(i * 10 + j)).ok();
+        REQUIRE(list_builder->Append(static_cast<float>(i * 10 + j)).ok());
       }
-      data_builder.Append().ok();
+      REQUIRE(data_builder.Append().ok());
     }
 
     std::shared_ptr<arrow::Array> key_array, data_array;
-    key_builder.Finish(&key_array).ok();
-    data_builder.Finish(&data_array).ok();
+    REQUIRE(key_builder.Finish(&key_array).ok());
+    REQUIRE(data_builder.Finish(&data_array).ok());
 
     auto merge_batch = arrow::RecordBatch::Make(schema, 5, {key_array, data_array});
     auto merge_reader = create_reader_from_batch(merge_batch);
