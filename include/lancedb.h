@@ -776,8 +776,22 @@ LanceDBError lancedb_vector_query_distance_type(
 /**
  * Set number of probes for vector query
  *
+ * This parameter controls how many partitions to search in IVF (Inverted File) based indices
+ * such as IVF_FLAT, IVF_PQ, IVF_HNSW_PQ, and IVF_HNSW_SQ.
+ *
+ * IVF indices partition the vector space into clusters. During search, nprobes determines
+ * how many of these partitions are searched. Higher values improve recall (find more relevant
+ * results) at the cost of slower queries. Lower values make queries faster but may miss
+ * relevant results that are in non-searched partitions.
+ *
+ * Typical values:
+ * - Default is usually 20
+ * - Range: 1 to num_partitions (specified during index creation)
+ * - Higher nprobes (e.g., num_partitions/2) → better recall, slower queries
+ * - Lower nprobes (e.g., 1-10) → faster queries, lower recall
+ *
  * @param query - pointer to LanceDBVectorQuery
- * @param nprobes - number of probes for IVF indices
+ * @param nprobes - number of IVF partitions to search (must be <= num_partitions)
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
@@ -793,8 +807,29 @@ LanceDBError lancedb_vector_query_nprobes(
 /**
  * Set refine factor for vector query
  *
+ * This parameter enables a refinement step to improve result accuracy for approximate
+ * vector indices (IVF_PQ, IVF_HNSW_PQ, IVF_HNSW_SQ).
+ *
+ * When refine_factor is set, the search process works in two stages:
+ * 1. Fetch (limit × refine_factor) approximate nearest neighbors using the index
+ * 2. Re-rank these candidates using exact distance calculations on original vectors
+ * 3. Return the top 'limit' results after refinement
+ *
+ * This improves accuracy because approximate indices (especially quantized ones like PQ/SQ)
+ * can have ranking errors. Refinement corrects these errors by recalculating exact distances.
+ *
+ * Typical values:
+ * - Default: No refinement (refine_factor = 1 or not set)
+ * - Range: 1 to ~100
+ * - refine_factor = 1 → no refinement (fastest, least accurate)
+ * - refine_factor = 10 → fetch 10x results and refine (good balance)
+ * - refine_factor = 50+ → very accurate but slower
+ *
+ * Note: Higher values increase query latency proportionally. Not useful for exact indices
+ * like IVF_FLAT which already use exact distances.
+ *
  * @param query - pointer to LanceDBVectorQuery
- * @param refine_factor - refine factor for vector search
+ * @param refine_factor - multiplier for candidate set size (fetches limit × refine_factor results)
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
@@ -810,8 +845,34 @@ LanceDBError lancedb_vector_query_refine_factor(
 /**
  * Set ef parameter for HNSW vector query
  *
+ * This parameter controls the exploration factor for HNSW (Hierarchical Navigable Small World)
+ * based indices such as IVF_HNSW_PQ and IVF_HNSW_SQ.
+ *
+ * HNSW is a graph-based index that navigates through a multi-layer graph to find nearest
+ * neighbors. The 'ef' parameter determines the size of the dynamic candidate list maintained
+ * during the graph traversal. A larger candidate list explores more of the graph, leading to
+ * better recall but slower queries.
+ *
+ * How it works:
+ * - During search, HNSW maintains a priority queue of size 'ef' with candidate neighbors
+ * - The algorithm explores neighbors of candidates in this queue
+ * - Larger ef → explores more paths through the graph → better recall
+ * - After exploration, the top 'limit' results are returned
+ *
+ * Typical values:
+ * - Default is usually 100
+ * - Must be >= limit (query result size)
+ * - Range: limit to ~1000
+ * - ef = limit → fastest, lowest recall
+ * - ef = 100-200 → good balance for most use cases
+ * - ef = 500+ → very high recall, slower queries
+ *
+ * Note: The ef parameter at query time is different from ef_construction used during
+ * index building. Query-time ef controls search quality, while ef_construction controls
+ * index quality.
+ *
  * @param query - pointer to LanceDBVectorQuery
- * @param ef - ef parameter for HNSW search
+ * @param ef - exploration factor for HNSW search (must be >= query limit)
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
