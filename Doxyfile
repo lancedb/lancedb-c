@@ -1,0 +1,49 @@
+# Doxyfile for LanceDB C API
+
+# Project information
+PROJECT_NAME           = "LanceDB C API"
+PROJECT_NUMBER         = "0.1.0"
+PROJECT_BRIEF          = "C bindings for LanceDB"
+
+# Input configuration
+INPUT                  = @DOXYGEN_INPUT_DIR@
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h
+
+# Output configuration
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+XML_OUTPUT             = @DOXYGEN_OUTPUT_DIR@
+
+# Extraction settings
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = NO
+
+# Documentation settings
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+OPTIMIZE_OUTPUT_FOR_C  = YES
+
+# Warnings
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = YES
+
+# Source browsing
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# Alphabetical index
+ALPHABETICAL_INDEX     = YES
+
+# Diagram generation
+HAVE_DOT               = NO
+CLASS_DIAGRAMS         = YES
