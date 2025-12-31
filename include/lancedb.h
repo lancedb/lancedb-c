@@ -28,6 +28,11 @@ typedef struct LanceDBConnection LanceDBConnection;
 typedef struct LanceDBTable LanceDBTable;
 
 /**
+ * Opaque handle to a LanceDB TableNamesBuilder
+ */
+typedef struct LanceDBTableNamesBuilder LanceDBTableNamesBuilder;
+
+/**
  * Opaque handle to a LanceDB Query
  */
 typedef struct LanceDBQuery LanceDBQuery;
@@ -239,12 +244,12 @@ LanceDBConnection* lancedb_connect_builder_execute(LanceDBConnectBuilder* builde
  * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
  * @param key -  null-terminated C string containing the name of the option
  * @param value -  null-terminated C string containing the value of the option
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
  *
- * On success, the builder is consumed by this function and must not be used after calling.
- * On failure, a pointer to the original LanceDBConnectBuilder is returned
+ * The builder is consumed by this function and must not be used after calling.
  *
  * The key and value are going through basic validation at this point, and error will happen when trying to execute a builder
- * with invalid key or value.
+ * with unsupported key or value.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuilder* builder, const char* key, const char* value);
 
@@ -295,6 +300,79 @@ LanceDBError lancedb_connection_table_names(
  * @param count - number of strings in the array
  */
 void lancedb_free_table_names(char** names, size_t count);
+
+/**
+ * Create a TableNamesBuilder for paginated table listing
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @return Non-null pointer to LanceDBTableNamesBuilder on success, NULL on failure
+ *
+ * The returned pointer must be freed with lancedb_table_names_builder_free().
+ * Use lancedb_table_names_builder_limit() and lancedb_table_names_builder_start_after()
+ * to configure pagination before calling lancedb_table_names_builder_execute().
+ */
+LanceDBTableNamesBuilder* lancedb_connection_table_names_builder(
+    const LanceDBConnection* connection
+);
+
+/**
+ * Set limit on TableNamesBuilder
+ *
+ * @param builder - pointer to LanceDBTableNamesBuilder
+ * @param limit - maximum number of table names to return
+ * @return Non-null pointer to LanceDBTableNamesBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ */
+LanceDBTableNamesBuilder* lancedb_table_names_builder_limit(
+    LanceDBTableNamesBuilder* builder,
+    unsigned int limit
+);
+
+/**
+ * Set start_after on TableNamesBuilder for pagination
+ *
+ * @param builder - pointer to LanceDBTableNamesBuilder
+ * @param start_after - null-terminated C string containing the table name to start after
+ * @return Non-null pointer to LanceDBTableNamesBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * This is used for pagination - returns table names alphabetically after the specified name.
+ */
+LanceDBTableNamesBuilder* lancedb_table_names_builder_start_after(
+    LanceDBTableNamesBuilder* builder,
+    const char* start_after
+);
+
+/**
+ * Execute TableNamesBuilder and return table names
+ *
+ * @param builder - pointer to LanceDBTableNamesBuilder (consumed by this function)
+ * @param names_out - pointer to receive array of string pointers
+ * @param count_out - pointer to receive count of table names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The caller is responsible for freeing the returned strings and array
+ * using lancedb_free_table_names(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_names_builder_execute(
+    LanceDBTableNamesBuilder* builder,
+    char*** names_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free a TableNamesBuilder
+ *
+ * @param builder - pointer to LanceDBTableNamesBuilder
+ *
+ * After calling this function, the builder pointer must not be used.
+ */
+void lancedb_table_names_builder_free(LanceDBTableNamesBuilder* builder);
 
 /**
  * Open an existing table

@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::Schema;
-use lancedb::connection::{connect, ConnectBuilder, Connection};
+use lancedb::connection::{connect, ConnectBuilder, Connection, TableNamesBuilder};
 use lancedb::database::{CreateNamespaceRequest, DropNamespaceRequest, ListNamespacesRequest};
 use lancedb::Table;
 
@@ -38,6 +38,12 @@ pub struct LanceDBConnection {
 #[repr(C)]
 pub struct LanceDBTable {
     pub(crate) inner: Table,
+}
+
+/// Opaque handle to a TableNamesBuilder
+#[repr(C)]
+pub struct LanceDBTableNamesBuilder {
+    inner: Box<TableNamesBuilder>,
 }
 
 /// Runtime to handle async operations
@@ -111,31 +117,37 @@ pub unsafe extern "C" fn lancedb_connect_builder_execute(
 ///
 /// # Safety
 /// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
 /// - `key` must be a valid null-terminated C string
 /// - `value` must be a valid null-terminated C string
 ///
 /// # Returns
 /// - A new pointer to LanceDBConnectBuilder on success
-/// - Or the passed in builder pointer on error
+/// - Null pointer on failure
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_connect_builder_storage_option(
     builder: *mut LanceDBConnectBuilder,
     key: *const c_char,
     value: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
-    if builder.is_null() || key.is_null() || value.is_null() {
-        return builder;
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if key.is_null() || value.is_null() {
+        return ptr::null_mut();
     }
 
     let Ok(key_str) = CStr::from_ptr(key).to_str() else {
-        return builder;
+        return ptr::null_mut();
     };
 
     let Ok(value_str) = CStr::from_ptr(value).to_str() else {
-        return builder;
+        return ptr::null_mut();
     };
 
-    let builder_box = Box::from_raw(builder);
     let connect_builder = *builder_box.inner;
     let updated_builder = connect_builder.storage_option(key_str, value_str);
     let boxed_builder = Box::new(LanceDBConnectBuilder {
@@ -342,6 +354,190 @@ pub unsafe extern "C" fn lancedb_free_table_names(names: *mut *mut c_char, count
             }
         }
         libc::free(names as *mut libc::c_void);
+    }
+}
+
+/// Create a TableNamesBuilder for paginated table listing
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+///
+/// # Returns
+/// - Non-null pointer to LanceDBTableNamesBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_table_names_builder(
+    connection: *const LanceDBConnection,
+) -> *mut LanceDBTableNamesBuilder {
+    if connection.is_null() {
+        return ptr::null_mut();
+    }
+
+    let conn = &(*connection).inner;
+    let builder = conn.table_names();
+
+    let boxed_builder = Box::new(LanceDBTableNamesBuilder {
+        inner: Box::new(builder),
+    });
+
+    Box::into_raw(boxed_builder)
+}
+
+/// Set limit on TableNamesBuilder
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connection_table_names_builder`
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - Non-null pointer to LanceDBTableNamesBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_names_builder_limit(
+    builder: *mut LanceDBTableNamesBuilder,
+    limit: u32,
+) -> *mut LanceDBTableNamesBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let table_names_builder = *builder_box.inner;
+    let updated_builder = table_names_builder.limit(limit);
+
+    let boxed_builder = Box::new(LanceDBTableNamesBuilder {
+        inner: Box::new(updated_builder),
+    });
+
+    Box::into_raw(boxed_builder)
+}
+
+/// Set start_after on TableNamesBuilder for pagination
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connection_table_names_builder`
+/// - `start_after` must be a valid null-terminated C string
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - Non-null pointer to LanceDBTableNamesBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_names_builder_start_after(
+    builder: *mut LanceDBTableNamesBuilder,
+    start_after: *const c_char,
+) -> *mut LanceDBTableNamesBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if start_after.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(start_after_str) = CStr::from_ptr(start_after).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let table_names_builder = *builder_box.inner;
+    let updated_builder = table_names_builder.start_after(start_after_str.to_string());
+
+    let boxed_builder = Box::new(LanceDBTableNamesBuilder {
+        inner: Box::new(updated_builder),
+    });
+
+    Box::into_raw(boxed_builder)
+}
+
+/// Execute TableNamesBuilder and return table names
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connection_table_names_builder`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `names_out` must be a valid pointer to receive the array of string pointers
+/// - `count_out` must be a valid pointer to receive the count
+/// - `error_message` can be NULL to ignore detailed error messages
+/// - The caller is responsible for freeing the returned strings and array
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_names_builder_execute(
+    builder: *mut LanceDBTableNamesBuilder,
+    names_out: *mut *mut *mut c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if builder.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if names_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let table_names_builder = *builder_box.inner;
+
+    let runtime = get_runtime();
+
+    match runtime.block_on(table_names_builder.execute()) {
+        Ok(names) => {
+            let count = names.len();
+            *count_out = count;
+
+            if count == 0 {
+                *names_out = ptr::null_mut();
+                return LanceDBError::Success;
+            }
+
+            // Allocate array of string pointers
+            let names_array =
+                libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+            if names_array.is_null() {
+                set_unknown_error_message(error_message);
+                return LanceDBError::Unknown;
+            }
+
+            // Convert each string and store pointer
+            for (i, name) in names.into_iter().enumerate() {
+                match CString::new(name) {
+                    Ok(c_str) => {
+                        *names_array.add(i) = c_str.into_raw();
+                    }
+                    Err(_) => {
+                        // Clean up already allocated strings
+                        for j in 0..i {
+                            let _ = CString::from_raw(*names_array.add(j));
+                        }
+                        libc::free(names_array as *mut libc::c_void);
+                        set_unknown_error_message(error_message);
+                        return LanceDBError::Unknown;
+                    }
+                }
+            }
+
+            *names_out = names_array;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Free a TableNamesBuilder
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connection_table_names_builder`
+/// - `builder` must not be used after calling this function
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_names_builder_free(builder: *mut LanceDBTableNamesBuilder) {
+    if !builder.is_null() {
+        let _ = Box::from_raw(builder);
     }
 }
 
