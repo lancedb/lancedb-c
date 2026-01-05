@@ -93,6 +93,55 @@ set_target_properties(s3 PROPERTIES
 
 add_custom_target(examples DEPENDS simple full s3)
 
+# Optional documentation
+option(BUILD_DOCS "Build documentation" OFF)
+
+if(BUILD_DOCS)
+  # Find Doxygen
+  find_package(Doxygen REQUIRED)
+
+  # Find Sphinx
+  find_program(SPHINX_EXECUTABLE
+    NAMES sphinx-build
+    DOC "Sphinx documentation generator"
+  )
+
+  if(NOT SPHINX_EXECUTABLE)
+    message(FATAL_ERROR "Sphinx not found. Install with: pip install sphinx sphinx-rtd-theme breathe")
+  endif()
+
+  # Doxygen target - generates XML from header files
+  set(DOXYGEN_INPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/lancedb.h)
+  set(DOXYGEN_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/xml)
+  set(DOXYFILE_IN ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile)
+  set(DOXYFILE_OUT ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile)
+
+  # Configure Doxyfile to use build directory for output
+  configure_file(${DOXYFILE_IN} ${DOXYFILE_OUT} @ONLY)
+
+  add_custom_target(doxygen
+    COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYFILE_OUT}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Generating Doxygen XML..."
+    VERBATIM
+  )
+
+  # Sphinx target - builds HTML documentation
+  set(SPHINX_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/docs)
+  set(SPHINX_BUILD ${CMAKE_CURRENT_BINARY_DIR}/docs/html)
+
+  add_custom_target(docs
+    COMMAND ${CMAKE_COMMAND} -E env DOXYGEN_XML_DIR=${DOXYGEN_OUTPUT_DIR}
+      ${SPHINX_EXECUTABLE} -b html
+      -W --keep-going
+      ${SPHINX_SOURCE} ${SPHINX_BUILD}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS doxygen
+    COMMENT "Building HTML documentation with Sphinx..."
+    VERBATIM
+  )
+endif()
+
 # Optional test framework
 option(BUILD_TESTS "Build tests" OFF)
 
@@ -346,5 +395,11 @@ if(BUILD_TESTS)
   message(STATUS "Tests: Enabled")
 else()
   message(STATUS "Tests: Disabled (use -DBUILD_TESTS=ON to enable)")
+endif()
+if(BUILD_DOCS)
+  message(STATUS "Documentation: Enabled")
+  message(STATUS "  - HTML output: ${SPHINX_BUILD}/index.html")
+else()
+  message(STATUS "Documentation: Disabled (use -DBUILD_DOCS=ON to enable)")
 endif()
 message(STATUS "============================================")
