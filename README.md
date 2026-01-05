@@ -105,7 +105,7 @@ The LanceDB C API has comprehensive documentation generated from the header file
 ### Viewing Documentation Online
 
 The documentation is automatically published to **GitHub Pages** on every push to main:
-- **URL**: https://lancedb-c.github.io/lancedb-c/
+- **URL**: https://lancedb.github.io/lancedb-c/
 
 ### Building Documentation Locally
 
