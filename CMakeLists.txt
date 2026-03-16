@@ -190,7 +190,25 @@ if(BUILD_EXAMPLES)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
-  add_custom_target(examples DEPENDS simple full s3)
+  # s3vector_concurrent_service - concurrent vector service with background indexing
+  find_package(nlohmann_json REQUIRED)
+  add_executable(s3vector_concurrent_service examples/s3vector_concurrent_service.cpp)
+  target_link_libraries(s3vector_concurrent_service
+    lancedb
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+    nlohmann_json::nlohmann_json
+  )
+  target_include_directories(s3vector_concurrent_service
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_compile_options(s3vector_concurrent_service PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(s3vector_concurrent_service PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  add_custom_target(examples DEPENDS simple full s3 s3vector_concurrent_service)
 endif()
 
 if(BUILD_DOCS)
