@@ -15,7 +15,7 @@
  * Architecture:
  * - PUT/DELETE operations complete first, then check rebuild thresholds
  * - File locking (flock) ensures only one process modifies index state(its very short operation) //NOTE on s3-system it needs to achieve concurrent and fast update of the index state by using s3-conditional-write or other mechanism. it needs to consider a stream of put and remove vectors. one way to achive that is by "lazy" updates of the index state, which means we can allow some level of inconsistency in the index state for a short period of time, and we can update the index state asynchronously in the background. this way we can avoid the contention on the index state update and achieve better performance.
- * - index state is a json file that tracks the index state for each table, it contains the number of unindexed vectors, number of deleted vectors, the version of the last build and other details.
+ * - index state is stored in LanceDB table metadata (key: s3v_index_state), it contains the index configuration, build coordination flags, and rebuild thresholds.
  * - If rebuild is needed, the process runs the build synchronously
  * - Search operations are lock-free (use LanceDB manifest for consistency)
  * - Crash detection via builder PID tracking(its for this prototype only)
@@ -70,10 +70,9 @@ using json = nlohmann::json;
 
 const std::string S3_VECTORS_ROOT = "/tmp/s3vectors";
 const std::string METADATA_DIR_NAME = ".s3v_metadata";
-const std::string INDEX_CONFIG_SUFFIX = "_index_config.json";
-const std::string INDEX_STATE_SUFFIX = "_index_state.json";
 const std::string INDEX_LOCK_SUFFIX = "_index.lock";
 const std::string LOG_FILE_NAME = "operations.log"; //contain timestamped, operation, on what table and other details
+const std::string TABLE_METADATA_STATE_KEY = "s3v_index_state"; // key used in LanceDB table metadata
 
 // Default index rebuild thresholds
 // Note: IVF_PQ requires minimum 256 vectors to build, so threshold should be >= 256
@@ -429,10 +428,6 @@ std::string get_index_db_path(const std::string& bucket_name, const std::string&
     return get_bucket_path(bucket_name) + "/" + index_name + "_lancedb";
 }
 
-std::string get_index_state_path(const std::string& bucket_name, const std::string& index_name) {
-    return get_metadata_path(bucket_name) + "/" + index_name + INDEX_STATE_SUFFIX;
-}
-
 std::string get_index_lock_path(const std::string& bucket_name, const std::string& index_name) {
     return get_metadata_path(bucket_name) + "/" + index_name + INDEX_LOCK_SUFFIX;
 }
@@ -443,11 +438,8 @@ std::string get_index_lock_path(const std::string& bucket_name, const std::strin
 // File Lock RAII Class - Uses flock for cross-process synchronization
 // ============================================================================
 
-//TODO use an abstraction of the locking method, so it can be easily replaced by s3-conditional-write or other mechanism when we move to s3 system. the file lock is for the purpose of this prototype, on s3 storage system it can be achived by s3-conditional-write. the class FileLock implementent the abstraction base class.
-//
-
 class Base_lock {
-	//purpose: it is an abstraction of the locking mechanism, so it can be easily replaced by s3-conditional-write or other mechanism when we move to s3 system. the file lock is for the purpose of this prototype, on s3 storage system it can be achived by s3-conditional-write. the class FileLock implementent the abstraction base class.
+//purpose: it is an abstraction of the locking mechanism, so it can be easily replaced by s3-conditional-write or other mechanism when we move to s3 system. the file lock is for the purpose of this prototype, on s3 storage system it can be achived by s3-conditional-write. the class FileLock implementent the abstraction base class.
 public:
     virtual ~Base_lock() = default;
     virtual bool lock_exclusive() = 0;
@@ -458,7 +450,7 @@ public:
 };
 
 class FileLock : public Base_lock {
-	//NOTE: it is for the purpose of this prototype, no need for that in S3.
+//NOTE: it is for the purpose of this prototype, no need for that in S3.
 private:
     int fd_ = -1;
     bool locked_ = false;
@@ -1074,6 +1066,63 @@ public:
         return result == LANCEDB_SUCCESS;
     }
 
+    // Save a metadata key-value pair to the LanceDB table
+    static bool save_table_metadata(const std::string& bucket, const std::string& index,
+                                     const std::string& meta_key, const std::string& meta_value) {
+        std::string db_path = utils::get_index_db_path(bucket, index);
+        LanceDBConnection* conn = connect(db_path);
+        if (!conn) return false;
+
+        LanceDBTable* table = open_table(conn, "vectors");
+        if (!table) {
+            lancedb_connection_free(conn);
+            return false;
+        }
+
+        const char* keys[] = {meta_key.c_str()};
+        const char* values[] = {meta_value.c_str()};
+        char* err_msg = nullptr;
+        LanceDBError result = lancedb_table_set_metadata(table, keys, values, 1, &err_msg);
+        if (err_msg) lancedb_free_string(err_msg);
+
+        lancedb_table_free(table);
+        lancedb_connection_free(conn);
+        return result == LANCEDB_SUCCESS;
+    }
+
+    // Load a metadata value by key from the LanceDB table
+    static std::string load_table_metadata(const std::string& bucket, const std::string& index,
+                                            const std::string& meta_key) {
+        std::string db_path = utils::get_index_db_path(bucket, index);
+        LanceDBConnection* conn = connect(db_path);
+        if (!conn) return "";
+
+        LanceDBTable* table = open_table(conn, "vectors");
+        if (!table) {
+            lancedb_connection_free(conn);
+            return "";
+        }
+
+        const char* filter_keys[] = {meta_key.c_str()};
+        char** keys_out = nullptr;
+        char** values_out = nullptr;
+        size_t count = 0;
+        char* err_msg = nullptr;
+        LanceDBError result = lancedb_table_get_metadata(
+            table, filter_keys, 1, &keys_out, &values_out, &count, &err_msg);
+        if (err_msg) lancedb_free_string(err_msg);
+
+        std::string value;
+        if (result == LANCEDB_SUCCESS && count > 0 && values_out) {
+            value = values_out[0];
+        }
+
+        if (keys_out || values_out) lancedb_free_metadata(keys_out, values_out, count);
+        lancedb_table_free(table);
+        lancedb_connection_free(conn);
+        return value;
+    }
+
     // Get index stats by opening a connection to the DB
     static bool get_index_stats_for(const std::string& bucket, const std::string& index,
                                      LanceDBIndexStats& stats) {
@@ -1123,9 +1172,9 @@ public:
             return it->second;
         }
 
-        // Try to load from disk
-        std::string state_path = utils::get_index_state_path(bucket, index);
-        std::string state_str = utils::read_file(state_path);
+        // Try to load from LanceDB table metadata
+        std::string state_str = LanceDBHelper::load_table_metadata(
+            bucket, index, TABLE_METADATA_STATE_KEY);
 
         auto state = std::make_shared<TableIndexState>();
         state->bucket_name = bucket;
@@ -1145,8 +1194,13 @@ public:
     }
 
     void save_state(const std::shared_ptr<TableIndexState>& state) {
-        std::string state_path = utils::get_index_state_path(state->bucket_name, state->index_name);
-        utils::write_file(state_path, state->to_json().dump(2));
+        std::string json_str = state->to_json().dump(2);
+        if (!LanceDBHelper::save_table_metadata(
+                state->bucket_name, state->index_name,
+                TABLE_METADATA_STATE_KEY, json_str)) {
+            LOG_ERROR("TABLE_STATE", state->index_name,
+                      "Failed to save index state to table metadata");
+        }
     }
 
     void remove(const std::string& bucket, const std::string& index) {
@@ -1208,7 +1262,7 @@ private:
         LOG_INFO("INDEX_LOCK", state->index_name, "Lock acquired for rebuild check (pid=" + std::to_string(getpid()) + ")");
 
         // Reload build-coordination state from disk
-        reload_state_from_disk(state);
+        reload_state_from_metadata(state);
         state->reset_crashed_builder();
 
         // Check if another process is already building
@@ -1240,7 +1294,7 @@ private:
             return success;
         }
 
-        reload_state_from_disk(state);
+        reload_state_from_metadata(state);
 
         if (success) {
             state->mark_build_complete();
@@ -1260,9 +1314,9 @@ private:
         return success;
     }
 
-    void reload_state_from_disk(std::shared_ptr<TableIndexState> state) {
-        std::string state_path = utils::get_index_state_path(state->bucket_name, state->index_name);
-        std::string state_str = utils::read_file(state_path);
+    void reload_state_from_metadata(std::shared_ptr<TableIndexState> state) {
+        std::string state_str = LanceDBHelper::load_table_metadata(
+            state->bucket_name, state->index_name, TABLE_METADATA_STATE_KEY);
         if (!state_str.empty()) {
             try {
                 json j = json::parse(state_str);
@@ -2098,7 +2152,7 @@ STORAGE:
     All data is stored under /tmp/s3vectors/
     - Buckets: /tmp/s3vectors/<bucket-name>/
     - Indices: /tmp/s3vectors/<bucket-name>/<index-name>_lancedb/
-    - State:   /tmp/s3vectors/<bucket-name>/.s3v_metadata/<index-name>_index_state.json
+    - State:   Stored in LanceDB table metadata (key: s3v_index_state)
 
 )";
 }
