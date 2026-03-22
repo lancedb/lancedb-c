@@ -192,16 +192,25 @@ if(BUILD_EXAMPLES)
 
   # s3vector_concurrent_service - concurrent vector service with background indexing
   find_package(nlohmann_json REQUIRED)
-  add_executable(s3vector_concurrent_service examples/s3vector_concurrent_service.cpp)
+  find_package(CURL REQUIRED)
+  find_package(OpenSSL REQUIRED)
+  add_executable(s3vector_concurrent_service
+    examples/s3vector_concurrent_service.cpp
+    examples/s3_lock.cpp
+    examples/s3_http.cpp
+  )
   target_link_libraries(s3vector_concurrent_service
     lancedb
     Threads::Threads
     ${ARROW_LIBRARIES}
     nlohmann_json::nlohmann_json
+    CURL::libcurl
+    OpenSSL::Crypto
   )
   target_include_directories(s3vector_concurrent_service
     PRIVATE ${ARROW_INCLUDE_DIRS}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples
   )
   target_compile_options(s3vector_concurrent_service PRIVATE ${ARROW_CFLAGS_OTHER})
   set_target_properties(s3vector_concurrent_service PROPERTIES

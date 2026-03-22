@@ -61,6 +61,9 @@
 #include <arrow/c/bridge.h>
 #include <nlohmann/json.hpp>
 #include "lancedb.h"
+#include "base_lock.h"
+#include "s3_lock.h"
+#include "s3_http.h"
 
 using json = nlohmann::json;
 
@@ -78,6 +81,69 @@ const std::string TABLE_METADATA_STATE_KEY = "s3v_index_state"; // key used in L
 // Note: IVF_PQ requires minimum 256 vectors to build, so threshold should be >= 256
 const size_t DEFAULT_UNINDEXED_THRESHOLD = 256;     // Rebuild when this many new vectors (min 256 for IVF_PQ)
 const double DEFAULT_DELETION_RATIO = 0.20;          // Rebuild when 20% deleted
+
+// Local directory for lock files and logs (used regardless of backend)
+const std::string LOCAL_STATE_ROOT = "/tmp/s3vectors";
+
+// ============================================================================
+// Backend Configuration - Supports local filesystem or S3
+// ============================================================================
+
+enum class BackendType { LOCAL, S3 };
+
+struct S3StorageConfig {
+    std::string endpoint;           // S3 endpoint URL (e.g. "http://localhost:8000")
+    std::string region;             // AWS region (e.g. "us-east-1")
+    std::string access_key_id;      // AWS access key
+    std::string secret_access_key;  // AWS secret key
+    std::string addressing_style;   // "path" for Ceph/RGW, empty for virtual-hosted
+    bool allow_http = false;        // Allow HTTP (non-HTTPS) endpoints
+};
+
+class BackendConfig {
+public:
+    static BackendConfig& instance() {
+        static BackendConfig config;
+        return config;
+    }
+
+    BackendType type = BackendType::LOCAL;
+    S3StorageConfig s3;
+
+    bool is_s3() const { return type == BackendType::S3; }
+    bool is_local() const { return type == BackendType::LOCAL; }
+
+    // Initialize from environment variables:
+    //   S3V_BACKEND=s3         (enables S3 mode)
+    //   S3V_ENDPOINT           (S3 endpoint URL)
+    //   S3V_REGION             (AWS region)
+    //   S3V_ACCESS_KEY_ID      (AWS access key)
+    //   S3V_SECRET_ACCESS_KEY  (AWS secret key)
+    //   S3V_ALLOW_HTTP=true    (allow HTTP endpoints)
+    //   S3V_ADDRESSING_STYLE   (e.g. "path" for Ceph/RGW)
+    void init_from_env() {
+        auto get_env = [](const char* name) -> std::string {
+            const char* val = std::getenv(name);
+            return val ? val : "";
+        };
+
+        std::string backend = get_env("S3V_BACKEND");
+        if (backend == "s3" || backend == "S3") {
+            type = BackendType::S3;
+            s3.endpoint = get_env("S3V_ENDPOINT");
+            s3.region = get_env("S3V_REGION");
+            s3.access_key_id = get_env("S3V_ACCESS_KEY_ID");
+            s3.secret_access_key = get_env("S3V_SECRET_ACCESS_KEY");
+            s3.addressing_style = get_env("S3V_ADDRESSING_STYLE");
+            s3.allow_http = (get_env("S3V_ALLOW_HTTP") == "true");
+        }
+    }
+
+    std::string describe() const {
+        if (is_local()) return "local (" + S3_VECTORS_ROOT + ")";
+        return "s3 (endpoint=" + s3.endpoint + ")";
+    }
+};
 
 // ============================================================================
 // Logging
@@ -174,6 +240,8 @@ public:
 // ============================================================================
 
 struct ScalarFieldDef {
+    //basic definition of a scalar field (a column in a table), it is used to define the user-defined columns in the index, which can be used for filtering and other purposes. 
+    //it is defined in the index configuration and stored in the index state.
     std::string name;
     std::string type;  // "string", "int", "float", "bool"
 
@@ -215,6 +283,8 @@ struct IndexConfig {
     int ef = -1;                  // -1 = default (for HNSW)
 
     // User-defined scalar columns (beyond fixed key/data/metadata)
+    // this sclar schema is defined at index creation time, and it is stored in the index state. 
+    // it is used to create the corresponding columns in the LanceDB table.
     std::vector<ScalarFieldDef> scalar_schema;
 
     json to_json() const {
@@ -417,11 +487,16 @@ bool write_file(const std::string& path, const std::string& content) {
 }
 
 std::string get_bucket_path(const std::string& bucket_name) {
+    if (BackendConfig::instance().is_s3()) {
+        // vectorBucketName IS the S3 bucket — 1:1 mapping with S3 Vectors API
+        return "s3://" + bucket_name;
+    }
     return S3_VECTORS_ROOT + "/" + bucket_name;
 }
 
 std::string get_metadata_path(const std::string& bucket_name) {
-    return get_bucket_path(bucket_name) + "/" + METADATA_DIR_NAME;
+    // Metadata path is always local (used for lock files only)
+    return LOCAL_STATE_ROOT + "/" + bucket_name + "/" + METADATA_DIR_NAME;
 }
 
 std::string get_index_db_path(const std::string& bucket_name, const std::string& index_name) {
@@ -436,18 +511,9 @@ std::string get_index_lock_path(const std::string& bucket_name, const std::strin
 
 // ============================================================================
 // File Lock RAII Class - Uses flock for cross-process synchronization
+// Base_lock interface is defined in base_lock.h
+// S3Lock implementation is in s3_lock.h / s3_lock.cpp
 // ============================================================================
-
-class Base_lock {
-//purpose: it is an abstraction of the locking mechanism, so it can be easily replaced by s3-conditional-write or other mechanism when we move to s3 system. the file lock is for the purpose of this prototype, on s3 storage system it can be achived by s3-conditional-write. the class FileLock implementent the abstraction base class.
-public:
-    virtual ~Base_lock() = default;
-    virtual bool lock_exclusive() = 0;
-    virtual bool try_lock_exclusive() = 0;
-    virtual void unlock() = 0;
-    virtual bool is_locked() const = 0;
-    virtual bool is_valid() const = 0;
-};
 
 class FileLock : public Base_lock {
 //NOTE: it is for the purpose of this prototype, no need for that in S3.
@@ -544,14 +610,30 @@ public:
     bool is_valid() const { return fd_ >= 0; }
 };
 
-
-//TODO : it need to create a fronetend locker class to handle the locking mechanism, and the FileLock class is just one implementation of the locking mechanism. the frontent locker class can be used by the service to acquire locks without worrying about the underlying implementation, and it can be easily extended to support other locking mechanisms in the future.
+// FrontendLocker selects the lock implementation based on the backend:
+// - LOCAL: FileLock (flock-based, for testing/debugging)
+// - S3:   S3Lock (distributed lock using S3 conditional writes)
 class FrontendLocker {
 private:
     std::unique_ptr<Base_lock> lock_;
 public:
-    FrontendLocker(const std::string& lock_path) {
-	lock_ = std::make_unique<FileLock>(lock_path);//or other lock implementation based on the configuration (s3 conditional write or other mechanism)
+    FrontendLocker(const std::string& bucket_name, const std::string& index_name) {
+	if (BackendConfig::instance().is_s3()) {
+	    const auto& cfg = BackendConfig::instance();
+	    S3LockConfig s3cfg;
+	    s3cfg.endpoint = cfg.s3.endpoint;
+	    s3cfg.region = cfg.s3.region;
+	    s3cfg.access_key_id = cfg.s3.access_key_id;
+	    s3cfg.secret_access_key = cfg.s3.secret_access_key;
+	    s3cfg.bucket = bucket_name;  // lock object lives in the vector bucket
+	    s3cfg.lock_key = ".locks/" + index_name + INDEX_LOCK_SUFFIX;
+	    s3cfg.use_path_style = !cfg.s3.addressing_style.empty();
+	    s3cfg.allow_http = cfg.s3.allow_http;
+	    lock_ = std::make_unique<S3Lock>(s3cfg);
+	} else {
+	    std::string lock_path = utils::get_index_lock_path(bucket_name, index_name);
+	    lock_ = std::make_unique<FileLock>(lock_path);
+	}
     }
 
     bool lock_exclusive() {
@@ -642,6 +724,28 @@ public:
         if (!builder) {
             return nullptr;
         }
+
+        // Add S3 storage options when running with S3 backend
+        const auto& cfg = BackendConfig::instance();
+        if (cfg.is_s3()) {
+            const auto& s3 = cfg.s3;
+            if (!s3.endpoint.empty())
+                builder = lancedb_connect_builder_storage_option(builder, "endpoint", s3.endpoint.c_str());
+            if (!s3.region.empty())
+                builder = lancedb_connect_builder_storage_option(builder, "aws_region", s3.region.c_str());
+            if (!s3.access_key_id.empty())
+                builder = lancedb_connect_builder_storage_option(builder, "aws_access_key_id", s3.access_key_id.c_str());
+            if (!s3.secret_access_key.empty())
+                builder = lancedb_connect_builder_storage_option(builder, "aws_secret_access_key", s3.secret_access_key.c_str());
+            if (s3.allow_http)
+                builder = lancedb_connect_builder_storage_option(builder, "allow_http", "true");
+            if (!s3.addressing_style.empty())
+                builder = lancedb_connect_builder_storage_option(builder, "aws_s3_addressing_style", s3.addressing_style.c_str());
+            if (!builder) {
+                return nullptr;
+            }
+        }
+
         LanceDBConnection* conn = lancedb_connect_builder_execute(builder);
         return conn;
     }
@@ -650,6 +754,8 @@ public:
                                        int dimension,
                                        const std::vector<ScalarFieldDef>& scalar_schema,
                                        char** error_msg) {
+	 //the scalar schema includes the fixed columns (key, data, metadata) and the user-defined scalar columns. 
+	 //it is used to create the corresponding columns in the LanceDB table.
         auto schema = create_vector_schema(dimension, scalar_schema);
         struct ArrowSchema c_schema;
         if (!arrow::ExportSchema(*schema, &c_schema).ok()) {
@@ -689,6 +795,8 @@ public:
             return false;
         }
 
+	 //the scalar schema includes the fixed columns (key, data, metadata) and the user-defined scalar columns. 
+	 //it is used to create the corresponding columns in the LanceDB table.
         auto schema = create_vector_schema(dimension, scalar_schema);
 
         // Fixed builders
@@ -699,7 +807,7 @@ public:
             dimension);
         arrow::StringBuilder metadata_builder;
 
-        // Dynamic builders - one per scalar field
+        // Dynamic builders - one per scalar field - searchable columns defined by user in index configuration
         std::vector<std::unique_ptr<arrow::ArrayBuilder>> scalar_builders;
         for (const auto& sf : scalar_schema) {
             if (sf.type == "int") {
@@ -1141,6 +1249,37 @@ public:
         lancedb_connection_free(conn);
         return ok;
     }
+
+    // Check if an index (LanceDB database with "vectors" table) exists.
+    // Works for both local and S3 backends.
+    static bool index_exists(const std::string& bucket, const std::string& index) {
+        std::string db_path = utils::get_index_db_path(bucket, index);
+
+        if (BackendConfig::instance().is_local()) {
+            return utils::directory_exists(db_path);
+        }
+
+        // S3 mode: try to connect and check for the "vectors" table
+        LanceDBConnection* conn = connect(db_path);
+        if (!conn) return false;
+
+        char** table_names = nullptr;
+        size_t count = 0;
+        char* err_msg = nullptr;
+        bool exists = false;
+        if (lancedb_connection_table_names(conn, &table_names, &count, &err_msg) == LANCEDB_SUCCESS) {
+            for (size_t i = 0; i < count; i++) {
+                if (std::string(table_names[i]) == "vectors") {
+                    exists = true;
+                    break;
+                }
+            }
+            if (table_names) lancedb_free_table_names(table_names, count);
+        }
+        if (err_msg) lancedb_free_string(err_msg);
+        lancedb_connection_free(conn);
+        return exists;
+    }
 };
 
 // ============================================================================
@@ -1252,8 +1391,7 @@ public:
 private:
     bool do_rebuild(std::shared_ptr<TableIndexState> state,
                     const LanceDBIndexStats& stats, bool forced) {
-        std::string lock_path = utils::get_index_lock_path(state->bucket_name, state->index_name);
-        FrontendLocker lock(lock_path);
+        FrontendLocker lock(state->bucket_name, state->index_name);
 
         if (!lock.lock_exclusive()) {
             LOG_ERROR("INDEX_BUILDER", state->index_name, "Failed to acquire lock for rebuild");
@@ -1380,23 +1518,39 @@ ApiResponse CreateVectorBucket(const json& request) {
     }
 
     std::string bucket_name = request["vectorBucketName"].get<std::string>();
-    std::string bucket_path = utils::get_bucket_path(bucket_name);
 
-    if (utils::directory_exists(bucket_path)) {
-        return make_error(409, "ConflictException",
-            "Vector bucket '" + bucket_name + "' already exists");
+    if (BackendConfig::instance().is_s3()) {
+        // S3 mode: vectorBucketName IS the S3 bucket — create it
+        const auto& cfg = BackendConfig::instance().s3;
+        S3HttpConfig http_cfg{cfg.endpoint, cfg.region, cfg.access_key_id,
+                              cfg.secret_access_key, !cfg.addressing_style.empty()};
+
+        if (s3_head_bucket(http_cfg, bucket_name).ok) {
+            return make_error(409, "ConflictException",
+                "Vector bucket '" + bucket_name + "' already exists");
+        }
+
+        auto result = s3_create_bucket(http_cfg, bucket_name);
+        if (!result.ok) {
+            return make_error(500, "InternalServerException",
+                "Failed to create S3 bucket (HTTP " + std::to_string(result.http_code) + "): " + result.body);
+        }
+    } else {
+        // Local mode: create directory
+        std::string bucket_path = utils::get_bucket_path(bucket_name);
+        if (utils::directory_exists(bucket_path)) {
+            return make_error(409, "ConflictException",
+                "Vector bucket '" + bucket_name + "' already exists");
+        }
+        if (!utils::create_directories(bucket_path)) {
+            return make_error(500, "InternalServerException",
+                "Failed to create vector bucket directory");
+        }
     }
 
-    if (!utils::create_directories(bucket_path)) {//NOTE: in S3 system there is no real concept of directories, we create a placeholder file to represent the bucket
-        return make_error(500, "InternalServerException",
-            "Failed to create vector bucket directory");
-    }
-
+    // Ensure local metadata dir exists for lock files
     std::string metadata_path = utils::get_metadata_path(bucket_name);
-    if (!utils::create_directory(metadata_path)) {
-        return make_error(500, "InternalServerException",
-            "Failed to create metadata directory");
-    }
+    utils::create_directories(metadata_path);
 
     LOG_INFO("CREATE_BUCKET", bucket_name, "Bucket created");
 
@@ -1461,18 +1615,28 @@ ApiResponse CreateIndex(const json& request) {
         config.distance_metric = "euclidean";
     }
 
-    std::string bucket_path = utils::get_bucket_path(bucket_name);
-    if (!utils::directory_exists(bucket_path)) {
-        return make_error(404, "NotFoundException",
-            "Vector bucket '" + bucket_name + "' not found");
+    if (BackendConfig::instance().is_s3()) {
+        const auto& cfg = BackendConfig::instance().s3;
+        S3HttpConfig http_cfg{cfg.endpoint, cfg.region, cfg.access_key_id,
+                              cfg.secret_access_key, !cfg.addressing_style.empty()};
+        if (!s3_head_bucket(http_cfg, bucket_name).ok) {
+            return make_error(404, "NotFoundException",
+                "Vector bucket '" + bucket_name + "' not found");
+        }
+    } else {
+        std::string bucket_path = utils::get_bucket_path(bucket_name);
+        if (!utils::directory_exists(bucket_path)) {
+            return make_error(404, "NotFoundException",
+                "Vector bucket '" + bucket_name + "' not found");
+        }
     }
 
-    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
-    if (utils::directory_exists(db_path)) {
+    if (LanceDBHelper::index_exists(bucket_name, index_name)) {
         return make_error(409, "ConflictException",
             "Index '" + index_name + "' already exists");
     }
 
+    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
     LanceDBConnection* conn = LanceDBHelper::connect(db_path);
     if (!conn) {
         return make_error(500, "InternalServerException",
@@ -1692,12 +1856,12 @@ ApiResponse DeleteVectors(const json& request) {
     std::string bucket_name = request["vectorBucketName"].get<std::string>();
     std::string index_name = request["indexName"].get<std::string>();
 
-    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
-    if (!utils::directory_exists(db_path)) {
+    if (!LanceDBHelper::index_exists(bucket_name, index_name)) {
         return make_error(404, "NotFoundException",
             "Index '" + index_name + "' not found");
     }
 
+    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
     LanceDBConnection* conn = LanceDBHelper::connect(db_path);
     if (!conn) {
         return make_error(500, "InternalServerException",
@@ -1939,8 +2103,7 @@ ApiResponse GetIndexState(const json& request) {
     std::string bucket_name = request["vectorBucketName"].get<std::string>();
     std::string index_name = request["indexName"].get<std::string>();
 
-    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
-    if (!utils::directory_exists(db_path)) {
+    if (!LanceDBHelper::index_exists(bucket_name, index_name)) {
         return make_error(404, "NotFoundException",
             "Index '" + index_name + "' not found");
     }
@@ -1948,6 +2111,7 @@ ApiResponse GetIndexState(const json& request) {
     auto state = TableStateManager::instance().get_or_create(bucket_name, index_name);
 
     // Get live stats from LanceDB engine
+    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
     LanceDBConnection* conn = LanceDBHelper::connect(db_path);
     if (conn) {
         LanceDBTable* table = LanceDBHelper::open_table(conn, "vectors");
@@ -2148,24 +2312,60 @@ LOGGING:
     - Console (stdout)
     - /tmp/s3vectors/operations.log
 
-STORAGE:
+STORAGE (local backend - default):
     All data is stored under /tmp/s3vectors/
     - Buckets: /tmp/s3vectors/<bucket-name>/
     - Indices: /tmp/s3vectors/<bucket-name>/<index-name>_lancedb/
     - State:   Stored in LanceDB table metadata (key: s3v_index_state)
+    - Locks:   /tmp/s3vectors/<bucket-name>/.s3v_metadata/<index-name>_index.lock
+
+STORAGE (S3 backend):
+    vectorBucketName maps 1:1 to an S3 bucket:
+    - Buckets: s3://<vectorBucketName>/  (created by CreateVectorBucket)
+    - Indices: s3://<vectorBucketName>/<index-name>_lancedb/
+    - State:   Stored in LanceDB table metadata (key: s3v_index_state)
+    - Locks:   S3 objects at s3://<vectorBucketName>/.locks/<index-name>_index.lock
+    - Logs:    Local /tmp/s3vectors/operations.log
+
+S3 BACKEND CONFIGURATION (via environment variables):
+    S3V_BACKEND=s3              Enable S3 backend (default: local)
+    S3V_ENDPOINT                S3 endpoint URL (e.g. http://localhost:8000)
+    S3V_REGION                  AWS region (e.g. us-east-1)
+    S3V_ACCESS_KEY_ID           AWS access key ID
+    S3V_SECRET_ACCESS_KEY       AWS secret access key
+    S3V_ALLOW_HTTP=true         Allow HTTP (non-HTTPS) endpoints
+    S3V_ADDRESSING_STYLE=path   Use path-style addressing (for Ceph/RGW)
+
+S3 BACKEND EXAMPLE (Ceph/RGW):
+    export S3V_BACKEND=s3
+    export S3V_ENDPOINT=http://localhost:8000
+    export S3V_REGION=us-east-1
+    export S3V_ACCESS_KEY_ID=<your-access-key>
+    export S3V_SECRET_ACCESS_KEY=<your-secret-key>
+    export S3V_ALLOW_HTTP=true
+    export S3V_ADDRESSING_STYLE=path
+    ./s3vector_concurrent_service CreateVectorBucket '{"vectorBucketName": "my-vectors"}'
 
 )";
 }
 
 int main(int argc, char* argv[]) {
-    // Ensure root directory exists
-    if (!utils::directory_exists(S3_VECTORS_ROOT)) {
+    // Initialize backend configuration from environment variables
+    BackendConfig::instance().init_from_env();
+
+    // Ensure local directories exist (for log file and lock files)
+    if (!utils::directory_exists(LOCAL_STATE_ROOT)) {
+        utils::create_directories(LOCAL_STATE_ROOT);
+    }
+    if (BackendConfig::instance().is_local() && !utils::directory_exists(S3_VECTORS_ROOT)) {
         utils::create_directories(S3_VECTORS_ROOT);
     }
 
-    // Initialize logger
-    std::string log_path = S3_VECTORS_ROOT + "/" + LOG_FILE_NAME;
+    // Initialize logger (always local)
+    std::string log_path = LOCAL_STATE_ROOT + "/" + LOG_FILE_NAME;
     Logger::instance().init(log_path, Logger::INFO, true);
+
+    LOG_INFO("INIT", "", "Backend: " + BackendConfig::instance().describe());
 
     if (argc < 2) {
         print_help();
