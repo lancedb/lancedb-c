@@ -101,7 +101,7 @@ int main() {
     std::cerr << "failed to create connection builder" << std::endl;
     return 1;
   }
-  LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+  LanceDBConnection* db = lancedb_connect_builder_execute(builder, nullptr);
   if (!db) {
     std::cerr << "failed to connect to database" << std::endl;
     return 1;
@@ -135,7 +135,7 @@ int main() {
   LanceDBTable* table = nullptr;
   if (const LanceDBError result = lancedb_table_create(db, table_name.c_str(),
         reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
-        nullptr, &table, nullptr); result != LANCEDB_SUCCESS) {
+        nullptr, &table, nullptr, nullptr); result != LANCEDB_SUCCESS) {
     std::cerr << "error creating table: " << table_name << ", error: " << lancedb_error_to_message(result) << std::endl;
     lancedb_connection_free(db);
     if (c_schema.release) {
@@ -149,7 +149,7 @@ int main() {
   // try to create a table that already exists
   if (const LanceDBError result = lancedb_table_create(db, "my_table",
         reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
-        nullptr, &table, &error_message); result != LANCEDB_SUCCESS) {
+        nullptr, &table, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cout << "failed to create table that already exists (expected), error: '" <<
       lancedb_error_to_message(result) <<
       "' message: " << std::endl << error_message << std::endl;
@@ -162,7 +162,7 @@ int main() {
   // try to create a table with invalid name
   if (const LanceDBError result = lancedb_table_create(db, "invalid table name",
         reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
-        nullptr, &table, &error_message); result != LANCEDB_SUCCESS) {
+        nullptr, &table, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cout << "failed to create table with invalid name (expected), error: '" <<
       lancedb_error_to_message(result) <<
       "' message: " << std::endl << error_message << std::endl;
@@ -179,7 +179,7 @@ int main() {
   // try to create a table with invalid input (null schema)
   if (const LanceDBError result = lancedb_table_create(db, "invalid_table",
         nullptr,
-        nullptr, &table, &error_message); result != LANCEDB_SUCCESS) {
+        nullptr, &table, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cout << "failed to create table with null schema (expected), error: '" <<
       lancedb_error_to_message(result) <<
       "' message: " << std::endl << error_message << std::endl;
@@ -190,7 +190,7 @@ int main() {
   }
 
   // open the table to work with it
-  LanceDBTable* tbl = lancedb_connection_open_table(db, table_name.c_str());
+  LanceDBTable* tbl = lancedb_connection_open_table(db, table_name.c_str(), nullptr);
   if (!tbl) {
     std::cerr << "failed to open table: " << table_name << std::endl;
     lancedb_connection_free(db);
@@ -204,7 +204,7 @@ int main() {
     .force_update_statistics = 0     // don't force update statistics
   };
   if (const LanceDBError result = lancedb_table_create_scalar_index(
-        tbl, key_columns, 1, LANCEDB_INDEX_BTREE, &scalar_config, nullptr); result != LANCEDB_SUCCESS) {
+        tbl, key_columns, 1, LANCEDB_INDEX_BTREE, &scalar_config, nullptr, nullptr); result != LANCEDB_SUCCESS) {
     std::cerr << "failed to create scalar index on 'key' column, error: '" <<
       lancedb_error_to_message(result) << "'" << std::endl;
   } else {
@@ -214,7 +214,7 @@ int main() {
   // try to create the same index again without replace flag
   scalar_config.replace = 0;
   if (const LanceDBError result = lancedb_table_create_scalar_index(
-        tbl, key_columns, 1, LANCEDB_INDEX_BTREE, &scalar_config, &error_message); result != LANCEDB_SUCCESS) {
+        tbl, key_columns, 1, LANCEDB_INDEX_BTREE, &scalar_config, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cout << "failed to create scalar index on 'key' column (expected), error: '" <<
       lancedb_error_to_message(result) <<
       "' message: " << std::endl << error_message << std::endl;
@@ -266,7 +266,7 @@ int main() {
           reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
           &batch_reader, nullptr); error == LANCEDB_SUCCESS) {
       // add data to table
-      if (const LanceDBError result = lancedb_table_add(tbl, batch_reader, nullptr); result != LANCEDB_SUCCESS) {
+      if (const LanceDBError result = lancedb_table_add(tbl, batch_reader, nullptr, nullptr); result != LANCEDB_SUCCESS) {
         std::cerr << "failed to write record batch to table, error: " << lancedb_error_to_message(result) << std::endl;
       } else {
         std::cout << "wrote " << num_rows << " rows to table" << std::endl;
@@ -295,7 +295,7 @@ int main() {
     .replace = 1                     // replace existing index
   };
   if (const LanceDBError result = lancedb_table_create_vector_index(
-        tbl, data_columns, 1, LANCEDB_INDEX_IVF_FLAT, &vector_config, nullptr); result != LANCEDB_SUCCESS) {
+        tbl, data_columns, 1, LANCEDB_INDEX_IVF_FLAT, &vector_config, nullptr, nullptr); result != LANCEDB_SUCCESS) {
     std::cerr << "failed to create vector index on 'data' column, error: " << lancedb_error_to_message(result) << std::endl;
   } else {
     std::cout << "created vector index on 'data' column" << std::endl;
@@ -309,7 +309,7 @@ int main() {
   };
   for (size_t i = 0; i < 3; i++) {
     if (const LanceDBError result = lancedb_table_create_scalar_index(
-          tbl, &tag_columns[i], 1, LANCEDB_INDEX_BITMAP, &bitmap_config, nullptr); result != LANCEDB_SUCCESS) {
+          tbl, &tag_columns[i], 1, LANCEDB_INDEX_BITMAP, &bitmap_config, nullptr, nullptr); result != LANCEDB_SUCCESS) {
       std::cerr << "failed to create bitmap index on '" << tag_columns[i] << "' column, error: " << lancedb_error_to_message(result) << std::endl;
     } else {
       std::cout << "created bitmap index on '" << tag_columns[i] << "' column" << std::endl;
@@ -336,7 +336,7 @@ int main() {
         "data",
         reinterpret_cast<FFI_ArrowArray***>(&c_arrays_ptr),
         reinterpret_cast<FFI_ArrowSchema**>(&c_schema_ptr),
-        &count_out, nullptr); result != LANCEDB_SUCCESS) {
+        &count_out, nullptr, nullptr); result != LANCEDB_SUCCESS) {
     std::cerr << "error querying nearest to vector, error: " << lancedb_error_to_message(result) << std::endl;
   } else {
     std::cout << "query returned " << count_out << " results" << std::endl;
@@ -375,7 +375,7 @@ int main() {
             } else {
               std::cout << "set query distance type to: L2" << std::endl;
               // execute the query
-              if (LanceDBQueryResult* query_result = lancedb_vector_query_execute(query); query_result) {
+              if (LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr); query_result) {
                 std::cout << "executed query" << std::endl;
                 // get the result as arrow arrays
                 struct ArrowArray** c_arrays_ptr;
@@ -386,6 +386,7 @@ int main() {
                       reinterpret_cast<FFI_ArrowArray***>(&c_arrays_ptr),
                       reinterpret_cast<FFI_ArrowSchema**>(&c_schema_ptr),
                       &count_out,
+                      nullptr,
                       nullptr); result != LANCEDB_SUCCESS) {
                   std::cerr << "error converting query result to arrow, error: " << lancedb_error_to_message(result) << std::endl;
                   lancedb_query_result_free(query_result);
@@ -410,19 +411,19 @@ int main() {
   // list all tables in the database and loop through them
   char** table_names;
   size_t name_count;
-  if (const LanceDBError result = lancedb_connection_table_names(db, &table_names, &name_count, nullptr); result != LANCEDB_SUCCESS) {
+  if (const LanceDBError result = lancedb_connection_table_names(db, &table_names, &name_count, nullptr, nullptr); result != LANCEDB_SUCCESS) {
     std::cerr << "error listing table names, error: " << lancedb_error_to_message(result) << std::endl;
   } else {
     std::cout << name_count << " tables found" << std::endl;
     for (size_t i = 0; i < name_count; i++) {
-      if (LanceDBTable* tbl = lancedb_connection_open_table(db, table_names[i]); tbl) {
+      if (LanceDBTable* tbl = lancedb_connection_open_table(db, table_names[i], nullptr); tbl) {
 
         // get the schema of the table
         struct ArrowSchema* c_schema_ptr;
         if (const LanceDBError result = lancedb_table_arrow_schema(
               tbl,
               reinterpret_cast<FFI_ArrowSchema**>(&c_schema_ptr),
-              nullptr); result == LANCEDB_SUCCESS) {
+              nullptr, nullptr); result == LANCEDB_SUCCESS) {
           if (auto schema = arrow::ImportSchema(c_schema_ptr); schema.ok()) {
             std::cout << "table: " << table_names[i] << ", schema:" << std::endl;
             std::cout << (*schema)->ToString() << std::endl;
@@ -437,14 +438,14 @@ int main() {
         // list all indices of the table
         char** indices;
         size_t indices_count;
-        if (const LanceDBError result = lancedb_table_list_indices(tbl, &indices, &indices_count, nullptr); result != LANCEDB_SUCCESS) {
+        if (const LanceDBError result = lancedb_table_list_indices(tbl, &indices, &indices_count, nullptr, nullptr); result != LANCEDB_SUCCESS) {
           std::cerr << "failed to list indices, error: " << lancedb_error_to_message(result) << std::endl;
         } else {
           std::cout << "found " << indices_count << " indices:" << std::endl;
           for (size_t i = 0; i < indices_count; i++) {
             std::cout << "  - " << indices[i] << std::endl;
             // delete the index
-            if (const LanceDBError result = lancedb_table_drop_index(tbl, indices[i], nullptr); result != LANCEDB_SUCCESS) {
+            if (const LanceDBError result = lancedb_table_drop_index(tbl, indices[i], nullptr, nullptr); result != LANCEDB_SUCCESS) {
               std::cerr << "    error dropping index: " << indices[i] << ", error: " << lancedb_error_to_message(result) << std::endl;
             } else {
               std::cout << "    dropped index: " << indices[i] << std::endl;
@@ -454,27 +455,27 @@ int main() {
         }
 
         // optimize the table after index deletion
-        if (const LanceDBError result = lancedb_table_optimize(tbl, LANCEDB_OPTIMIZE_ALL, nullptr); result != LANCEDB_SUCCESS) {
+        if (const LanceDBError result = lancedb_table_optimize(tbl, LANCEDB_OPTIMIZE_ALL, nullptr, nullptr); result != LANCEDB_SUCCESS) {
           std::cerr << "error optimizing table: " << table_names[i] << ", error: " << lancedb_error_to_message(result) << std::endl;
         } else {
           std::cout << "optimized table: " << table_names[i] << std::endl;
         }
 
         // number of rows in the table
-        auto row_count = lancedb_table_count_rows(tbl);
+        auto row_count = lancedb_table_count_rows(tbl, nullptr);
         std::cout << "table: " << table_names[i] << " has: " << row_count << " rows" << std::endl;
 
         // delete some rows
         const auto delete_predicates = {"key = \"key_10\"", "key = \"key_20\"", "key = \"key_30\"", "key = \"kaboom\""};
         for (const auto& predicate : delete_predicates) {
-          if (const LanceDBError result = lancedb_table_delete(tbl, predicate, nullptr); result != LANCEDB_SUCCESS) {
+          if (const LanceDBError result = lancedb_table_delete(tbl, predicate, nullptr, nullptr); result != LANCEDB_SUCCESS) {
             std::cerr << "error deleting row with predicate: " << predicate << ", error: " << lancedb_error_to_message(result) << std::endl;
           } else {
             std::cout << "deleted row with predicate: " << predicate << std::endl;
           }
         }
         // check number of rows in the table after deletion
-        row_count = lancedb_table_count_rows(tbl);
+        row_count = lancedb_table_count_rows(tbl, nullptr);
         std::cout << "after deletion table: " << table_names[i] << " has: " << row_count << " rows" << std::endl;
 
         // perform table upsert with 3 new rows and 3 updated rows
@@ -535,6 +536,7 @@ int main() {
                   on_columns.data(),
                   1,
                   &config,
+                  nullptr,
                   &error_message); result != LANCEDB_SUCCESS) {
               std::cerr << "failed to upsert record batch to table, error: " << lancedb_error_to_message(result) << ", message: " << error_message << std::endl;
               lancedb_free_string(error_message);
@@ -554,11 +556,11 @@ int main() {
         }
 
         // check number of rows in the table after upsert
-        row_count = lancedb_table_count_rows(tbl);
+        row_count = lancedb_table_count_rows(tbl, nullptr);
         std::cout << "after upsert table: " << table_names[i] << " has: " << row_count << " rows" << std::endl;
 
         // drop the table
-        if (LanceDBError result = lancedb_connection_drop_table(db, table_names[i], nullptr, nullptr); result != LANCEDB_SUCCESS) {
+        if (LanceDBError result = lancedb_connection_drop_table(db, table_names[i], nullptr, nullptr, nullptr); result != LANCEDB_SUCCESS) {
           std::cerr << "error dropping table: " << table_names[i] << ", error: " << lancedb_error_to_message(result) << std::endl;
         } else {
           std::cout << "dropped table: " << table_names[i] << std::endl;
@@ -571,7 +573,7 @@ int main() {
   }
 
   lancedb_free_table_names(table_names, name_count);
-  if (const LanceDBError result = lancedb_connection_drop_all_tables(db, nullptr, nullptr); result != LANCEDB_SUCCESS) {
+  if (const LanceDBError result = lancedb_connection_drop_all_tables(db, nullptr, nullptr, nullptr); result != LANCEDB_SUCCESS) {
     std::cerr << "error dropping all tables, error: " << lancedb_error_to_message(result) << std::endl;
   } else {
     std::cout << "dropped all tables" << std::endl;

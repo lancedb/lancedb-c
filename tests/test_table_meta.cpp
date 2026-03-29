@@ -18,7 +18,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
     size_t count = 0;
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_list_versions(table, &versions, nullptr, &count, &error_message);
+    LanceDBError result = lancedb_table_list_versions(table, &versions, nullptr, &count, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -41,7 +41,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
   SECTION("List versions after adding data") {
     const std::string table_name = "versions_add_test";
     create_empty_table(table_name);
-    LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str());
+    LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str(), nullptr);
     REQUIRE(table != nullptr);
 
     // Add data 3 times to create versions 2, 3, 4
@@ -51,7 +51,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
       auto reader = create_reader_from_batch(batch);
       REQUIRE(reader != nullptr);
 
-      LanceDBError add_result = lancedb_table_add(table, reader, &error_message);
+      LanceDBError add_result = lancedb_table_add(table, reader, nullptr, &error_message);
       REQUIRE(add_result == LANCEDB_SUCCESS);
       REQUIRE(error_message == nullptr);
     }
@@ -59,7 +59,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
     LanceDBVersion* versions = nullptr;
     size_t count = 0;
 
-    LanceDBError result = lancedb_table_list_versions(table, &versions, nullptr, &count, &error_message);
+    LanceDBError result = lancedb_table_list_versions(table, &versions, nullptr, &count, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -81,7 +81,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
     size_t count = 0;
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_list_versions(table, &versions, &metadata, &count, &error_message);
+    LanceDBError result = lancedb_table_list_versions(table, &versions, &metadata, &count, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -102,7 +102,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
     size_t count = 0;
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_list_versions(nullptr, &versions, nullptr, &count, &error_message);
+    LanceDBError result = lancedb_table_list_versions(nullptr, &versions, nullptr, &count, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
@@ -117,7 +117,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
     char* error_message = nullptr;
     size_t count = 0;
 
-    LanceDBError result = lancedb_table_list_versions(table, nullptr, nullptr, &count, &error_message);
+    LanceDBError result = lancedb_table_list_versions(table, nullptr, nullptr, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
@@ -143,7 +143,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema", "[table]") {
     FFI_ArrowSchema* schema_out = nullptr;
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_arrow_schema(table, &schema_out, &error_message);
+    LanceDBError result = lancedb_table_arrow_schema(table, &schema_out, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -169,7 +169,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema", "[table]") {
     FFI_ArrowSchema* schema_out = nullptr;
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_arrow_schema(nullptr, &schema_out, &error_message);
+    LanceDBError result = lancedb_table_arrow_schema(nullptr, &schema_out, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
@@ -183,7 +183,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema", "[table]") {
 
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_arrow_schema(table, nullptr, &error_message);
+    LanceDBError result = lancedb_table_arrow_schema(table, nullptr, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
@@ -210,7 +210,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     size_t count = 0;
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, &error_message);
+    LanceDBError result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -232,7 +232,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     });
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_set_metadata(table, set_keys.get(), set_values.get(), expected.size(), &error_message);
+    LanceDBError result = lancedb_table_set_metadata(table, set_keys.get(), set_values.get(), expected.size(), nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -241,7 +241,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, &error_message);
+    result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(count == expected.size());
@@ -276,7 +276,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     REQUIRE(expected.size() == filter_length-1);
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, set_length, &error_message);
+    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, set_length, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -285,7 +285,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    result = lancedb_table_get_metadata(table, filter_keys, filter_length, &keys, &values, &count, &error_message);
+    result = lancedb_table_get_metadata(table, filter_keys, filter_length, &keys, &values, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(count == expected.size());
@@ -316,7 +316,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     }
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, set_length, &error_message);
+    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, set_length, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -324,7 +324,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    result = lancedb_table_get_metadata(table, filter_keys, filter_length, &keys, &values, &count, &error_message);
+    result = lancedb_table_get_metadata(table, filter_keys, filter_length, &keys, &values, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(count == expected.size());
@@ -343,7 +343,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     const char* set_values[] = {"valid_value"};
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, 1, &error_message);
+    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, 1, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -354,7 +354,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    result = lancedb_table_get_metadata(table, filter_keys, 1, &keys, &values, &count, &error_message);
+    result = lancedb_table_get_metadata(table, filter_keys, 1, &keys, &values, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
@@ -365,13 +365,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     const char* set_values[] = {"red"};
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, 1, &error_message);
+    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, 1, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Update the value
     const char* update_values[] = {"blue"};
-    result = lancedb_table_set_metadata(table, set_keys, update_values, 1, &error_message);
+    result = lancedb_table_set_metadata(table, set_keys, update_values, 1, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -380,7 +380,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, &error_message);
+    result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(count == 1);
@@ -413,11 +413,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
 
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, set_length, &error_message);
+    LanceDBError result = lancedb_table_set_metadata(table, set_keys, set_values, set_length, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    result = lancedb_table_delete_metadata(table, del_keys, del_length, &error_message);
+    result = lancedb_table_delete_metadata(table, del_keys, del_length, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -426,7 +426,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, &error_message);
+    result = lancedb_table_get_metadata(table, nullptr, 0, &keys, &values, &count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(count == expected.size());
@@ -445,7 +445,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     const char* del_keys[] = {"nonexistent"};
     char* error_message = nullptr;
 
-    LanceDBError result = lancedb_table_delete_metadata(table, del_keys, 1, &error_message);
+    LanceDBError result = lancedb_table_delete_metadata(table, del_keys, 1, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
   }
@@ -456,25 +456,25 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     // Null table
     const char* keys[] = {"k"};
     const char* values[] = {"v"};
-    REQUIRE(lancedb_table_set_metadata(nullptr, keys, values, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_set_metadata(nullptr, keys, values, 1, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
     // Null keys
-    REQUIRE(lancedb_table_set_metadata(table, nullptr, values, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_set_metadata(table, nullptr, values, 1, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
     // Null values
-    REQUIRE(lancedb_table_set_metadata(table, keys, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_set_metadata(table, keys, nullptr, 1, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
     // Zero count
-    REQUIRE(lancedb_table_set_metadata(table, keys, values, 0, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_set_metadata(table, keys, values, 0, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
   }
@@ -485,25 +485,25 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
     char** values = nullptr;
     size_t count = 0;
 
-    REQUIRE(lancedb_table_get_metadata(nullptr, nullptr, 0, &keys, &values, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_metadata(nullptr, nullptr, 0, &keys, &values, &count, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
-    REQUIRE(lancedb_table_get_metadata(table, nullptr, 0, nullptr, &values, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_metadata(table, nullptr, 0, nullptr, &values, &count, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
     // Null filter_keys with non-zero filter_count
-    REQUIRE(lancedb_table_get_metadata(table, nullptr, 1, &keys, &values, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_metadata(table, nullptr, 1, &keys, &values, &count, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
     // Non-null filter_keys with zero filter_count
     const char* filter[] = {"k"};
-    REQUIRE(lancedb_table_get_metadata(table, filter, 0, &keys, &values, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_metadata(table, filter, 0, &keys, &values, &count, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
   }
@@ -511,12 +511,12 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata", "[table]") {
   SECTION("Delete metadata with null arguments should fail") {
     char* error_message = nullptr;
 
-    REQUIRE(lancedb_table_delete_metadata(nullptr, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_delete_metadata(nullptr, nullptr, 1, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
-    REQUIRE(lancedb_table_delete_metadata(table, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_delete_metadata(table, nullptr, 1, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
   }

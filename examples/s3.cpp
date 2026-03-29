@@ -35,7 +35,7 @@ LanceDBTable* create_empty_table(LanceDBConnection* db) {
   char* error_message = nullptr;
   if (const LanceDBError result = lancedb_table_create(db, table_name.c_str(),
         reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
-        nullptr, &tbl, &error_message); result != LANCEDB_SUCCESS) {
+        nullptr, &tbl, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cerr << "error creating table: " << table_name << ", error: " << error_message << std::endl;
     lancedb_connection_free(db);
     lancedb_free_string(error_message);
@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
   builder = lancedb_connect_builder_storage_option(builder, "allow_http", "true");
   builder = lancedb_connect_builder_storage_option(builder, "aws_s3_addressing_style", "path");
 
-  LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+  LanceDBConnection* db = lancedb_connect_builder_execute(builder, nullptr);
   if (!db) {
     std::cerr << "failed to connect to database" << std::endl;
     return 1;
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
   char** table_names;
   size_t name_count;
   char* error_message = nullptr;
-  if (const LanceDBError result = lancedb_connection_table_names(db, &table_names, &name_count, &error_message); result != LANCEDB_SUCCESS) {
+  if (const LanceDBError result = lancedb_connection_table_names(db, &table_names, &name_count, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cerr << "error listing table names, error: " << error_message << std::endl;
     lancedb_free_string(error_message);
   } else {
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
     lancedb_free_table_names(table_names, name_count);
   }
 
-  if (const LanceDBError result = lancedb_connection_drop_table(db, "empty_table", nullptr, &error_message); result != LANCEDB_SUCCESS) {
+  if (const LanceDBError result = lancedb_connection_drop_table(db, "empty_table", nullptr, nullptr, &error_message); result != LANCEDB_SUCCESS) {
     std::cerr << "error dropping table, error: " << error_message << std::endl;
     lancedb_free_string(error_message);
   } else {

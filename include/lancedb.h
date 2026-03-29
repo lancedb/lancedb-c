@@ -55,6 +55,14 @@ typedef struct LanceDBQueryResult LanceDBQueryResult;
 typedef struct LanceDBSession LanceDBSession;
 
 /**
+ * Opaque handle to a Runtime
+ *
+ * When passed as NULL to API functions, the global runtime is used.
+ * Create with lancedb_runtime_new(), free with lancedb_runtime_free().
+ */
+typedef struct LanceDBRuntime LanceDBRuntime;
+
+/**
  * Opaque handle to Arrow RecordBatchReader
  */
 typedef struct LanceDBRecordBatchReader LanceDBRecordBatchReader;
@@ -279,7 +287,7 @@ LanceDBConnectBuilder* lancedb_connect(const char* uri);
  * On success, the builder is consumed by this function and must not be used after calling.
  * The returned connection must be freed with lancedb_connection_free().
  */
-LanceDBConnection* lancedb_connect_builder_execute(LanceDBConnectBuilder* builder);
+LanceDBConnection* lancedb_connect_builder_execute(LanceDBConnectBuilder* builder, const LanceDBRuntime* runtime);
 
 
 /**
@@ -345,6 +353,7 @@ LanceDBError lancedb_connection_table_names(
     const LanceDBConnection* connection,
     char*** names_out,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -417,6 +426,7 @@ LanceDBError lancedb_table_names_builder_execute(
     LanceDBTableNamesBuilder* builder,
     char*** names_out,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -440,7 +450,8 @@ void lancedb_table_names_builder_free(LanceDBTableNamesBuilder* builder);
  */
 LanceDBTable* lancedb_connection_open_table(
     const LanceDBConnection* connection,
-    const char* table_name
+    const char* table_name,
+    const LanceDBRuntime* runtime
 );
 
 /**
@@ -459,6 +470,7 @@ LanceDBError lancedb_connection_drop_table(
     const LanceDBConnection* connection,
     const char* table_name,
     const char* _namespace,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -483,6 +495,7 @@ LanceDBError lancedb_connection_rename_table(
     const char* new_name,
     const char* cur_namespace,
     const char* new_namespace,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -500,6 +513,7 @@ LanceDBError lancedb_connection_rename_table(
 LanceDBError lancedb_connection_drop_all_tables(
     const LanceDBConnection* connection,
     const char* _namespace,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -517,6 +531,7 @@ LanceDBError lancedb_connection_drop_all_tables(
 LanceDBError lancedb_connection_create_namespace(
     const LanceDBConnection* connection,
     const char* namespace_name,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -534,6 +549,7 @@ LanceDBError lancedb_connection_create_namespace(
 LanceDBError lancedb_connection_drop_namespace(
     const LanceDBConnection* connection,
     const char* namespace_name,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -556,6 +572,7 @@ LanceDBError lancedb_connection_list_namespaces(
     const char* namespace_parent,
     char*** namespaces_out,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -602,6 +619,7 @@ LanceDBSession* lancedb_session_new(const LanceDBSessionOptions* options);
 LanceDBError lancedb_session_index_cache_stats(
     const LanceDBSession* session,
     LanceDBSessionCacheStats* out_stats,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -619,6 +637,7 @@ LanceDBError lancedb_session_index_cache_stats(
 LanceDBError lancedb_session_metadata_cache_stats(
     const LanceDBSession* session,
     LanceDBSessionCacheStats* out_stats,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -630,6 +649,25 @@ LanceDBError lancedb_session_metadata_cache_stats(
  * After calling this function, the session pointer must not be used.
  */
 void lancedb_session_free(LanceDBSession* session);
+
+/**
+ * Create a new Runtime
+ *
+ * @return Non-null pointer to LanceDBRuntime on success, NULL on failure
+ *
+ * The returned runtime must be freed with lancedb_runtime_free().
+ * When passed to API functions, this runtime is used instead of the global one.
+ */
+LanceDBRuntime* lancedb_runtime_new(void);
+
+/**
+ * Free a Runtime
+ *
+ * @param runtime - pointer to LanceDBRuntime returned from lancedb_runtime_new()
+ *
+ * After calling this function, the runtime pointer must not be used.
+ */
+void lancedb_runtime_free(LanceDBRuntime* runtime);
 
 /**
  * Free a Table
@@ -663,6 +701,7 @@ LanceDBError lancedb_table_create(
     const FFI_ArrowSchema* schema_ptr,
     LanceDBRecordBatchReader* reader,
     LanceDBTable** table_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -681,6 +720,7 @@ LanceDBError lancedb_table_create(
 LanceDBError lancedb_table_arrow_schema(
     const LanceDBTable* table,
     FFI_ArrowSchema** schema_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -690,7 +730,7 @@ LanceDBError lancedb_table_arrow_schema(
  * @param table - pointer to LanceDBTable
  * @return Table version number on success, 0 on failure
  */
-unsigned long long lancedb_table_version(const LanceDBTable* table);
+unsigned long long lancedb_table_version(const LanceDBTable* table, const LanceDBRuntime* runtime);
 
 /**
  * Count rows in table
@@ -698,7 +738,7 @@ unsigned long long lancedb_table_version(const LanceDBTable* table);
  * @param table - pointer to LanceDBTable
  * @return Number of rows in table on success, 0 on failure (or empty table)
  */
-unsigned long long lancedb_table_count_rows(const LanceDBTable* table);
+unsigned long long lancedb_table_count_rows(const LanceDBTable* table, const LanceDBRuntime* runtime);
 
 /**
  * Add data to table using Arrow RecordBatchReader
@@ -716,6 +756,7 @@ unsigned long long lancedb_table_count_rows(const LanceDBTable* table);
 LanceDBError lancedb_table_add(
     const LanceDBTable* table,
     LanceDBRecordBatchReader* reader,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -743,6 +784,7 @@ LanceDBError lancedb_table_merge_insert(
     const char* const* on_columns,
     size_t num_columns,
     const LanceDBMergeInsertConfig* config,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -760,6 +802,7 @@ LanceDBError lancedb_table_merge_insert(
 LanceDBError lancedb_table_delete(
     const LanceDBTable* table,
     const char* predicate,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1080,7 +1123,7 @@ LanceDBError lancedb_vector_query_ef(
  * @return Pointer to LanceDBQueryResult on success, NULL on failure
  *         Caller must free with lancedb_query_result_free()
  */
-LanceDBQueryResult* lancedb_query_execute(LanceDBQuery* query);
+LanceDBQueryResult* lancedb_query_execute(LanceDBQuery* query, const LanceDBRuntime* runtime);
 
 /**
  * Execute vector query and return streaming result
@@ -1089,7 +1132,7 @@ LanceDBQueryResult* lancedb_query_execute(LanceDBQuery* query);
  * @return Pointer to LanceDBQueryResult on success, NULL on failure
  *         Caller must free with lancedb_query_result_free()
  */
-LanceDBQueryResult* lancedb_vector_query_execute(LanceDBVectorQuery* query);
+LanceDBQueryResult* lancedb_vector_query_execute(LanceDBVectorQuery* query, const LanceDBRuntime* runtime);
 
 /**
  * Convert query result to Arrow RecordBatch arrays
@@ -1110,6 +1153,7 @@ LanceDBError lancedb_query_result_to_arrow(
     struct FFI_ArrowArray*** result_arrays,
     struct FFI_ArrowSchema** result_schema,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1161,6 +1205,7 @@ LanceDBError lancedb_table_nearest_to(
     struct FFI_ArrowArray*** result_arrays,
     struct FFI_ArrowSchema** result_schema,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1221,6 +1266,7 @@ LanceDBError lancedb_table_create_vector_index(
     size_t num_columns,
     LanceDBIndexType index_type,
     const LanceDBVectorIndexConfig* config,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1244,6 +1290,7 @@ LanceDBError lancedb_table_create_scalar_index(
     size_t num_columns,
     LanceDBIndexType index_type,
     const LanceDBScalarIndexConfig* config,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1265,6 +1312,7 @@ LanceDBError lancedb_table_create_fts_index(
     const char* const* columns,
     size_t num_columns,
     const LanceDBFtsIndexConfig* config,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1285,6 +1333,7 @@ LanceDBError lancedb_table_list_indices(
     const LanceDBTable* table,
     char*** indices_out,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1302,6 +1351,7 @@ LanceDBError lancedb_table_list_indices(
 LanceDBError lancedb_table_drop_index(
     const LanceDBTable* table,
     const char* index_name,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1319,6 +1369,7 @@ LanceDBError lancedb_table_drop_index(
 LanceDBError lancedb_table_optimize(
     const LanceDBTable* table,
     LanceDBOptimizeType optimize_type,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1356,6 +1407,7 @@ LanceDBError lancedb_table_index_stats(
     const LanceDBTable* table,
     const char* index_name,
     LanceDBIndexStats* stats_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1393,6 +1445,7 @@ LanceDBError lancedb_table_list_versions(
     LanceDBVersion** versions_out,
     LanceDBVersionMetadata** metadata_out,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1425,6 +1478,7 @@ LanceDBError lancedb_table_get_metadata(
     char*** keys_out,
     char*** values_out,
     size_t* count_out,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1447,6 +1501,7 @@ LanceDBError lancedb_table_set_metadata(
     const char* const* keys,
     const char* const* values,
     size_t count,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 
@@ -1467,6 +1522,7 @@ LanceDBError lancedb_table_delete_metadata(
     const LanceDBTable* table,
     const char* const* keys,
     size_t count,
+    const LanceDBRuntime* runtime,
     char** error_message
 );
 

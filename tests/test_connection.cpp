@@ -26,7 +26,7 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
     REQUIRE(builder != nullptr);
     builder = lancedb_connect_builder_session(builder, nullptr);
     REQUIRE(builder != nullptr);
-    LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+    LanceDBConnection* db = lancedb_connect_builder_execute(builder, nullptr);
     REQUIRE(db != nullptr);
     lancedb_connection_free(db);
   }
@@ -70,7 +70,7 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
     REQUIRE(builder != nullptr);
     builder = lancedb_connect_builder_session(builder, session);
     REQUIRE(builder != nullptr);
-    LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+    LanceDBConnection* db = lancedb_connect_builder_execute(builder, nullptr);
     REQUIRE(db != nullptr);
     lancedb_connection_free(db);
     lancedb_session_free(session);
@@ -80,7 +80,7 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
     REQUIRE(builder != nullptr);
     builder = lancedb_connect_builder_session(builder, nullptr);
     REQUIRE(builder != nullptr);
-    LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+    LanceDBConnection* db = lancedb_connect_builder_execute(builder, nullptr);
     REQUIRE(db != nullptr);
     lancedb_connection_free(db);
   }
@@ -114,10 +114,10 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Session", "[connection]") {
     LanceDBSessionCacheStats index_stats{};
     LanceDBSessionCacheStats metadata_stats{};
     char* error_message = nullptr;
-    auto index_result = lancedb_session_index_cache_stats(session, &index_stats, &error_message);
+    auto index_result = lancedb_session_index_cache_stats(session, &index_stats, nullptr, &error_message);
     REQUIRE(index_result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    auto metadata_result = lancedb_session_metadata_cache_stats(session, &metadata_stats, &error_message);
+    auto metadata_result = lancedb_session_metadata_cache_stats(session, &metadata_stats, nullptr, &error_message);
     REQUIRE(metadata_result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     lancedb_session_free(session);
@@ -127,12 +127,12 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Session", "[connection]") {
     REQUIRE(session != nullptr);
     LanceDBSessionCacheStats stats{};
     char* error_message = nullptr;
-    auto result = lancedb_session_index_cache_stats(nullptr, &stats, &error_message);
+    auto result = lancedb_session_index_cache_stats(nullptr, &stats, nullptr, &error_message);
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
-    result = lancedb_session_metadata_cache_stats(session, nullptr, &error_message);
+    result = lancedb_session_metadata_cache_stats(session, nullptr, nullptr, &error_message);
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
@@ -145,7 +145,7 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Session", "[connection]") {
     blocker.close();
 
     LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
-    LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+    LanceDBConnection* db = lancedb_connect_builder_execute(builder, nullptr);
     REQUIRE(db == nullptr);
   }
 }
@@ -159,7 +159,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Tables", "[connection]") {
   char** names_out = nullptr;
   size_t count_out = 0;
   char* error_message = nullptr;
-  auto result = lancedb_connection_table_names(db, &names_out, &count_out, &error_message);
+  auto result = lancedb_connection_table_names(db, &names_out, &count_out, nullptr, &error_message);
   REQUIRE(error_message == nullptr);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(count_out == num_tables);
@@ -175,7 +175,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Tables", "[connection]") {
   }
   SECTION("Open Tables") {
     for (size_t i = 0; i < count_out; ++i) {
-      auto tbl = lancedb_connection_open_table(db, names_out[i]);
+      auto tbl = lancedb_connection_open_table(db, names_out[i], nullptr);
       REQUIRE(tbl != nullptr);
       lancedb_table_free(tbl);
     }
@@ -183,10 +183,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Tables", "[connection]") {
   SECTION("Drop Tables") {
     for (size_t i = 0; i < count_out; ++i) {
       char* error_message = nullptr;
-      auto result = lancedb_connection_drop_table(db, names_out[i], _namespace, &error_message);
+      auto result = lancedb_connection_drop_table(db, names_out[i], _namespace, nullptr, &error_message);
       REQUIRE(error_message == nullptr);
       REQUIRE(result == LANCEDB_SUCCESS);
-      auto tbl = lancedb_connection_open_table(db, names_out[i]);
+      auto tbl = lancedb_connection_open_table(db, names_out[i], nullptr);
       REQUIRE(tbl == nullptr);
     }
   }
@@ -199,24 +199,25 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Tables", "[connection]") {
           new_name.c_str(),
           _namespace,
           _namespace,
+          nullptr,
           &error_message);
       REQUIRE(error_message != nullptr);
       lancedb_free_string(error_message);
       REQUIRE(result == LANCEDB_NOT_SUPPORTED);
-      auto tbl = lancedb_connection_open_table(db, new_name.c_str());
+      auto tbl = lancedb_connection_open_table(db, new_name.c_str(), nullptr);
       REQUIRE(tbl == nullptr);
-      tbl = lancedb_connection_open_table(db, names_out[i]);
+      tbl = lancedb_connection_open_table(db, names_out[i], nullptr);
       REQUIRE(tbl != nullptr);
       lancedb_table_free(tbl);
     }
   }
   SECTION("Drop All Tables") {
     char* error_message = nullptr;
-    auto result = lancedb_connection_drop_all_tables(db, _namespace, &error_message);
+    auto result = lancedb_connection_drop_all_tables(db, _namespace, nullptr, &error_message);
     REQUIRE(error_message == nullptr);
     REQUIRE(result == LANCEDB_SUCCESS);
     for (size_t i = 0; i < count_out; ++i) {
-      auto tbl = lancedb_connection_open_table(db, names_out[i]);
+      auto tbl = lancedb_connection_open_table(db, names_out[i], nullptr);
       REQUIRE(tbl == nullptr);
     }
   }
@@ -237,7 +238,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** names_out = nullptr;
     size_t count_out = 0;
     char* error_message = nullptr;
-    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, &error_message);
+    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, nullptr, &error_message);
 
     REQUIRE(error_message == nullptr);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -258,7 +259,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** names_out = nullptr;
     size_t count_out = 0;
     char* error_message = nullptr;
-    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, &error_message);
+    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, nullptr, &error_message);
 
     REQUIRE(error_message == nullptr);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -278,7 +279,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** names_out = nullptr;
     size_t count_out = 0;
     char* error_message = nullptr;
-    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, &error_message);
+    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, nullptr, &error_message);
 
     REQUIRE(error_message == nullptr);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -303,7 +304,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** names_out = nullptr;
     size_t count_out = 0;
     char* error_message = nullptr;
-    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, &error_message);
+    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, nullptr, &error_message);
 
     REQUIRE(error_message == nullptr);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -327,7 +328,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** names_out = nullptr;
     size_t count_out = 0;
     char* error_message = nullptr;
-    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, &error_message);
+    auto result = lancedb_table_names_builder_execute(builder, &names_out, &count_out, nullptr, &error_message);
 
     REQUIRE(error_message == nullptr);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -351,7 +352,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** names_out = nullptr;
     size_t count_out = 0;
     char* error_message = nullptr;
-    auto result = lancedb_table_names_builder_execute(nullptr, &names_out, &count_out, &error_message);
+    auto result = lancedb_table_names_builder_execute(nullptr, &names_out, &count_out, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
 
@@ -401,7 +402,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
     char** all_names = nullptr;
     size_t all_count = 0;
     char* error_message = nullptr;
-    auto result = lancedb_connection_table_names(db, &all_names, &all_count, &error_message);
+    auto result = lancedb_connection_table_names(db, &all_names, &all_count, nullptr, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(all_count == num_tables);
@@ -427,7 +428,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
       char** page_names = nullptr;
       size_t page_count = 0;
       char* page_error = nullptr;
-      result = lancedb_table_names_builder_execute(builder, &page_names, &page_count, &page_error);
+      result = lancedb_table_names_builder_execute(builder, &page_names, &page_count, nullptr, &page_error);
 
       REQUIRE(result == LANCEDB_SUCCESS);
       REQUIRE(page_error == nullptr);
@@ -458,7 +459,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Names Builder", "[connection]") 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespaces", "[connection]") {
   char* error_message = nullptr;
   const char* _namespace = "myspace";
-  auto result = lancedb_connection_create_namespace(db, _namespace, &error_message);
+  auto result = lancedb_connection_create_namespace(db, _namespace, nullptr, &error_message);
   REQUIRE(error_message != nullptr);
   REQUIRE(result == LANCEDB_NOT_SUPPORTED);
   lancedb_free_string(error_message);
@@ -471,6 +472,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespaces", "[connection]") {
         _namespace,
         &names_out,
         &count_out,
+        nullptr,
         &error_message);
     REQUIRE(error_message != nullptr);
     REQUIRE(result == LANCEDB_NOT_SUPPORTED);
@@ -483,6 +485,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespaces", "[connection]") {
     char* error_message = nullptr;
     auto result = lancedb_connection_drop_namespace(db,
         _namespace,
+        nullptr,
         &error_message);
     REQUIRE(error_message != nullptr);
     REQUIRE(result == LANCEDB_NOT_SUPPORTED);

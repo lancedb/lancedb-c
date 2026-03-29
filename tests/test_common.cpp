@@ -34,6 +34,7 @@ void LanceDBFixture::create_empty_table(const std::string& table_name) {
       reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
       nullptr,
       &table,
+      nullptr,
       &error_message
       );
 
@@ -72,6 +73,7 @@ LanceDBTable* LanceDBFixture::create_table_with_data(const std::string& table_na
       reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
       reader,
       &table,
+      nullptr,
       &error_message
   );
 

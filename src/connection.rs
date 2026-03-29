@@ -71,11 +71,53 @@ pub struct LanceDBSessionCacheStats {
 const DEFAULT_INDEX_CACHE_SIZE_BYTES: usize = 6 * 1024 * 1024 * 1024;
 const DEFAULT_METADATA_CACHE_SIZE_BYTES: usize = 1024 * 1024 * 1024;
 
-/// Runtime to handle async operations
+/// Opaque handle to a tokio Runtime
+#[repr(C)]
+pub struct LanceDBRuntime {
+    inner: tokio::runtime::Runtime,
+}
+
+/// Global Runtime to handle async operations
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
+}
+
+/// Resolve runtime: use provided one if non-null, otherwise fall back to global
+pub(crate) unsafe fn resolve_runtime<'a>(
+    runtime: *const LanceDBRuntime,
+) -> &'a tokio::runtime::Runtime {
+    if runtime.is_null() {
+        get_runtime()
+    } else {
+        &(*runtime).inner
+    }
+}
+
+/// Create a new tokio Runtime
+///
+/// # Returns
+/// - Non-null pointer to LanceDBRuntime on success
+/// - Null pointer on failure
+#[no_mangle]
+pub extern "C" fn lancedb_runtime_new() -> *mut LanceDBRuntime {
+    match tokio::runtime::Runtime::new() {
+        Ok(rt) => Box::into_raw(Box::new(LanceDBRuntime { inner: rt })),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Free a Runtime
+///
+/// # Safety
+/// - `runtime` must be a valid pointer returned from `lancedb_runtime_new`
+/// - `runtime` must not be used after calling this function
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_runtime_free(runtime: *mut LanceDBRuntime) {
+    if !runtime.is_null() {
+        let _ = Box::from_raw(runtime);
+    }
 }
 
 /// Create a ConnectBuilder for the given URI
@@ -117,6 +159,7 @@ pub unsafe extern "C" fn lancedb_connect(uri: *const c_char) -> *mut LanceDBConn
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_connect_builder_execute(
     builder: *mut LanceDBConnectBuilder,
+    runtime: *const LanceDBRuntime,
 ) -> *mut LanceDBConnection {
     if builder.is_null() {
         return ptr::null_mut();
@@ -125,7 +168,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_execute(
     let builder_box = Box::from_raw(builder);
     let connect_builder = *builder_box.inner;
 
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
     match runtime.block_on(connect_builder.execute()) {
         Ok(connection) => {
             let boxed_connection = Box::new(LanceDBConnection {
@@ -309,6 +352,7 @@ pub unsafe extern "C" fn lancedb_session_new(
 pub unsafe extern "C" fn lancedb_session_index_cache_stats(
     session: *const LanceDBSession,
     out_stats: *mut LanceDBSessionCacheStats,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if session.is_null() || out_stats.is_null() {
@@ -317,7 +361,7 @@ pub unsafe extern "C" fn lancedb_session_index_cache_stats(
     }
 
     let session_ref = &*session;
-    let stats = get_runtime().block_on(session_ref.inner.index_cache_stats());
+    let stats = resolve_runtime(runtime).block_on(session_ref.inner.index_cache_stats());
     *out_stats = LanceDBSessionCacheStats {
         hits: stats.hits,
         misses: stats.misses,
@@ -340,6 +384,7 @@ pub unsafe extern "C" fn lancedb_session_index_cache_stats(
 pub unsafe extern "C" fn lancedb_session_metadata_cache_stats(
     session: *const LanceDBSession,
     out_stats: *mut LanceDBSessionCacheStats,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if session.is_null() || out_stats.is_null() {
@@ -348,7 +393,7 @@ pub unsafe extern "C" fn lancedb_session_metadata_cache_stats(
     }
 
     let session_ref = &*session;
-    let stats = get_runtime().block_on(session_ref.inner.metadata_cache_stats());
+    let stats = resolve_runtime(runtime).block_on(session_ref.inner.metadata_cache_stats());
     *out_stats = LanceDBSessionCacheStats {
         hits: stats.hits,
         misses: stats.misses,
@@ -389,6 +434,7 @@ pub unsafe extern "C" fn lancedb_table_create(
     schema_ptr: *const arrow_schema::ffi::FFI_ArrowSchema,
     reader: *mut LanceDBRecordBatchReader,
     table_out: *mut *mut LanceDBTable,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || table_name.is_null() || schema_ptr.is_null() || table_out.is_null() {
@@ -402,7 +448,7 @@ pub unsafe extern "C" fn lancedb_table_create(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(async {
         // Import schema from Arrow C ABI
@@ -457,6 +503,7 @@ pub unsafe extern "C" fn lancedb_connection_table_names(
     connection: *const LanceDBConnection,
     names_out: *mut *mut *mut c_char,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || names_out.is_null() || count_out.is_null() {
@@ -465,7 +512,7 @@ pub unsafe extern "C" fn lancedb_connection_table_names(
     }
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(conn.table_names().execute()) {
         Ok(names) => {
@@ -639,6 +686,7 @@ pub unsafe extern "C" fn lancedb_table_names_builder_execute(
     builder: *mut LanceDBTableNamesBuilder,
     names_out: *mut *mut *mut c_char,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if builder.is_null() {
@@ -655,7 +703,7 @@ pub unsafe extern "C" fn lancedb_table_names_builder_execute(
 
     let table_names_builder = *builder_box.inner;
 
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(table_names_builder.execute()) {
         Ok(names) => {
@@ -743,6 +791,7 @@ pub unsafe extern "C" fn lancedb_free_namespace_list(namespaces: *mut *mut c_cha
 pub unsafe extern "C" fn lancedb_connection_open_table(
     connection: *const LanceDBConnection,
     table_name: *const c_char,
+    runtime: *const LanceDBRuntime,
 ) -> *mut LanceDBTable {
     if connection.is_null() || table_name.is_null() {
         return ptr::null_mut();
@@ -753,7 +802,7 @@ pub unsafe extern "C" fn lancedb_connection_open_table(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(conn.open_table(table_name_str).execute()) {
         Ok(table) => {
@@ -779,6 +828,7 @@ pub unsafe extern "C" fn lancedb_connection_drop_table(
     connection: *const LanceDBConnection,
     table_name: *const c_char,
     namespace: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || table_name.is_null() {
@@ -792,7 +842,7 @@ pub unsafe extern "C" fn lancedb_connection_drop_table(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let result = if namespace.is_null() {
         runtime.block_on(conn.drop_table(table_name_str, &[]))
@@ -827,6 +877,7 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
     new_name: *const c_char,
     cur_namespace: *const c_char,
     new_namespace: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || old_name.is_null() || new_name.is_null() {
@@ -845,7 +896,7 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let cur_namespace_vec = if cur_namespace.is_null() {
         Vec::new()
@@ -891,6 +942,7 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
 pub unsafe extern "C" fn lancedb_connection_drop_all_tables(
     connection: *const LanceDBConnection,
     namespace: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() {
@@ -899,7 +951,7 @@ pub unsafe extern "C" fn lancedb_connection_drop_all_tables(
     }
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let result = if namespace.is_null() {
         runtime.block_on(conn.drop_all_tables(&[]))
@@ -930,6 +982,7 @@ pub unsafe extern "C" fn lancedb_connection_drop_all_tables(
 pub unsafe extern "C" fn lancedb_connection_create_namespace(
     connection: *const LanceDBConnection,
     namespace_name: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || namespace_name.is_null() {
@@ -943,7 +996,7 @@ pub unsafe extern "C" fn lancedb_connection_create_namespace(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let request = CreateNamespaceRequest {
         namespace: vec![namespace_str.to_string()],
@@ -967,6 +1020,7 @@ pub unsafe extern "C" fn lancedb_connection_create_namespace(
 pub unsafe extern "C" fn lancedb_connection_drop_namespace(
     connection: *const LanceDBConnection,
     namespace_name: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || namespace_name.is_null() {
@@ -980,7 +1034,7 @@ pub unsafe extern "C" fn lancedb_connection_drop_namespace(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let request = DropNamespaceRequest {
         namespace: vec![namespace_str.to_string()],
@@ -1009,6 +1063,7 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces(
     namespace_parent: *const c_char,
     namespaces_out: *mut *mut *mut c_char,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if connection.is_null() || namespaces_out.is_null() || count_out.is_null() {
@@ -1027,7 +1082,7 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let request = ListNamespacesRequest {
         namespace: parent_namespace,

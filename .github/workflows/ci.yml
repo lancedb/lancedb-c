@@ -35,19 +35,19 @@ jobs:
           wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt-get install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt-get update
-          sudo apt-get install -y libarrow-dev
+          sudo apt-get install -y libarrow-dev libboost-coroutine-dev libboost-context-dev
 
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install apache-arrow protobuf
+          brew install apache-arrow protobuf boost
 
       - uses: msys2/setup-msys2@v2
         if: matrix.os == 'windows-latest'
         with:
           msystem: ucrt64
           path-type: inherit
-          install: mingw-w64-ucrt-x86_64-arrow mingw-w64-ucrt-x86_64-protobuf
+          install: mingw-w64-ucrt-x86_64-arrow mingw-w64-ucrt-x86_64-protobuf mingw-w64-ucrt-x86_64-boost
 
       - name: Configure CMake
         if: matrix.os != 'windows-latest'
@@ -163,7 +163,7 @@ jobs:
           cmake .. -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/toolchain.cmake \
             -DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/arrow-install \
-            -DBUILD_EXAMPLES=ON -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: ninja -C build

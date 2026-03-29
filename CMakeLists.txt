@@ -351,6 +351,57 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_index_tests)
 
+  # Add test executable for async table tests (runs without valgrind)
+  add_executable(lancedb_table_async_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_table_async.cpp
+  )
+  target_link_libraries(lancedb_table_async_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_table_async_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_table_async_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_table_async_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_table_async_tests)
+
+  # Add test executable for coroutine table tests (runs with valgrind)
+  find_package(Boost REQUIRED COMPONENTS coroutine context)
+  add_executable(lancedb_table_coro_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_table_coro.cpp
+  )
+  target_link_libraries(lancedb_table_coro_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+    Boost::coroutine
+    Boost::context
+  )
+  target_include_directories(lancedb_table_coro_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_table_coro_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_table_coro_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_table_coro_tests)
+
   # Add test executable for vector tests (runs without valgrind)
   add_executable(lancedb_vector_index_tests
     tests/test_main.cpp
@@ -503,6 +554,32 @@ if(BUILD_TESTS)
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
         $<TARGET_FILE:lancedb_query_tests>
     )
+    # Run async table tests with valgrind
+    add_test(NAME lancedb_table_async_tests
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_table_async.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_table_async_tests>
+    )
+    # Run coroutine table tests with valgrind
+    add_test(NAME lancedb_table_coro_tests
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_table_coro.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_table_coro_tests>
+    )
   else()
     message(WARNING "Valgrind not found, running tests without memory checking")
     add_test(NAME lancedb_connection_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_connection_tests>)
@@ -510,6 +587,8 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_table_meta_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_meta_tests>)
     add_test(NAME lancedb_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_index_tests>)
     add_test(NAME lancedb_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_query_tests>)
+    add_test(NAME lancedb_table_async_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_async_tests>)
+    add_test(NAME lancedb_table_coro_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_coro_tests>)
   endif()
 
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)

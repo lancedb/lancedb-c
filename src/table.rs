@@ -16,7 +16,7 @@ use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::{resolve_runtime, LanceDBRuntime, LanceDBTable};
 use crate::error::{
     handle_error, set_invalid_argument_message, set_not_supported_message,
     set_unknown_error_message, LanceDBError,
@@ -37,6 +37,7 @@ use crate::types::{LanceDBMergeInsertConfig, LanceDBRecordBatchReader};
 pub unsafe extern "C" fn lancedb_table_arrow_schema(
     table: *const LanceDBTable,
     schema_out: *mut *mut arrow_schema::ffi::FFI_ArrowSchema,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || schema_out.is_null() {
@@ -45,7 +46,7 @@ pub unsafe extern "C" fn lancedb_table_arrow_schema(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(tbl.schema()) {
         Ok(schema) => {
@@ -72,6 +73,7 @@ pub unsafe extern "C" fn lancedb_table_arrow_schema(
 pub unsafe extern "C" fn lancedb_table_add(
     table: *const LanceDBTable,
     reader: *mut LanceDBRecordBatchReader,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || reader.is_null() {
@@ -80,7 +82,7 @@ pub unsafe extern "C" fn lancedb_table_add(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Take ownership of the reader
     let reader_box = Box::from_raw(reader);
@@ -109,6 +111,7 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
     on_columns: *const *const c_char,
     num_columns: usize,
     config: *const LanceDBMergeInsertConfig,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || data.is_null() || on_columns.is_null() || num_columns == 0 {
@@ -133,7 +136,7 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Take ownership of the data reader
     let data_box = Box::from_raw(data);
@@ -178,6 +181,7 @@ pub unsafe extern "C" fn lancedb_table_cleanup_old_versions(
     table: *const LanceDBTable,
     older_than_days: u16,
     delete_unverified: i32,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() {
@@ -186,7 +190,7 @@ pub unsafe extern "C" fn lancedb_table_cleanup_old_versions(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let older_than = chrono::Duration::days(older_than_days as i64);
     let delete_unverified_bool = delete_unverified != 0;
@@ -207,6 +211,7 @@ pub unsafe extern "C" fn lancedb_table_cleanup_old_versions(
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_compact_files(
     table: *const LanceDBTable,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() {
@@ -215,7 +220,7 @@ pub unsafe extern "C" fn lancedb_table_compact_files(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Note: Compaction API is simplified in this implementation
     let _ = (tbl, runtime);
@@ -235,6 +240,7 @@ pub unsafe extern "C" fn lancedb_table_compact_files(
 pub unsafe extern "C" fn lancedb_table_restore_version(
     table: *const LanceDBTable,
     version: u64,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() {
@@ -243,7 +249,7 @@ pub unsafe extern "C" fn lancedb_table_restore_version(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Note: restore API is simplified in this implementation
     let _ = (version, tbl, runtime);
@@ -372,13 +378,16 @@ pub unsafe extern "C" fn lancedb_free_arrow_schema(
 /// # Returns
 /// - Table version number on success, 0 on failure
 #[no_mangle]
-pub unsafe extern "C" fn lancedb_table_version(table: *const LanceDBTable) -> u64 {
+pub unsafe extern "C" fn lancedb_table_version(
+    table: *const LanceDBTable,
+    runtime: *const LanceDBRuntime,
+) -> u64 {
     if table.is_null() {
         return 0;
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     runtime.block_on(tbl.version()).unwrap_or(0)
 }
@@ -391,13 +400,16 @@ pub unsafe extern "C" fn lancedb_table_version(table: *const LanceDBTable) -> u6
 /// # Returns
 /// - Number of rows in table on success, 0 on failure (or empty table)
 #[no_mangle]
-pub unsafe extern "C" fn lancedb_table_count_rows(table: *const LanceDBTable) -> u64 {
+pub unsafe extern "C" fn lancedb_table_count_rows(
+    table: *const LanceDBTable,
+    runtime: *const LanceDBRuntime,
+) -> u64 {
     if table.is_null() {
         return 0;
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(tbl.count_rows(None)) {
         Ok(count) => count as u64,
@@ -418,6 +430,7 @@ pub unsafe extern "C" fn lancedb_table_count_rows(table: *const LanceDBTable) ->
 pub unsafe extern "C" fn lancedb_table_delete(
     table: *const LanceDBTable,
     predicate: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || predicate.is_null() {
@@ -431,7 +444,7 @@ pub unsafe extern "C" fn lancedb_table_delete(
     };
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(tbl.delete(predicate_str)) {
         Ok(_) => LanceDBError::Success,
@@ -463,6 +476,7 @@ pub unsafe extern "C" fn lancedb_table_nearest_to(
     result_arrays: *mut *mut *mut arrow_array::ffi::FFI_ArrowArray,
     result_schema: *mut *mut arrow_schema::ffi::FFI_ArrowSchema,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null()
@@ -478,7 +492,7 @@ pub unsafe extern "C" fn lancedb_table_nearest_to(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
     let vec_slice = std::slice::from_raw_parts(vector, dimension);
     let vec_data: Vec<f32> = vec_slice.to_vec();
 
@@ -585,6 +599,7 @@ pub unsafe extern "C" fn lancedb_table_list_versions(
     versions_out: *mut *mut LanceDBVersion,
     metadata_out: *mut *mut LanceDBVersionMetadata,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || versions_out.is_null() || count_out.is_null() {
@@ -593,7 +608,7 @@ pub unsafe extern "C" fn lancedb_table_list_versions(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
     let include_metadata = !metadata_out.is_null();
 
     match runtime.block_on(tbl.list_versions()) {
@@ -768,6 +783,7 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
     keys_out: *mut *mut *mut c_char,
     values_out: *mut *mut *mut c_char,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null()
@@ -782,7 +798,7 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let ds = match tbl.dataset() {
         Some(ds) => ds,
@@ -876,6 +892,7 @@ pub unsafe extern "C" fn lancedb_table_set_metadata(
     keys: *const *const c_char,
     values: *const *const c_char,
     count: usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || keys.is_null() || values.is_null() || count == 0 {
@@ -909,7 +926,7 @@ pub unsafe extern "C" fn lancedb_table_set_metadata(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let ds = match tbl.dataset() {
         Some(ds) => ds,
@@ -944,6 +961,7 @@ pub unsafe extern "C" fn lancedb_table_delete_metadata(
     table: *const LanceDBTable,
     keys: *const *const c_char,
     count: usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || keys.is_null() || count == 0 {
@@ -972,7 +990,7 @@ pub unsafe extern "C" fn lancedb_table_delete_metadata(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     let ds = match tbl.dataset() {
         Some(ds) => ds,

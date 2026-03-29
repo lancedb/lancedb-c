@@ -18,7 +18,7 @@ use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{DistanceType, Table};
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::{resolve_runtime, LanceDBRuntime, LanceDBTable};
 use crate::error::{set_invalid_argument_message, set_unknown_error_message, LanceDBError};
 use crate::types::LanceDBDistanceType;
 
@@ -471,13 +471,14 @@ pub unsafe extern "C" fn lancedb_vector_query_ef(
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_query_execute(
     query: *mut LanceDBQuery,
+    runtime: *const LanceDBRuntime,
 ) -> *mut LanceDBQueryResult {
     if query.is_null() {
         return ptr::null_mut();
     }
 
     let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(async {
         let mut rust_query = query_box.table.query();
@@ -515,13 +516,14 @@ pub unsafe extern "C" fn lancedb_query_execute(
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_vector_query_execute(
     query: *mut LanceDBVectorQuery,
+    runtime: *const LanceDBRuntime,
 ) -> *mut LanceDBQueryResult {
     if query.is_null() {
         return ptr::null_mut();
     }
 
     let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(async {
         let mut rust_query = match query_box
@@ -587,6 +589,7 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
     batches_out: *mut *mut *mut arrow_array::ffi::FFI_ArrowArray,
     schema_out: *mut *mut arrow_schema::ffi::FFI_ArrowSchema,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if result.is_null() || batches_out.is_null() || schema_out.is_null() || count_out.is_null() {
@@ -595,7 +598,7 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
     }
 
     let result_box = Box::from_raw(result);
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(async {
         let batches: Vec<RecordBatch> = result_box.inner.try_collect().await?;

@@ -17,7 +17,7 @@ use lancedb::index::vector::{
 };
 use lancedb::index::Index;
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::{resolve_runtime, LanceDBRuntime, LanceDBTable};
 use crate::error::{
     handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
 };
@@ -139,6 +139,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     num_columns: usize,
     index_type: LanceDBIndexType,
     config: *const LanceDBVectorIndexConfig,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || columns.is_null() || num_columns == 0 {
@@ -166,7 +167,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Use default config if none provided
     let cfg = if config.is_null() {
@@ -287,6 +288,7 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
     num_columns: usize,
     index_type: LanceDBIndexType,
     config: *const LanceDBScalarIndexConfig,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || columns.is_null() || num_columns == 0 {
@@ -314,7 +316,7 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Use default config if none provided
     let cfg = if config.is_null() {
@@ -367,6 +369,7 @@ pub unsafe extern "C" fn lancedb_table_create_fts_index(
     columns: *const *const c_char,
     num_columns: usize,
     config: *const LanceDBFtsIndexConfig,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || columns.is_null() || num_columns == 0 {
@@ -394,7 +397,7 @@ pub unsafe extern "C" fn lancedb_table_create_fts_index(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     // Use default config if none provided
     let cfg = if config.is_null() {
@@ -462,6 +465,7 @@ pub unsafe extern "C" fn lancedb_table_list_indices(
     table: *const LanceDBTable,
     indices_out: *mut *mut *mut c_char,
     count_out: *mut usize,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || indices_out.is_null() || count_out.is_null() {
@@ -470,7 +474,7 @@ pub unsafe extern "C" fn lancedb_table_list_indices(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(tbl.list_indices()) {
         Ok(indices) => {
@@ -530,6 +534,7 @@ pub unsafe extern "C" fn lancedb_table_list_indices(
 pub unsafe extern "C" fn lancedb_table_drop_index(
     table: *const LanceDBTable,
     index_name: *const c_char,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || index_name.is_null() {
@@ -543,7 +548,7 @@ pub unsafe extern "C" fn lancedb_table_drop_index(
     };
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(tbl.drop_index(index_name_str)) {
         Ok(_) => LanceDBError::Success,
@@ -563,6 +568,7 @@ pub unsafe extern "C" fn lancedb_table_drop_index(
 pub unsafe extern "C" fn lancedb_table_optimize(
     table: *const LanceDBTable,
     optimize_type: LanceDBOptimizeType,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() {
@@ -571,7 +577,7 @@ pub unsafe extern "C" fn lancedb_table_optimize(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     use lancedb::table::{OptimizeAction, OptimizeOptions};
 
@@ -639,6 +645,7 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
     table: *const LanceDBTable,
     index_name: *const c_char,
     stats_out: *mut LanceDBIndexStats,
+    runtime: *const LanceDBRuntime,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || index_name.is_null() || stats_out.is_null() {
@@ -652,7 +659,7 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
     };
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let runtime = resolve_runtime(runtime);
 
     match runtime.block_on(tbl.index_stats(name_str)) {
         Ok(Some(stats)) => {

@@ -12,7 +12,7 @@ void verify_query_result(LanceDBQueryResult* query_result, size_t expected_rows)
   size_t count = 0;
   char* error_message = nullptr;
   const auto result = lancedb_query_result_to_arrow(
-      query_result, &result_arrays, &result_schema, &count, &error_message);
+      query_result, &result_arrays, &result_schema, &count, nullptr, &error_message);
 
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
@@ -45,7 +45,7 @@ void create_key_index(LanceDBTable* table) {
 
   char* error_message = nullptr;
   LanceDBError result = lancedb_table_create_scalar_index(
-      table, index_columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message);
+      table, index_columns, 1, LANCEDB_INDEX_BTREE, &config, nullptr, &error_message);
 
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
@@ -73,7 +73,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - all entries", "[query]") {
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
     verify_query_result(query_result, total_rows);
   }
@@ -109,7 +109,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - all entries", "[query]") {
       REQUIRE(error_message == nullptr);
 
       // Execute query (consumes the query object)
-      LanceDBQueryResult* query_result = lancedb_query_execute(query);
+      LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
       REQUIRE(query_result != nullptr);
 
       // Verify this page has the expected number of rows
@@ -151,7 +151,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 1);
@@ -176,7 +176,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 5);
@@ -211,7 +211,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 1);
@@ -236,7 +236,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 5);
@@ -261,7 +261,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow
@@ -270,7 +270,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     size_t count = 0;
     error_message = nullptr;
     result = lancedb_query_result_to_arrow(
-        query_result, &result_arrays, &result_schema, &count, &error_message);
+        query_result, &result_arrays, &result_schema, &count, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -306,7 +306,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Filter on non-existent column"
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
-  LanceDBQueryResult* query_result = lancedb_query_execute(query);
+  LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
   REQUIRE(query_result == nullptr);
   error_message = nullptr;
 
@@ -319,7 +319,7 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
   LanceDBSessionCacheStats final_index_stats{};
 
   char* error_message = nullptr;
-  LanceDBError result = lancedb_session_index_cache_stats(session, &initial_index_stats, &error_message);
+  LanceDBError result = lancedb_session_index_cache_stats(session, &initial_index_stats, nullptr, &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 
@@ -349,12 +349,12 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
     lancedb_query_result_free(query_result);
   }
 
-  result = lancedb_session_index_cache_stats(session, &final_index_stats, &error_message);
+  result = lancedb_session_index_cache_stats(session, &final_index_stats, nullptr, &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 

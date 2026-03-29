@@ -14,7 +14,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Creation", "[table]") {
   SECTION("Create table with data") {
     constexpr auto row_num = 10;
     LanceDBTable* table = create_table_with_data("table_with_data", row_num, 0);
-    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
     lancedb_table_free(table);
   }
 
@@ -22,13 +22,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Creation", "[table]") {
     const std::string table_name = "table_reopen_test";
     constexpr auto row_num = 15;
     LanceDBTable* table = create_table_with_data(table_name, row_num, 0);
-    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
     lancedb_table_free(table);
 
     // Reopen the table
-    LanceDBTable* reopened_table = lancedb_connection_open_table(db, table_name.c_str());
+    LanceDBTable* reopened_table = lancedb_connection_open_table(db, table_name.c_str(), nullptr);
     REQUIRE(reopened_table != nullptr);
-    REQUIRE(lancedb_table_count_rows(reopened_table) == row_num);
+    REQUIRE(lancedb_table_count_rows(reopened_table, nullptr) == row_num);
     lancedb_table_free(reopened_table);
   }
 
@@ -57,6 +57,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Creation", "[table]") {
         reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
         reader,
         &table2,
+        nullptr,
         &error_message
     );
 
@@ -81,15 +82,15 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
   create_empty_table(table_name);
 
   // Open the table
-  LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str());
+  LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str(), nullptr);
   REQUIRE(table != nullptr);
 
   SECTION("Add data to empty table") {
     // Verify table is initially empty
-    REQUIRE(lancedb_table_count_rows(table) == 0);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 0);
 
     // Initial version should be 1 (empty table)
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 1);
 
     constexpr auto row_num = 10;
@@ -100,22 +101,22 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     REQUIRE(reader != nullptr);
 
     char* error_message = nullptr;
-    LanceDBError result = lancedb_table_add(table, reader, &error_message);
+    LanceDBError result = lancedb_table_add(table, reader, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Verify row count
-    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
 
     // Version should increment to 2
-    version = lancedb_table_version(table);
+    version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 2);
   }
 
   SECTION("Add multiple batches of data") {
     // Initial version should be 1 (empty table)
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 1);
 
     // Add first batch
@@ -125,14 +126,14 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     REQUIRE(reader1 != nullptr);
 
     char* error_message = nullptr;
-    LanceDBError result = lancedb_table_add(table, reader1, &error_message);
+    LanceDBError result = lancedb_table_add(table, reader1, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num1);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num1);
 
     // Version should increment to 2
-    version = lancedb_table_version(table);
+    version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 2);
 
     // Add second batch
@@ -141,14 +142,14 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     auto reader2 = create_reader_from_batch(batch2);
     REQUIRE(reader2 != nullptr);
 
-    result = lancedb_table_add(table, reader2, &error_message);
+    result = lancedb_table_add(table, reader2, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num1+row_num2);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num1+row_num2);
 
     // Version should increment to 3
-    version = lancedb_table_version(table);
+    version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 3);
   }
 
@@ -160,11 +161,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     REQUIRE(reader1 != nullptr);
 
     char* error_message = nullptr;
-    LanceDBError result = lancedb_table_add(table, reader1, &error_message);
+    LanceDBError result = lancedb_table_add(table, reader1, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
 
     // Add data with overlapping keys (5-14)
     // Keys 5-9 already exist in the table
@@ -174,7 +175,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     auto reader2 = create_reader_from_batch(batch2);
     REQUIRE(reader2 != nullptr);
 
-    result = lancedb_table_add(table, reader2, &error_message);
+    result = lancedb_table_add(table, reader2, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -182,16 +183,16 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     // table_add adds all rows
     // So we should have 10 (original) + 10 (new batch) = 20 rows
     // Even though keys 5-9 exist in both batches
-    REQUIRE(lancedb_table_count_rows(table) == 20);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 20);
 
     // Version should increment
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 3);
   }
 
   SECTION("Add data with null reader should fail") {
     char* error_message = nullptr;
-    LanceDBError result = lancedb_table_add(table, nullptr, &error_message);
+    LanceDBError result = lancedb_table_add(table, nullptr, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
 
@@ -206,7 +207,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     REQUIRE(reader != nullptr);
 
     char* error_message = nullptr;
-    LanceDBError result = lancedb_table_add(nullptr, reader, &error_message);
+    LanceDBError result = lancedb_table_add(nullptr, reader, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
 
@@ -227,7 +228,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
   create_empty_table(table_name);
 
   // Open the table
-  LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str());
+  LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str(), nullptr);
   REQUIRE(table != nullptr);
 
   // Add initial data
@@ -237,14 +238,14 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
   REQUIRE(initial_reader != nullptr);
 
   char* error_message = nullptr;
-  LanceDBError result = lancedb_table_add(table, initial_reader, &error_message);
+  LanceDBError result = lancedb_table_add(table, initial_reader, nullptr, &error_message);
 
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
-  REQUIRE(lancedb_table_count_rows(table) == row_num);
+  REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
 
   // Initial version after add should be 2 (1 for empty table creation, 2 after add)
-  auto version = lancedb_table_version(table);
+  auto version = lancedb_table_version(table, nullptr);
   REQUIRE(version == 2);
 
   SECTION("Merge insert with update and insert") {
@@ -291,16 +292,16 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, merge_reader, on_columns, 1, &config, &error_message);
+        table, merge_reader, on_columns, 1, &config, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Should have 10 (original) - 5 (overlapping) + 10 (total in merge) = 15 rows
-    REQUIRE(lancedb_table_count_rows(table) == 15);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 15);
 
     // Version should increment to 3 (was 2 before merge insert)
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 3);
   }
 
@@ -337,16 +338,16 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, merge_reader, on_columns, 1, &config, &error_message);
+        table, merge_reader, on_columns, 1, &config, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Should still have 10 rows (only updates, no inserts)
-    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 10);
 
     // Version should increment to 3 (was 2 before merge insert)
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 3);
   }
 
@@ -383,16 +384,16 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, merge_reader, on_columns, 1, &config, &error_message);
+        table, merge_reader, on_columns, 1, &config, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Should have 10 + 5 = 15 rows (only inserts, no updates)
-    REQUIRE(lancedb_table_count_rows(table) == 15);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 15);
 
     // Version should increment to 3 (was 2 before merge insert)
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 3);
   }
 
@@ -405,22 +406,22 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, merge_reader, on_columns, 1, nullptr, &error_message);
+        table, merge_reader, on_columns, 1, nullptr, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Default behavior should handle the merge
-    REQUIRE(lancedb_table_count_rows(table) >= 10);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) >= 10);
 
     // Version should increment to 3 (was 2 before merge insert)
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 3);
   }
 
   SECTION("Merge insert with no actual changes") {
     // Get current version
-    auto version = lancedb_table_version(table);
+    auto version = lancedb_table_version(table, nullptr);
     REQUIRE(version == 2);
 
     // Create data with same keys and same values as existing data
@@ -456,16 +457,16 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, merge_reader, on_columns, 1, &config, &error_message);
+        table, merge_reader, on_columns, 1, &config, nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Row count should remain 10 (no new rows)
-    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 10);
 
     // Check if version changed even though data is identical
-    version = lancedb_table_version(table);
+    version = lancedb_table_version(table, nullptr);
     // Version increments even if data doesn't actually change
     REQUIRE(version == 3);
   }
@@ -479,7 +480,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, nullptr, on_columns, 1, &config, &error_message);
+        table, nullptr, on_columns, 1, &config, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
 
@@ -501,7 +502,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        nullptr, merge_reader, on_columns, 1, &config, &error_message);
+        nullptr, merge_reader, on_columns, 1, &config, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
 
@@ -525,7 +526,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert", "[table]") {
 
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_merge_insert(
-        table, merge_reader, nullptr, 1, &config, &error_message);
+        table, merge_reader, nullptr, 1, &config, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
 
@@ -544,7 +545,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
   const std::string table_name = "test_delete_table";
   create_empty_table(table_name);
 
-  LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str());
+  LanceDBTable* table = lancedb_connection_open_table(db, table_name.c_str(), nullptr);
   REQUIRE(table != nullptr);
 
   // Add initial data (keys key_0 through key_9)
@@ -554,61 +555,61 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
   REQUIRE(initial_reader != nullptr);
 
   char* error_message = nullptr;
-  LanceDBError result = lancedb_table_add(table, initial_reader, &error_message);
+  LanceDBError result = lancedb_table_add(table, initial_reader, nullptr, &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
-  REQUIRE(lancedb_table_count_rows(table) == row_num);
+  REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
 
   SECTION("Delete row matching predicate") {
     char* error_message = nullptr;
-    LanceDBError result = lancedb_table_delete(table, "key = 'key_0'", &error_message);
+    LanceDBError result = lancedb_table_delete(table, "key = 'key_0'", nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num - 1);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num - 1);
   }
 
   SECTION("Delete multiple rows matching predicate") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        table, "key IN ('key_0', 'key_1', 'key_2')", &error_message);
+        table, "key IN ('key_0', 'key_1', 'key_2')", nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num - 3);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num - 3);
 
     result = lancedb_table_delete(
-        table, "key = 'key_10' OR key = 'key_11' OR key = 'key_12')", &error_message);
+        table, "key = 'key_10' OR key = 'key_11' OR key = 'key_12')", nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num - 6);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num - 6);
   }
 
   SECTION("Delete with predicate matching no rows") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        table, "key = 'nonexistent'", &error_message);
+        table, "key = 'nonexistent'", nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == row_num);
   }
 
   SECTION("Delete all rows") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        table, "key IS NOT NULL", &error_message);
+        table, "key IS NOT NULL", nullptr, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == 0);
+    REQUIRE(lancedb_table_count_rows(table, nullptr) == 0);
   }
 
   SECTION("Delete with unknown column should fail") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        table, "unknown = 'key_0'", &error_message);
+        table, "unknown = 'key_0'", nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
     REQUIRE(result != LANCEDB_SUCCESS);
@@ -619,7 +620,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
   SECTION("Delete with empty predicate should fail") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        table, "", &error_message);
+        table, "", nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
     REQUIRE(result != LANCEDB_SUCCESS);
@@ -630,7 +631,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
   SECTION("Delete with null table should fail") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        nullptr, "key = 'key_0'", &error_message);
+        nullptr, "key = 'key_0'", nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
     REQUIRE(error_message != nullptr);
@@ -640,7 +641,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
   SECTION("Delete with null predicate should fail") {
     char* error_message = nullptr;
     LanceDBError result = lancedb_table_delete(
-        table, nullptr, &error_message);
+        table, nullptr, nullptr, &error_message);
 
     REQUIRE(result != LANCEDB_SUCCESS);
     REQUIRE(error_message != nullptr);
@@ -782,34 +783,34 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Table CRUD with same session ac
   REQUIRE(table_b != nullptr);
 
   // Read after create
-  REQUIRE(lancedb_table_count_rows(table_a) == table_a_rows);
-  REQUIRE(lancedb_table_count_rows(table_b) == table_b_rows);
+  REQUIRE(lancedb_table_count_rows(table_a, nullptr) == table_a_rows);
+  REQUIRE(lancedb_table_count_rows(table_b, nullptr) == table_b_rows);
 
   // Reopen and read again
   lancedb_table_free(table_a);
   lancedb_table_free(table_b);
-  table_a = lancedb_connection_open_table(db, table_a_name.c_str());
-  table_b = lancedb_connection_open_table(db, table_b_name.c_str());
+  table_a = lancedb_connection_open_table(db, table_a_name.c_str(), nullptr);
+  table_b = lancedb_connection_open_table(db, table_b_name.c_str(), nullptr);
   REQUIRE(table_a != nullptr);
   REQUIRE(table_b != nullptr);
-  REQUIRE(lancedb_table_count_rows(table_a) == table_a_rows);
-  REQUIRE(lancedb_table_count_rows(table_b) == table_b_rows);
+  REQUIRE(lancedb_table_count_rows(table_a, nullptr) == table_a_rows);
+  REQUIRE(lancedb_table_count_rows(table_b, nullptr) == table_b_rows);
 
   // Delete
   lancedb_table_free(table_a);
   lancedb_table_free(table_b);
   char* error_message = nullptr;
-  LanceDBError result = lancedb_connection_drop_table(db, table_a_name.c_str(), _namespace, &error_message);
+  LanceDBError result = lancedb_connection_drop_table(db, table_a_name.c_str(), _namespace, nullptr, &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 
-  result = lancedb_connection_drop_table(db, table_b_name.c_str(), _namespace, &error_message);
+  result = lancedb_connection_drop_table(db, table_b_name.c_str(), _namespace, nullptr, &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 
   // Verify delete
-  table_a = lancedb_connection_open_table(db, table_a_name.c_str());
-  table_b = lancedb_connection_open_table(db, table_b_name.c_str());
+  table_a = lancedb_connection_open_table(db, table_a_name.c_str(), nullptr);
+  table_b = lancedb_connection_open_table(db, table_b_name.c_str(), nullptr);
   REQUIRE(table_a == nullptr);
   REQUIRE(table_b == nullptr);
 }

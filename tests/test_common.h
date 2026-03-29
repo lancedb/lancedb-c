@@ -64,7 +64,7 @@ public:
   LanceDBFixture() {
     LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
     REQUIRE(builder != nullptr);
-    db = lancedb_connect_builder_execute(builder);
+    db = lancedb_connect_builder_execute(builder, nullptr);
     REQUIRE(db != nullptr);
   }
 
@@ -88,7 +88,7 @@ class LanceDBSessionFixture : public LanceDBFixture {
       session = lancedb_session_new(&session_options);
       REQUIRE(session != nullptr);
       builder = lancedb_connect_builder_session(builder, session);
-      db = lancedb_connect_builder_execute(builder);
+      db = lancedb_connect_builder_execute(builder, nullptr);
       REQUIRE(db != nullptr);
     }
 
