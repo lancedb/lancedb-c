@@ -46,7 +46,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
-S3V="${PROJECT_DIR}/s3vector_concurrent_service"
+S3V="${PROJECT_DIR}/build/s3vector_concurrent_service"
 BEDROCK_SCRIPT="${PROJECT_DIR}/create_vector_for_query_with_bedrock.bash"
 
 # Defaults (can be overridden by env vars or CLI args)

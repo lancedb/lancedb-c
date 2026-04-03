@@ -19,7 +19,7 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{DistanceType, Table};
 
 use crate::connection::{get_runtime, LanceDBTable};
-use crate::error::{set_invalid_argument_message, set_unknown_error_message, LanceDBError};
+use crate::error::{handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError};
 use crate::types::LanceDBDistanceType;
 
 /// Opaque handle to a LanceDB Query
@@ -461,6 +461,144 @@ pub unsafe extern "C" fn lancedb_vector_query_ef(
     let _ = error_message; // No errors possible in this function
     (*query).ef = Some(ef);
     LanceDBError::Success
+}
+
+/// Get the query execution plan without executing the query
+///
+/// Returns a human-readable string describing what steps will be taken
+/// to execute the query. Does NOT consume the query — it can still be
+/// executed afterwards.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `plan_out` must be a valid pointer to receive the plan string
+/// - `error_message` can be NULL to ignore detailed error messages
+/// - Caller must free the returned plan string with `lancedb_free_string()`
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_explain_plan(
+    query: *const LanceDBQuery,
+    verbose: bool,
+    plan_out: *mut *mut c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() || plan_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let query_ref = &*query;
+    let runtime = get_runtime();
+
+    match runtime.block_on(async {
+        let mut rust_query = query_ref.table.query();
+
+        if let Some(limit) = query_ref.limit {
+            rust_query = rust_query.limit(limit);
+        }
+        if let Some(offset) = query_ref.offset {
+            rust_query = rust_query.offset(offset);
+        }
+        if let Some(ref select) = query_ref.select {
+            rust_query = rust_query.select(select.clone());
+        }
+        if let Some(ref filter) = query_ref.filter {
+            rust_query = rust_query.only_if(filter);
+        }
+
+        rust_query.explain_plan(verbose).await
+    }) {
+        Ok(plan) => match std::ffi::CString::new(plan) {
+            Ok(c_str) => {
+                *plan_out = c_str.into_raw();
+                LanceDBError::Success
+            }
+            Err(_) => {
+                set_unknown_error_message(error_message);
+                LanceDBError::Unknown
+            }
+        },
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Get the vector query execution plan without executing the query
+///
+/// Returns a human-readable string describing what steps will be taken
+/// to execute the query. Does NOT consume the query — it can still be
+/// executed afterwards.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `plan_out` must be a valid pointer to receive the plan string
+/// - `error_message` can be NULL to ignore detailed error messages
+/// - Caller must free the returned plan string with `lancedb_free_string()`
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
+    query: *const LanceDBVectorQuery,
+    verbose: bool,
+    plan_out: *mut *mut c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() || plan_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let query_ref = &*query;
+    let runtime = get_runtime();
+
+    match runtime.block_on(async {
+        let mut rust_query = match query_ref
+            .table
+            .query()
+            .nearest_to(query_ref.query_vector.clone())
+        {
+            Ok(q) => q,
+            Err(e) => return Err(e),
+        };
+
+        if let Some(ref column) = query_ref.column {
+            rust_query = rust_query.column(column);
+        }
+        if let Some(limit) = query_ref.limit {
+            rust_query = rust_query.limit(limit);
+        }
+        if let Some(offset) = query_ref.offset {
+            rust_query = rust_query.offset(offset);
+        }
+        if let Some(ref select) = query_ref.select {
+            rust_query = rust_query.select(select.clone());
+        }
+        if let Some(ref filter) = query_ref.filter {
+            rust_query = rust_query.only_if(filter);
+        }
+        if let Some(distance_type) = query_ref.distance_type {
+            rust_query = rust_query.distance_type(distance_type);
+        }
+        if let Some(nprobes) = query_ref.nprobes {
+            rust_query = rust_query.nprobes(nprobes);
+        }
+        if let Some(refine_factor) = query_ref.refine_factor {
+            rust_query = rust_query.refine_factor(refine_factor);
+        }
+        if let Some(ef) = query_ref.ef {
+            rust_query = rust_query.ef(ef);
+        }
+
+        rust_query.explain_plan(verbose).await
+    }) {
+        Ok(plan) => match std::ffi::CString::new(plan) {
+            Ok(c_str) => {
+                *plan_out = c_str.into_raw();
+                LanceDBError::Success
+            }
+            Err(_) => {
+                set_unknown_error_message(error_message);
+                LanceDBError::Unknown
+            }
+        },
+        Err(e) => handle_error(&e, error_message),
+    }
 }
 
 /// Execute query and return streaming result

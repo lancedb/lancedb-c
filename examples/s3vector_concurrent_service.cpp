@@ -979,6 +979,8 @@ public:
         bool return_metadata,
         LanceDBDistanceType distance_type,
         const IndexConfig& config,
+        bool explain_plan,
+        std::string& explain_plan_output,
         std::string& error) {
 
         std::vector<QueryResult> results;
@@ -1025,6 +1027,20 @@ public:
                 lancedb_vector_query_free(query);
                 error = "Failed to set query filter";
                 return results;
+            }
+        }
+
+        // Get the execution plan before executing (does not consume the query)
+        if (explain_plan) {
+            char* plan = nullptr;
+            char* err_msg = nullptr;
+            if (lancedb_vector_query_explain_plan(query, true, &plan, &err_msg) == LANCEDB_SUCCESS && plan) {
+                explain_plan_output = plan;
+                lancedb_free_string(plan);
+            } else {
+                explain_plan_output = err_msg ? std::string("explain_plan failed: ") + err_msg
+                                              : "explain_plan failed";
+                if (err_msg) lancedb_free_string(err_msg);
             }
         }
 
@@ -1101,6 +1117,144 @@ public:
                                 batch->column(distance_idx));
                             if (!distance_array->IsNull(row)) {
                                 result.distance = distance_array->Value(row);
+                            }
+                        }
+
+                        // Extract dynamic scalar columns
+                        for (const auto& sf : config.scalar_schema) {
+                            int col_idx = schema->GetFieldIndex(sf.name);
+                            if (col_idx >= 0 && !batch->column(col_idx)->IsNull(row)) {
+                                if (sf.type == "string") {
+                                    auto arr = std::static_pointer_cast<arrow::StringArray>(
+                                        batch->column(col_idx));
+                                    result.scalar_fields[sf.name] = arr->GetString(row);
+                                } else if (sf.type == "int") {
+                                    auto arr = std::static_pointer_cast<arrow::Int64Array>(
+                                        batch->column(col_idx));
+                                    result.scalar_fields[sf.name] = arr->Value(row);
+                                } else if (sf.type == "float") {
+                                    auto arr = std::static_pointer_cast<arrow::DoubleArray>(
+                                        batch->column(col_idx));
+                                    result.scalar_fields[sf.name] = arr->Value(row);
+                                } else if (sf.type == "bool") {
+                                    auto arr = std::static_pointer_cast<arrow::BooleanArray>(
+                                        batch->column(col_idx));
+                                    result.scalar_fields[sf.name] = arr->Value(row);
+                                }
+                            }
+                        }
+
+                        results.push_back(result);
+                    }
+                }
+            }
+        }
+
+        if (c_arrays) lancedb_free_arrow_arrays(reinterpret_cast<FFI_ArrowArray**>(c_arrays), count);
+        if (c_schema) lancedb_free_arrow_schema(reinterpret_cast<FFI_ArrowSchema*>(c_schema));
+
+        return results;
+    }
+
+    // Filter-only query — no vector similarity search, just scalar filters
+    static std::vector<QueryResult> filter_only_query(
+        LanceDBTable* table,
+        int limit,
+        const std::string& filter,
+        bool return_metadata,
+        const IndexConfig& config,
+        bool explain_plan,
+        std::string& explain_plan_output,
+        std::string& error) {
+
+        std::vector<QueryResult> results;
+
+        if (filter.empty()) {
+            error = "filterOnly mode requires a filter";
+            return results;
+        }
+
+        LanceDBQuery* query = lancedb_query_new(table);
+        if (!query) {
+            error = "Failed to create query";
+            return results;
+        }
+
+        if (lancedb_query_limit(query, limit, nullptr) != LANCEDB_SUCCESS) {
+            lancedb_query_free(query);
+            error = "Failed to set query limit";
+            return results;
+        }
+
+        if (lancedb_query_where_filter(query, filter.c_str(), nullptr) != LANCEDB_SUCCESS) {
+            lancedb_query_free(query);
+            error = "Failed to set query filter";
+            return results;
+        }
+
+        // Get the execution plan before executing (does not consume the query)
+        if (explain_plan) {
+            char* plan = nullptr;
+            char* err_msg = nullptr;
+            if (lancedb_query_explain_plan(query, true, &plan, &err_msg) == LANCEDB_SUCCESS && plan) {
+                explain_plan_output = plan;
+                lancedb_free_string(plan);
+            } else {
+                explain_plan_output = err_msg ? std::string("explain_plan failed: ") + err_msg
+                                              : "explain_plan failed";
+                if (err_msg) lancedb_free_string(err_msg);
+            }
+        }
+
+        LanceDBQueryResult* query_result = lancedb_query_execute(query);
+        if (!query_result) {
+            error = "Failed to execute filter-only query";
+            return results;
+        }
+
+        struct ArrowArray** c_arrays = nullptr;
+        struct ArrowSchema* c_schema = nullptr;
+        size_t count = 0;
+
+        if (lancedb_query_result_to_arrow(
+                query_result,
+                reinterpret_cast<FFI_ArrowArray***>(&c_arrays),
+                reinterpret_cast<FFI_ArrowSchema**>(&c_schema),
+                &count, nullptr) != LANCEDB_SUCCESS) {
+            lancedb_query_result_free(query_result);
+            error = "Failed to convert query result to arrow";
+            return results;
+        }
+
+        if (count > 0 && c_arrays && c_schema) {
+            auto schema_result = arrow::ImportSchema(c_schema);
+            if (schema_result.ok()) {
+                auto schema = *schema_result;
+                auto batch_result = arrow::ImportRecordBatch(
+                    reinterpret_cast<struct ArrowArray*>(*c_arrays), schema);
+
+                if (batch_result.ok()) {
+                    auto batch = *batch_result;
+
+                    int key_idx = schema->GetFieldIndex("key");
+                    int metadata_idx = schema->GetFieldIndex("metadata");
+
+                    for (int64_t row = 0; row < batch->num_rows(); row++) {
+                        QueryResult result;
+
+                        if (key_idx >= 0) {
+                            auto key_array = std::static_pointer_cast<arrow::StringArray>(
+                                batch->column(key_idx));
+                            if (!key_array->IsNull(row)) {
+                                result.key = key_array->GetString(row);
+                            }
+                        }
+
+                        if (metadata_idx >= 0 && return_metadata) {
+                            auto metadata_array = std::static_pointer_cast<arrow::StringArray>(
+                                batch->column(metadata_idx));
+                            if (!metadata_array->IsNull(row)) {
+                                result.metadata = metadata_array->GetString(row);
                             }
                         }
 
@@ -1924,10 +2078,10 @@ ApiResponse DeleteVectors(const json& request) {
 }
 
 // QueryVectors - Search using index configuration
+// Supports two modes:
+//   - Vector search (default): requires queryVector, finds nearest neighbors
+//   - Filter-only mode: "filterOnly": true, skips vector similarity, uses scalar filters only
 ApiResponse QueryVectors(const json& request) {
-    if (!request.contains("queryVector")) {
-        return make_error(400, "ValidationException", "queryVector is required");
-    }
     if (!request.contains("topK")) {
         return make_error(400, "ValidationException", "topK is required");
     }
@@ -1944,18 +2098,8 @@ ApiResponse QueryVectors(const json& request) {
     int top_k = request["topK"].get<int>();
     bool return_distance = request.value("returnDistance", false);
     bool return_metadata = request.value("returnMetadata", false);
-
-    // Parse query vector
-    std::vector<float> query_vector;
-    if (request["queryVector"].contains("float32")) {
-        for (const auto& val : request["queryVector"]["float32"]) {
-            query_vector.push_back(val.get<float>());
-        }
-    } else if (request["queryVector"].is_array()) {
-        for (const auto& val : request["queryVector"]) {
-            query_vector.push_back(val.get<float>());
-        }
-    }
+    bool explain_plan = request.value("explainPlan", false);
+    bool filter_only = request.value("filterOnly", false);
 
     // Get table state and configuration
     auto state = TableStateManager::instance().get_or_create(bucket_name, index_name);
@@ -1966,19 +2110,43 @@ ApiResponse QueryVectors(const json& request) {
     if (request.contains("refineFactor")) config.refine_factor = request["refineFactor"];
     if (request.contains("ef")) config.ef = request["ef"];
 
-    int dimension = state->dimension;
-    if (static_cast<int>(query_vector.size()) != dimension && dimension > 0) {
-        return make_error(400, "ValidationException",
-            "Query vector dimension mismatch. Expected " + std::to_string(dimension) +
-            ", got " + std::to_string(query_vector.size()));
-    }
-
     // Parse filter if provided
     std::string filter;
     if (request.contains("filter")) {
         filter = request["filter"].dump();
         if (filter.front() == '"' && filter.back() == '"') {
             filter = filter.substr(1, filter.length() - 2);
+        }
+    }
+
+    if (filter_only && filter.empty()) {
+        return make_error(400, "ValidationException",
+            "filterOnly mode requires a filter");
+    }
+
+    if (!filter_only && !request.contains("queryVector")) {
+        return make_error(400, "ValidationException",
+            "queryVector is required (use filterOnly:true for filter-only queries)");
+    }
+
+    // Parse query vector (only needed for vector search mode)
+    std::vector<float> query_vector;
+    if (!filter_only) {
+        if (request["queryVector"].contains("float32")) {
+            for (const auto& val : request["queryVector"]["float32"]) {
+                query_vector.push_back(val.get<float>());
+            }
+        } else if (request["queryVector"].is_array()) {
+            for (const auto& val : request["queryVector"]) {
+                query_vector.push_back(val.get<float>());
+            }
+        }
+
+        int dimension = state->dimension;
+        if (static_cast<int>(query_vector.size()) != dimension && dimension > 0) {
+            return make_error(400, "ValidationException",
+                "Query vector dimension mismatch. Expected " + std::to_string(dimension) +
+                ", got " + std::to_string(query_vector.size()));
         }
     }
 
@@ -1998,10 +2166,19 @@ ApiResponse QueryVectors(const json& request) {
     }
 
     std::string error;
-    auto results = LanceDBHelper::query_vectors(
-        table, query_vector, top_k, filter,
-        return_distance, return_metadata, config.to_lancedb_distance(),
-        config, error);
+    std::string explain_plan_output;
+    std::vector<LanceDBHelper::QueryResult> results;
+
+    if (filter_only) {
+        results = LanceDBHelper::filter_only_query(
+            table, top_k, filter, return_metadata,
+            config, explain_plan, explain_plan_output, error);
+    } else {
+        results = LanceDBHelper::query_vectors(
+            table, query_vector, top_k, filter,
+            return_distance, return_metadata, config.to_lancedb_distance(),
+            config, explain_plan, explain_plan_output, error);
+    }
 
     lancedb_table_free(table);
     lancedb_connection_free(conn);
@@ -2010,8 +2187,10 @@ ApiResponse QueryVectors(const json& request) {
         return make_error(500, "InternalServerException", error);
     }
 
+    std::string mode = filter_only ? "filter-only" : "vector";
     LOG_INFO("SEARCH_VECTOR", index_name,
-             "Query executed (topK=" + std::to_string(top_k) +
+             "Query executed (mode=" + mode +
+             ", topK=" + std::to_string(top_k) +
              ", results=" + std::to_string(results.size()) + ")");
 
     json vectors_response = json::array();
@@ -2019,7 +2198,7 @@ ApiResponse QueryVectors(const json& request) {
         json vec;
         vec["key"] = result.key;
 
-        if (return_distance) {
+        if (return_distance && !filter_only) {
             vec["distance"] = result.distance;
         }
 
@@ -2039,14 +2218,23 @@ ApiResponse QueryVectors(const json& request) {
         vectors_response.push_back(vec);
     }
 
-    return make_success({
-        {"distanceMetric", config.distance_metric},
+    json response = {
         {"indexType", config.index_type},
         {"vectors", vectors_response},
         {"indexState", {
             {"indexBuildInProgress", state->index_build_in_progress}
         }}
-    });
+    };
+
+    if (!filter_only) {
+        response["distanceMetric"] = config.distance_metric;
+    }
+
+    if (explain_plan && !explain_plan_output.empty()) {
+        response["queryPlan"] = explain_plan_output;
+    }
+
+    return make_success(response);
 }
 
 // TriggerRebuild - Manually trigger index rebuild
