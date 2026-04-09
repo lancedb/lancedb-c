@@ -554,7 +554,7 @@ if(BUILD_TESTS)
     )
     # Run scalar index detailed tests with valgrind
     add_test(NAME lancedb_scalar_index_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite

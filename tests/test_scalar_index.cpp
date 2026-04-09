@@ -273,15 +273,21 @@ TEST_CASE_METHOD(LanceDBFixture, "List indices detailed - null parameter handlin
   char* error_message = nullptr;
   REQUIRE(lancedb_table_list_indices_detailed(
       table, nullptr, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
 
   // Null count_out
   LanceDBIndexInfo* indices = nullptr;
   REQUIRE(lancedb_table_list_indices_detailed(
       table, &indices, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
 
   // Null table
   REQUIRE(lancedb_table_list_indices_detailed(
       nullptr, &indices, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
 
   lancedb_table_free(table);
 }
