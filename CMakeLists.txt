@@ -191,7 +191,18 @@ if(BUILD_EXAMPLES)
   )
 
   # s3vector_concurrent_service - concurrent vector service with background indexing
-  find_package(nlohmann_json REQUIRED)
+  find_package(nlohmann_json QUIET)
+  if(NOT nlohmann_json_FOUND)
+    message(STATUS "nlohmann_json not found, fetching from GitHub...")
+    include(FetchContent)
+    FetchContent_Declare(
+      nlohmann_json
+      GIT_REPOSITORY https://github.com/nlohmann/json.git
+      GIT_TAG v3.11.3
+      GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+  endif()
   find_package(CURL REQUIRED)
   find_package(OpenSSL REQUIRED)
   add_executable(s3vector_concurrent_service
