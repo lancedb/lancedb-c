@@ -378,6 +378,30 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_index_tests)
 
+  # Add test executable for scalar index detailed tests (runs with valgrind)
+  add_executable(lancedb_scalar_index_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_scalar_index.cpp
+  )
+  target_link_libraries(lancedb_scalar_index_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_scalar_index_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_scalar_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_scalar_index_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_scalar_index_tests)
+
   # Add test executable for vector tests (runs without valgrind)
   add_executable(lancedb_vector_index_tests
     tests/test_main.cpp
@@ -517,6 +541,19 @@ if(BUILD_TESTS)
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
         $<TARGET_FILE:lancedb_index_tests>
     )
+    # Run scalar index detailed tests with valgrind
+    add_test(NAME lancedb_scalar_index_tests
+      COMMAND ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_scalar_index.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_scalar_index_tests>
+    )
     # Run query tests with valgrind
     add_test(NAME lancedb_query_tests
       COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
@@ -537,6 +574,7 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_table_meta_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_meta_tests>)
     add_test(NAME lancedb_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_index_tests>)
     add_test(NAME lancedb_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_query_tests>)
+    add_test(NAME lancedb_scalar_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_scalar_index_tests>)
   endif()
 
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)

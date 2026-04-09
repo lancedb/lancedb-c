@@ -1400,6 +1400,44 @@ LanceDBError lancedb_table_index_stats(
 );
 
 /**
+ * Detailed index information structure
+ */
+typedef struct {
+    char* name;                  // Index name (heap-allocated)
+    LanceDBIndexType index_type; // Type of the index
+    char** columns;              // Array of column name strings
+    size_t num_columns;          // Number of columns
+} LanceDBIndexInfo;
+
+/**
+ * List all indices on the table with detailed information
+ *
+ * @param table - pointer to LanceDBTable
+ * @param indices_out - pointer to receive array of LanceDBIndexInfo structs
+ * @param count_out - pointer to receive the count of indices
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The caller is responsible for freeing the returned data
+ * using lancedb_free_index_list_detailed(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_indices_detailed(
+    const LanceDBTable* table,
+    LanceDBIndexInfo** indices_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free index info array returned by lancedb_table_list_indices_detailed
+ *
+ * @param indices - array of LanceDBIndexInfo structs returned by lancedb_table_list_indices_detailed
+ * @param count - number of entries in the array
+ */
+void lancedb_free_index_list_detailed(LanceDBIndexInfo* indices, size_t count);
+
+/**
  * Free Arrow arrays returned by vector search functions
  *
  * @param arrays - array of Arrow C ABI array pointers

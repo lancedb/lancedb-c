@@ -2382,6 +2382,264 @@ ApiResponse UpdateIndexConfig(const json& request) {
 }
 
 // ============================================================================
+// Scalar Index Management
+// ============================================================================
+
+static LanceDBIndexType parse_scalar_index_type(const std::string& type_str) {
+    if (type_str == "BTREE") return LANCEDB_INDEX_BTREE;
+    if (type_str == "BITMAP") return LANCEDB_INDEX_BITMAP;
+    if (type_str == "LABELLIST") return LANCEDB_INDEX_LABELLIST;
+    return LANCEDB_INDEX_AUTO;  // invalid sentinel
+}
+
+static std::string index_type_to_string(LanceDBIndexType type) {
+    switch (type) {
+        case LANCEDB_INDEX_BTREE: return "BTREE";
+        case LANCEDB_INDEX_BITMAP: return "BITMAP";
+        case LANCEDB_INDEX_LABELLIST: return "LABELLIST";
+        case LANCEDB_INDEX_FTS: return "FTS";
+        case LANCEDB_INDEX_IVF_FLAT: return "IVF_FLAT";
+        case LANCEDB_INDEX_IVF_PQ: return "IVF_PQ";
+        case LANCEDB_INDEX_IVF_HNSW_PQ: return "IVF_HNSW_PQ";
+        case LANCEDB_INDEX_IVF_HNSW_SQ: return "IVF_HNSW_SQ";
+        default: return "UNKNOWN";
+    }
+}
+
+// CreateScalarIndex - Create scalar indexes on specific columns
+ApiResponse CreateScalarIndex(const json& request) {
+    if (!request.contains("indexName")) {
+        return make_error(400, "ValidationException", "indexName is required");
+    }
+    if (!request.contains("vectorBucketName")) {
+        return make_error(400, "ValidationException", "vectorBucketName is required");
+    }
+    if (!request.contains("columns") || !request["columns"].is_array() || request["columns"].empty()) {
+        return make_error(400, "ValidationException",
+            "columns array is required (each element: {name, indexType})");
+    }
+
+    std::string bucket_name = request["vectorBucketName"].get<std::string>();
+    std::string index_name = request["indexName"].get<std::string>();
+
+    if (!LanceDBHelper::index_exists(bucket_name, index_name)) {
+        return make_error(404, "NotFoundException",
+            "Index '" + index_name + "' not found");
+    }
+
+    // Validate columns before connecting
+    struct ColSpec {
+        std::string name;
+        LanceDBIndexType type;
+    };
+    std::vector<ColSpec> col_specs;
+
+    for (const auto& col : request["columns"]) {
+        if (!col.contains("name") || !col["name"].is_string() || col["name"].get<std::string>().empty()) {
+            return make_error(400, "ValidationException",
+                "Each column must have a 'name' field");
+        }
+        std::string col_name = col["name"].get<std::string>();
+        std::string type_str = col.value("indexType", "BTREE");
+
+        LanceDBIndexType idx_type = parse_scalar_index_type(type_str);
+        if (idx_type == LANCEDB_INDEX_AUTO) {
+            return make_error(400, "ValidationException",
+                "Invalid indexType '" + type_str + "' for column '" + col_name +
+                "'. Must be BTREE, BITMAP, or LABELLIST");
+        }
+        col_specs.push_back({col_name, idx_type});
+    }
+
+    // Connect and open table
+    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
+    LanceDBConnection* conn = LanceDBHelper::connect(db_path);
+    if (!conn) {
+        return make_error(500, "InternalServerException",
+            "Failed to connect to index database");
+    }
+
+    LanceDBTable* table = LanceDBHelper::open_table(conn, "vectors");
+    if (!table) {
+        lancedb_connection_free(conn);
+        return make_error(500, "InternalServerException",
+            "Failed to open vectors table");
+    }
+
+    // Create a scalar index for each column
+    json created = json::array();
+    for (const auto& spec : col_specs) {
+        const char* col_name = spec.name.c_str();
+        const char* columns[] = {col_name};
+        LanceDBScalarIndexConfig cfg;
+        cfg.replace = 1;
+        cfg.force_update_statistics = 0;
+
+        char* err_msg = nullptr;
+        LanceDBError result = lancedb_table_create_scalar_index(
+            table, columns, 1, spec.type, &cfg, &err_msg);
+
+        if (result != LANCEDB_SUCCESS) {
+            std::string error = err_msg ? err_msg : lancedb_error_to_message(result);
+            if (err_msg) lancedb_free_string(err_msg);
+            lancedb_table_free(table);
+            lancedb_connection_free(conn);
+            return make_error(500, "InternalServerException",
+                "Failed to create scalar index on column '" + spec.name + "': " + error);
+        }
+
+        created.push_back({
+            {"column", spec.name},
+            {"indexType", index_type_to_string(spec.type)}
+        });
+
+        LOG_INFO("CREATE_SCALAR_INDEX", index_name,
+                 "Scalar index created on column '" + spec.name +
+                 "' (type=" + index_type_to_string(spec.type) + ")");
+    }
+
+    lancedb_table_free(table);
+    lancedb_connection_free(conn);
+
+    return make_success({
+        {"indexName", index_name},
+        {"vectorBucketName", bucket_name},
+        {"createdIndexes", created}
+    });
+}
+
+// ListScalarIndexes - List all indexes on the table
+ApiResponse ListScalarIndexes(const json& request) {
+    if (!request.contains("indexName")) {
+        return make_error(400, "ValidationException", "indexName is required");
+    }
+    if (!request.contains("vectorBucketName")) {
+        return make_error(400, "ValidationException", "vectorBucketName is required");
+    }
+
+    std::string bucket_name = request["vectorBucketName"].get<std::string>();
+    std::string index_name = request["indexName"].get<std::string>();
+
+    if (!LanceDBHelper::index_exists(bucket_name, index_name)) {
+        return make_error(404, "NotFoundException",
+            "Index '" + index_name + "' not found");
+    }
+
+    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
+    LanceDBConnection* conn = LanceDBHelper::connect(db_path);
+    if (!conn) {
+        return make_error(500, "InternalServerException",
+            "Failed to connect to index database");
+    }
+
+    LanceDBTable* table = LanceDBHelper::open_table(conn, "vectors");
+    if (!table) {
+        lancedb_connection_free(conn);
+        return make_error(500, "InternalServerException",
+            "Failed to open vectors table");
+    }
+
+    LanceDBIndexInfo* indices = nullptr;
+    size_t count = 0;
+    char* err_msg = nullptr;
+    LanceDBError result = lancedb_table_list_indices_detailed(
+        table, &indices, &count, &err_msg);
+
+    if (result != LANCEDB_SUCCESS) {
+        std::string error = err_msg ? err_msg : lancedb_error_to_message(result);
+        if (err_msg) lancedb_free_string(err_msg);
+        lancedb_table_free(table);
+        lancedb_connection_free(conn);
+        return make_error(500, "InternalServerException",
+            "Failed to list indices: " + error);
+    }
+
+    json indexes_json = json::array();
+    for (size_t i = 0; i < count; i++) {
+        json idx;
+        idx["name"] = indices[i].name ? std::string(indices[i].name) : "";
+        idx["indexType"] = index_type_to_string(indices[i].index_type);
+
+        json cols = json::array();
+        for (size_t j = 0; j < indices[i].num_columns; j++) {
+            if (indices[i].columns[j]) {
+                cols.push_back(std::string(indices[i].columns[j]));
+            }
+        }
+        idx["columns"] = cols;
+        indexes_json.push_back(idx);
+    }
+
+    if (indices) lancedb_free_index_list_detailed(indices, count);
+    lancedb_table_free(table);
+    lancedb_connection_free(conn);
+
+    return make_success({
+        {"indexName", index_name},
+        {"vectorBucketName", bucket_name},
+        {"indexes", indexes_json}
+    });
+}
+
+// DropScalarIndex - Drop a scalar index by name
+ApiResponse DropScalarIndex(const json& request) {
+    if (!request.contains("indexName")) {
+        return make_error(400, "ValidationException", "indexName is required");
+    }
+    if (!request.contains("vectorBucketName")) {
+        return make_error(400, "ValidationException", "vectorBucketName is required");
+    }
+    if (!request.contains("scalarIndexName")) {
+        return make_error(400, "ValidationException", "scalarIndexName is required");
+    }
+
+    std::string bucket_name = request["vectorBucketName"].get<std::string>();
+    std::string index_name = request["indexName"].get<std::string>();
+    std::string scalar_index_name = request["scalarIndexName"].get<std::string>();
+
+    if (!LanceDBHelper::index_exists(bucket_name, index_name)) {
+        return make_error(404, "NotFoundException",
+            "Index '" + index_name + "' not found");
+    }
+
+    std::string db_path = utils::get_index_db_path(bucket_name, index_name);
+    LanceDBConnection* conn = LanceDBHelper::connect(db_path);
+    if (!conn) {
+        return make_error(500, "InternalServerException",
+            "Failed to connect to index database");
+    }
+
+    LanceDBTable* table = LanceDBHelper::open_table(conn, "vectors");
+    if (!table) {
+        lancedb_connection_free(conn);
+        return make_error(500, "InternalServerException",
+            "Failed to open vectors table");
+    }
+
+    char* err_msg = nullptr;
+    LanceDBError result = lancedb_table_drop_index(table, scalar_index_name.c_str(), &err_msg);
+
+    lancedb_table_free(table);
+    lancedb_connection_free(conn);
+
+    if (result != LANCEDB_SUCCESS) {
+        std::string error = err_msg ? err_msg : lancedb_error_to_message(result);
+        if (err_msg) lancedb_free_string(err_msg);
+        return make_error(500, "InternalServerException",
+            "Failed to drop index '" + scalar_index_name + "': " + error);
+    }
+
+    LOG_INFO("DROP_SCALAR_INDEX", index_name,
+             "Dropped scalar index '" + scalar_index_name + "'");
+
+    return make_success({
+        {"indexName", index_name},
+        {"vectorBucketName", bucket_name},
+        {"droppedIndex", scalar_index_name}
+    });
+}
+
+// ============================================================================
 // Command Line Interface
 // ============================================================================
 
@@ -2401,6 +2659,9 @@ COMMANDS:
     TriggerRebuild          Manually trigger index rebuild
     GetIndexState           Get current index state and stats
     UpdateIndexConfig       Update index configuration and thresholds
+    CreateScalarIndex       Create scalar indexes on table columns
+    ListScalarIndexes       List all indexes on the table
+    DropScalarIndex         Drop an index by name
     --help, -h              Show this help message
 
 DESIGN:
@@ -2480,11 +2741,39 @@ EXAMPLES:
         "deletionRatioThreshold": 0.25
     }'
 
+    # Create scalar indexes on columns
+    ./s3vector_concurrent_service CreateScalarIndex '{
+        "vectorBucketName": "my-bucket",
+        "indexName": "my-index",
+        "columns": [
+            {"name": "category", "indexType": "BITMAP"},
+            {"name": "price", "indexType": "BTREE"}
+        ]
+    }'
+
+    # List all indexes on the table
+    ./s3vector_concurrent_service ListScalarIndexes '{
+        "vectorBucketName": "my-bucket",
+        "indexName": "my-index"
+    }'
+
+    # Drop a scalar index by name
+    ./s3vector_concurrent_service DropScalarIndex '{
+        "vectorBucketName": "my-bucket",
+        "indexName": "my-index",
+        "scalarIndexName": "category_idx"
+    }'
+
 INDEX TYPES:
     IVF_FLAT      - Inverted file index (no compression)
     IVF_PQ        - IVF with product quantization (default)
     IVF_HNSW_PQ   - IVF with HNSW graph and PQ
     IVF_HNSW_SQ   - IVF with HNSW graph and scalar quantization
+
+SCALAR INDEX TYPES:
+    BTREE         - B-tree index (ordered data, range queries)
+    BITMAP        - Bitmap index (low-cardinality categorical data)
+    LABELLIST     - Label list index (list/tag columns)
 
 QUERY PARAMETERS:
     nprobes       - Number of IVF partitions to search (higher = more accurate)
@@ -2601,6 +2890,12 @@ int main(int argc, char* argv[]) {
         response = GetIndexState(request);
     } else if (command == "UpdateIndexConfig") {
         response = UpdateIndexConfig(request);
+    } else if (command == "CreateScalarIndex") {
+        response = CreateScalarIndex(request);
+    } else if (command == "ListScalarIndexes") {
+        response = ListScalarIndexes(request);
+    } else if (command == "DropScalarIndex") {
+        response = DropScalarIndex(request);
     } else {
         std::cerr << "Unknown command: " << command << std::endl;
         print_help();
