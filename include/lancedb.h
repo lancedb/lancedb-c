@@ -1074,6 +1074,46 @@ LanceDBError lancedb_vector_query_ef(
 );
 
 /**
+ * Get the query execution plan without executing the query
+ *
+ * Returns a human-readable string describing the steps that will be taken.
+ * Does NOT consume the query — it can still be executed afterwards.
+ *
+ * @param query - pointer to LanceDBQuery (NOT consumed)
+ * @param verbose - if true, include additional detail in the plan
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *         Caller must free the returned plan string with lancedb_free_string()
+ */
+LanceDBError lancedb_query_explain_plan(
+    const LanceDBQuery* query,
+    bool verbose,
+    char** plan_out,
+    char** error_message
+);
+
+/**
+ * Get the vector query execution plan without executing the query
+ *
+ * Returns a human-readable string describing the steps that will be taken.
+ * Does NOT consume the query — it can still be executed afterwards.
+ *
+ * @param query - pointer to LanceDBVectorQuery (NOT consumed)
+ * @param verbose - if true, include additional detail in the plan
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *         Caller must free the returned plan string with lancedb_free_string()
+ */
+LanceDBError lancedb_vector_query_explain_plan(
+    const LanceDBVectorQuery* query,
+    bool verbose,
+    char** plan_out,
+    char** error_message
+);
+
+/**
  * Execute query and return streaming result
  *
  * @param query - pointer to LanceDBQuery (consumed by this function)
@@ -1358,6 +1398,44 @@ LanceDBError lancedb_table_index_stats(
     LanceDBIndexStats* stats_out,
     char** error_message
 );
+
+/**
+ * Detailed index information structure
+ */
+typedef struct {
+    char* name;                  // Index name (heap-allocated)
+    LanceDBIndexType index_type; // Type of the index
+    char** columns;              // Array of column name strings
+    size_t num_columns;          // Number of columns
+} LanceDBIndexInfo;
+
+/**
+ * List all indices on the table with detailed information
+ *
+ * @param table - pointer to LanceDBTable
+ * @param indices_out - pointer to receive array of LanceDBIndexInfo structs
+ * @param count_out - pointer to receive the count of indices
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The caller is responsible for freeing the returned data
+ * using lancedb_free_index_list_detailed(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_indices_detailed(
+    const LanceDBTable* table,
+    LanceDBIndexInfo** indices_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free index info array returned by lancedb_table_list_indices_detailed
+ *
+ * @param indices - array of LanceDBIndexInfo structs returned by lancedb_table_list_indices_detailed
+ * @param count - number of entries in the array
+ */
+void lancedb_free_index_list_detailed(LanceDBIndexInfo* indices, size_t count);
 
 /**
  * Free Arrow arrays returned by vector search functions

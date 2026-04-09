@@ -190,7 +190,45 @@ if(BUILD_EXAMPLES)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
-  add_custom_target(examples DEPENDS simple full s3)
+  # s3vector_concurrent_service - concurrent vector service with background indexing
+  find_package(nlohmann_json QUIET)
+  if(NOT nlohmann_json_FOUND)
+    message(STATUS "nlohmann_json not found, fetching from GitHub...")
+    include(FetchContent)
+    FetchContent_Declare(
+      nlohmann_json
+      GIT_REPOSITORY https://github.com/nlohmann/json.git
+      GIT_TAG v3.11.3
+      GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+  endif()
+  find_package(CURL REQUIRED)
+  find_package(OpenSSL REQUIRED)
+  add_executable(s3vector_concurrent_service
+    examples/s3vector_concurrent_service.cpp
+    examples/s3_lock.cpp
+    examples/s3_http.cpp
+  )
+  target_link_libraries(s3vector_concurrent_service
+    lancedb
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+    nlohmann_json::nlohmann_json
+    CURL::libcurl
+    OpenSSL::Crypto
+  )
+  target_include_directories(s3vector_concurrent_service
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples
+  )
+  target_compile_options(s3vector_concurrent_service PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(s3vector_concurrent_service PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  add_custom_target(examples DEPENDS simple full s3 s3vector_concurrent_service)
 endif()
 
 if(BUILD_DOCS)
@@ -351,6 +389,30 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_index_tests)
 
+  # Add test executable for scalar index detailed tests (runs with valgrind)
+  add_executable(lancedb_scalar_index_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_scalar_index.cpp
+  )
+  target_link_libraries(lancedb_scalar_index_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_scalar_index_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_scalar_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_scalar_index_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_scalar_index_tests)
+
   # Add test executable for vector tests (runs without valgrind)
   add_executable(lancedb_vector_index_tests
     tests/test_main.cpp
@@ -490,6 +552,19 @@ if(BUILD_TESTS)
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
         $<TARGET_FILE:lancedb_index_tests>
     )
+    # Run scalar index detailed tests with valgrind
+    add_test(NAME lancedb_scalar_index_tests
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite
+        --errors-for-leak-kinds=definite
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_scalar_index.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_scalar_index_tests>
+    )
     # Run query tests with valgrind
     add_test(NAME lancedb_query_tests
       COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
@@ -510,6 +585,7 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_table_meta_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_meta_tests>)
     add_test(NAME lancedb_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_index_tests>)
     add_test(NAME lancedb_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_query_tests>)
+    add_test(NAME lancedb_scalar_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_scalar_index_tests>)
   endif()
 
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)
