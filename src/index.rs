@@ -763,9 +763,8 @@ pub unsafe extern "C" fn lancedb_table_list_indices_detailed(
                 if num_cols == 0 {
                     info.columns = ptr::null_mut();
                 } else {
-                    let cols_array = libc::malloc(
-                        num_cols * std::mem::size_of::<*mut c_char>(),
-                    ) as *mut *mut c_char;
+                    let cols_array = libc::malloc(num_cols * std::mem::size_of::<*mut c_char>())
+                        as *mut *mut c_char;
                     if cols_array.is_null() {
                         // Free the name we just allocated
                         let _ = CString::from_raw(info.name);

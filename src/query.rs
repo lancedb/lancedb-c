@@ -19,7 +19,9 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{DistanceType, Table};
 
 use crate::connection::{get_runtime, LanceDBTable};
-use crate::error::{handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError};
+use crate::error::{
+    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+};
 use crate::types::LanceDBDistanceType;
 
 /// Opaque handle to a LanceDB Query
