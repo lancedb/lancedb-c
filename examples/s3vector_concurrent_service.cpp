@@ -364,6 +364,10 @@ public:
     bool index_build_in_progress = false;
     pid_t builder_pid = 0;
 
+    // Lease-based crash detection (works across machines for S3 backend)
+    time_t build_started_at = 0;       // UTC epoch when build started
+    int build_lease_seconds = 600;     // Max expected build duration (10 min default)
+
     // Thresholds for auto-rebuild
     size_t unindexed_threshold = DEFAULT_UNINDEXED_THRESHOLD;
     double deletion_ratio_threshold = DEFAULT_DELETION_RATIO;
@@ -372,32 +376,50 @@ public:
     mutable std::mutex mutex;
 
     bool is_builder_alive() const {
-        if (!index_build_in_progress || builder_pid == 0) {
+        if (!index_build_in_progress) {
             return false;
         }
-        if (kill(builder_pid, 0) == -1) {
-            if (errno == ESRCH) return false;
+
+        // Lease-based check (works for all backends, including distributed S3)
+        if (build_started_at > 0) {
+            time_t now = time(nullptr);
+            if ((now - build_started_at) > build_lease_seconds) {
+                return false;  // lease expired, builder presumed dead
+            }
         }
+
+        // LOCAL backend only: fast-path PID check
+        // On S3, PID is from a different machine — kill() is meaningless
+        if (BackendConfig::instance().is_local() && builder_pid > 0) {
+            if (kill(builder_pid, 0) == -1) {
+                if (errno == ESRCH) return false;
+            }
+        }
+
         return true;
     }
 
     void reset_crashed_builder() {
         if (index_build_in_progress && !is_builder_alive()) {
             LOG_WARN("INDEX_STATE", index_name,
-                     "Detected crashed builder (PID " + std::to_string(builder_pid) + "), resetting state");
+                     "Detected crashed builder (PID " + std::to_string(builder_pid) +
+                     ", started_at=" + std::to_string(build_started_at) + "), resetting state");
             index_build_in_progress = false;
             builder_pid = 0;
+            build_started_at = 0;
         }
     }
 
     void mark_build_started() {
         index_build_in_progress = true;
         builder_pid = getpid();
+        build_started_at = time(nullptr);
     }
 
     void mark_build_complete() {
         index_build_in_progress = false;
         builder_pid = 0;
+        build_started_at = 0;
     }
 
     json to_json() const {
@@ -409,6 +431,8 @@ public:
             {"config", config.to_json()},
             {"indexBuildInProgress", index_build_in_progress},
             {"builderPid", static_cast<int>(builder_pid)},
+            {"buildStartedAt", static_cast<long long>(build_started_at)},
+            {"buildLeaseSeconds", build_lease_seconds},
             {"unindexedThreshold", unindexed_threshold},
             {"deletionRatioThreshold", deletion_ratio_threshold}
         };
@@ -422,6 +446,8 @@ public:
         if (j.contains("config")) config = IndexConfig::from_json(j["config"]);
         if (j.contains("indexBuildInProgress")) index_build_in_progress = j["indexBuildInProgress"].get<bool>();
         if (j.contains("builderPid")) builder_pid = static_cast<pid_t>(j["builderPid"].get<int>());
+        if (j.contains("buildStartedAt")) build_started_at = static_cast<time_t>(j["buildStartedAt"].get<long long>());
+        if (j.contains("buildLeaseSeconds")) build_lease_seconds = j["buildLeaseSeconds"].get<int>();
         if (j.contains("unindexedThreshold")) unindexed_threshold = j["unindexedThreshold"];
         if (j.contains("deletionRatioThreshold")) deletion_ratio_threshold = j["deletionRatioThreshold"];
     }
@@ -1503,10 +1529,8 @@ public:
 };
 
 // ============================================================================
-// Index Builder - Synchronous build with file locking
+// Index Builder - Async build (for put/delete) with file locking
 // ============================================================================
-
-//TODO: IndexBuilder should not use Filelock directly, it should use the Base_lock abstraction, so that we can replace the locking mechanism when we move to s3 system. the FileLock is for the purpose of this prototype, on s3 storage system it can be achived by s3-conditional-write.
 
 class IndexBuilder {
 public:
@@ -1515,8 +1539,8 @@ public:
         return builder;
     }
 
-    // Check if rebuild is needed (using LanceDB index_stats) and trigger if so
-    // Returns true if rebuild was triggered and completed
+    // Check if rebuild is needed and launch async build if so.
+    // Returns true if build was launched (runs in background, not completed yet).
     bool check_and_rebuild_if_needed(std::shared_ptr<TableIndexState> state) {
         // Query live index stats from LanceDB
         LanceDBIndexStats stats;
@@ -1525,17 +1549,67 @@ public:
         }
 
         // Check thresholds against live stats
-        bool needs = false;
-        if (stats.num_unindexed_rows >= state->unindexed_threshold) {
-            needs = true;
+        if (stats.num_unindexed_rows < state->unindexed_threshold) {
+            return false;
         }
 
-        if (!needs) return false;
+        // Prevent double-launch for the same index within this process
+        std::string key = state->bucket_name + "/" + state->index_name;
+        {
+            std::lock_guard<std::mutex> lock(active_builds_mutex_);
+            if (active_builds_.count(key)) {
+                LOG_INFO("INDEX_BUILDER", state->index_name,
+                         "Build already launched in this process, skipping");
+                return false;
+            }
+            active_builds_.insert(key);
+        }
 
+        // Fork + exec a new process for the build.
+        // Plain fork() doesn't work because LanceDB's Rust/tokio async runtime
+        // uses thread pools that don't survive fork(). exec() gives the child
+        // a fresh runtime. The parent returns immediately.
+        json rebuild_req = {
+            {"vectorBucketName", state->bucket_name},
+            {"indexName", state->index_name}
+        };
+        std::string rebuild_json = rebuild_req.dump();
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            LOG_ERROR("INDEX_BUILDER", state->index_name,
+                      "fork() failed: " + std::string(strerror(errno)));
+            std::lock_guard<std::mutex> lock(active_builds_mutex_);
+            active_builds_.erase(key);
+            return false;
+        }
+
+        if (pid == 0) {
+            // Child: suppress stdout/stderr, then exec a fresh process
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
+            execl("/proc/self/exe", "s3vector_concurrent_service",
+                  "_DoRebuild", rebuild_json.c_str(), nullptr);
+            _exit(1);
+        }
+
+        LOG_INFO("INDEX_BUILDER", state->index_name,
+                 "Background build process forked (child PID=" + std::to_string(pid) + ")");
+        return true;  // build launched
+    }
+
+    // Run rebuild with full lock coordination (called by _DoRebuild subprocess)
+    bool execute_rebuild(std::shared_ptr<TableIndexState> state) {
+        LanceDBIndexStats stats;
+        LanceDBHelper::get_index_stats_for(state->bucket_name, state->index_name, stats);
         return do_rebuild(state, stats, false);
     }
 
-    // Force trigger rebuild (for manual trigger)
+    // Force trigger rebuild (for manual trigger — runs synchronously)
     bool force_rebuild(std::shared_ptr<TableIndexState> state) {
         LanceDBIndexStats stats;
         LanceDBHelper::get_index_stats_for(state->bucket_name, state->index_name, stats);
@@ -1543,6 +1617,9 @@ public:
     }
 
 private:
+    std::mutex active_builds_mutex_;
+    std::set<std::string> active_builds_;
+
     bool do_rebuild(std::shared_ptr<TableIndexState> state,
                     const LanceDBIndexStats& stats, bool forced) {
         FrontendLocker lock(state->bucket_name, state->index_name);
@@ -1974,10 +2051,10 @@ ApiResponse PutVectors(const json& request) {
         LOG_OP("PUT_VECTOR", index_name, key, "Vector inserted");
     }
 
-    // Check if rebuild is needed (queries live index stats from LanceDB)
+    // Check if rebuild is needed — launches async build if threshold reached
     bool rebuild_triggered = IndexBuilder::instance().check_and_rebuild_if_needed(state);
     if (rebuild_triggered) {
-        LOG_INFO("PUT_VECTOR", index_name, "Index rebuild completed (threshold reached)");
+        LOG_INFO("PUT_VECTOR", index_name, "Index rebuild launched in background (threshold reached)");
     }
 
     // Get live stats for response
@@ -2056,11 +2133,11 @@ ApiResponse DeleteVectors(const json& request) {
         LOG_OP("DELETE_VECTOR", index_name, key, "Vector deleted");
     }
 
-    // Check if rebuild is needed (queries live index stats from LanceDB)
+    // Check if rebuild is needed — launches async build if threshold reached
     auto state = TableStateManager::instance().get_or_create(bucket_name, index_name);
     bool rebuild_triggered = IndexBuilder::instance().check_and_rebuild_if_needed(state);
     if (rebuild_triggered) {
-        LOG_INFO("DELETE_VECTOR", index_name, "Index rebuild completed (deletion ratio threshold reached)");
+        LOG_INFO("DELETE_VECTOR", index_name, "Index rebuild launched in background (threshold reached)");
     }
 
     LanceDBIndexStats stats;
@@ -2896,6 +2973,13 @@ int main(int argc, char* argv[]) {
         response = ListScalarIndexes(request);
     } else if (command == "DropScalarIndex") {
         response = DropScalarIndex(request);
+    } else if (command == "_DoRebuild") {
+        // Internal: background index rebuild (launched by fork+exec from PutVectors/DeleteVectors)
+        std::string bucket = request["vectorBucketName"];
+        std::string index = request["indexName"];
+        auto state = TableStateManager::instance().get_or_create(bucket, index);
+        IndexBuilder::instance().execute_rebuild(state);
+        return 0;
     } else {
         std::cerr << "Unknown command: " << command << std::endl;
         print_help();
