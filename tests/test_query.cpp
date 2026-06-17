@@ -73,7 +73,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - all entries", "[query]") {
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
     verify_query_result(query_result, total_rows);
   }
@@ -109,7 +109,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - all entries", "[query]") {
       REQUIRE(error_message == nullptr);
 
       // Execute query (consumes the query object)
-      LanceDBQueryResult* query_result = lancedb_query_execute(query);
+      LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
       REQUIRE(query_result != nullptr);
 
       // Verify this page has the expected number of rows
@@ -151,7 +151,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 1);
@@ -176,7 +176,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 5);
@@ -211,7 +211,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 1);
@@ -236,7 +236,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     verify_query_result(query_result, 5);
@@ -261,7 +261,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow
@@ -306,7 +306,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Filter on non-existent column"
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
-  LanceDBQueryResult* query_result = lancedb_query_execute(query);
+  LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
   REQUIRE(query_result == nullptr);
   error_message = nullptr;
 
@@ -349,7 +349,7 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
     lancedb_query_result_free(query_result);
   }
@@ -363,6 +363,216 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
   REQUIRE(final_index_stats.num_entries > initial_index_stats.num_entries);
   REQUIRE(final_index_stats.size_bytes > initial_index_stats.size_bytes);
   REQUIRE(final_index_stats.hits > final_index_stats.misses);
-  
+
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query Execution Options - Basic operations", "[query]") {
+  // Create a table with test data
+  LanceDBTable* table = create_table_with_data("query_options_test_basic", 1024, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("Test setting max_batch_length") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        1000,
+        &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test setting timeout") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_timeout(
+        options,
+        30,  // 30 seconds
+        &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test setting zero timeout") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_timeout(
+        options,
+        0,  // Zero timeout means no timeout
+        &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    constexpr unsigned int query_limit = 10;
+    LanceDBError limit_result = lancedb_query_limit(query, query_limit, &error_message);
+    REQUIRE(limit_result == LANCEDB_SUCCESS);
+
+    const char* columns[] = {"key", "data"};
+    result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, options);
+    REQUIRE(query_result != nullptr);
+
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+
+    LanceDBError collect_result = lancedb_query_result_to_arrow(
+        query_result,
+        &result_arrays,
+        &result_schema,
+        &count,
+        &error_message);
+
+    REQUIRE(collect_result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    size_t total_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+      const auto length = reinterpret_cast<ArrowArray*>(result_arrays[i])->length;
+      INFO("Batch " << i << ": " << length << " rows");
+      total_rows += length;
+    }
+
+    INFO("Got " << total_rows << " rows with zero timeout");
+    REQUIRE(total_rows == query_limit);
+
+    lancedb_free_arrow_arrays(result_arrays, count);
+    if (result_schema != nullptr) {
+      lancedb_free_arrow_schema(result_schema);
+    }
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test using options with query") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+
+    constexpr unsigned int batch_size = 10;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        batch_size,
+        &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    constexpr unsigned int query_limit = 500;
+    LanceDBError limit_result = lancedb_query_limit(query, query_limit, &error_message);
+    REQUIRE(limit_result == LANCEDB_SUCCESS);
+
+    const char* columns[] = {"key", "data"};
+    result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+
+    // Execute query with options
+    LanceDBQueryResult* query_result = lancedb_query_execute(query, options);
+    REQUIRE(query_result != nullptr);
+
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+
+    LanceDBError collect_result = lancedb_query_result_to_arrow(
+        query_result,
+        &result_arrays,
+        &result_schema,
+        &count,
+        &error_message);
+
+    REQUIRE(collect_result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    size_t total_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+      const auto length = reinterpret_cast<ArrowArray*>(result_arrays[i])->length;
+      INFO("Batch " << i << ": " << length << " rows (target was " << batch_size << ")");
+      REQUIRE(length <= batch_size);
+      total_rows += length;
+    }
+
+    REQUIRE(total_rows == query_limit);
+
+    lancedb_free_arrow_arrays(result_arrays, count);
+    if (result_schema != nullptr) {
+      lancedb_free_arrow_schema(result_schema);
+    }
+    lancedb_query_execution_options_free(options);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query Execution Options - Error cases", "[query]") {
+  SECTION("Test setting max_batch_length with NULL options") {
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        nullptr,  // NULL options
+        1000,
+        &error_message);
+
+    REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    INFO("Expected error: " << error_message);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Test setting timeout with NULL options") {
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_timeout(
+        nullptr,  // NULL options
+        30,
+        &error_message);
+
+    REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    INFO("Expected error: " << error_message);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Test freeing NULL options (should not crash)") {
+    // This should be safe and not crash
+    lancedb_query_execution_options_free(nullptr);
+  }
+
+  SECTION("Test setting zero max_batch_length") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        0,  // Zero batch length - should be rejected
+        &error_message);
+
+    // Setting zero should fail
+    REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    INFO("Expected error: " << error_message);
+    lancedb_free_string(error_message);
+
+    lancedb_query_execution_options_free(options);
+  }
+}
+

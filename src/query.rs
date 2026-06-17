@@ -16,7 +16,9 @@ use arrow_data::ArrayData;
 use futures::TryStreamExt;
 
 use datafusion_expr::Expr;
-use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
+use lancedb::query::{
+    ExecutableQuery, HasQuery, QueryBase, QueryExecutionOptions, QueryFilter, Select,
+};
 use lancedb::{DistanceType, Table};
 
 use crate::connection::{get_runtime, LanceDBTable};
@@ -50,6 +52,10 @@ pub struct LanceDBVectorQuery {
     nprobes: Option<usize>,
     refine_factor: Option<u32>,
     ef: Option<usize>,
+    min_nprobes: usize,
+    max_nprobes: Option<usize>,
+    distance_range_lower: Option<f32>,
+    distance_range_upper: Option<f32>,
 }
 
 /// Query result handle for streaming results
@@ -57,6 +63,12 @@ pub struct LanceDBVectorQuery {
 pub struct LanceDBQueryResult {
     inner:
         Box<dyn futures::Stream<Item = Result<RecordBatch, lancedb::error::Error>> + Send + Unpin>,
+}
+
+/// Query execution options
+#[repr(C)]
+pub struct LanceDBQueryExecutionOptions {
+    inner: QueryExecutionOptions,
 }
 
 /// Create a new query for the given table
@@ -123,6 +135,10 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
         nprobes: None,
         refine_factor: None,
         ef: None,
+        min_nprobes: 0,
+        max_nprobes: None,
+        distance_range_lower: None,
+        distance_range_upper: None,
     });
 
     Box::into_raw(vector_query)
@@ -469,7 +485,7 @@ pub unsafe extern "C" fn lancedb_vector_query_nprobes(
     }
 
     let _ = error_message; // No errors possible in this function
-    (*query).nprobes = Some(nprobes);
+    (*query).nprobes = if nprobes > 0 { Some(nprobes) } else { None };
     LanceDBError::Success
 }
 
@@ -515,14 +531,86 @@ pub unsafe extern "C" fn lancedb_vector_query_ef(
     LanceDBError::Success
 }
 
+/// Set minimum and maximum umber of probes for vector query
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_nprobes_range(
+    query: *mut LanceDBVectorQuery,
+    min_nprobes: usize,
+    max_nprobes: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    if max_nprobes > 0 && min_nprobes > max_nprobes {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).min_nprobes = min_nprobes;
+    (*query).max_nprobes = if max_nprobes > 0 {
+        Some(max_nprobes)
+    } else {
+        None
+    };
+    LanceDBError::Success
+}
+
+/// Set distance range filter for vector query
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_distance_range(
+    query: *mut LanceDBVectorQuery,
+    lower_bound: c_float,
+    upper_bound: c_float,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    if upper_bound >= 0.0 && upper_bound <= lower_bound {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    // Use -1.0 as a sentinel value to indicate "not set"
+    // Convert to Option<f32> for the Rust API
+    (*query).distance_range_lower = if lower_bound < 0.0 {
+        None
+    } else {
+        Some(lower_bound)
+    };
+    (*query).distance_range_upper = if upper_bound < 0.0 {
+        None
+    } else {
+        Some(upper_bound)
+    };
+
+    LanceDBError::Success
+}
+
 /// Execute query and return streaming result
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `options` can be NULL (will use defaults) or a valid pointer from `lancedb_query_execution_options_new`
 /// - This function consumes the query pointer; do not use it after calling
+/// - The options pointer is NOT consumed and can be reused
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_query_execute(
     query: *mut LanceDBQuery,
+    options: *const LanceDBQueryExecutionOptions,
 ) -> *mut LanceDBQueryResult {
     if query.is_null() {
         return ptr::null_mut();
@@ -530,6 +618,13 @@ pub unsafe extern "C" fn lancedb_query_execute(
 
     let query_box = Box::from_raw(query);
     let runtime = get_runtime();
+
+    // Get options or use defaults
+    let exec_options = if options.is_null() {
+        QueryExecutionOptions::default()
+    } else {
+        (*options).inner.clone()
+    };
 
     match runtime.block_on(async {
         let mut rust_query = query_box.table.query();
@@ -549,7 +644,7 @@ pub unsafe extern "C" fn lancedb_query_execute(
             rust_query = rust_query.only_if(filter);
         }
 
-        rust_query.execute().await
+        rust_query.execute_with_options(exec_options).await
     }) {
         Ok(stream) => {
             let result = Box::new(LanceDBQueryResult {
@@ -565,10 +660,13 @@ pub unsafe extern "C" fn lancedb_query_execute(
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `options` can be NULL (will use defaults) or a valid pointer from `lancedb_query_execution_options_new`
 /// - This function consumes the query pointer; do not use it after calling
+/// - The options pointer is NOT consumed and can be reused
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_vector_query_execute(
     query: *mut LanceDBVectorQuery,
+    options: *const LanceDBQueryExecutionOptions,
 ) -> *mut LanceDBQueryResult {
     if query.is_null() {
         return ptr::null_mut();
@@ -576,6 +674,13 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
 
     let query_box = Box::from_raw(query);
     let runtime = get_runtime();
+
+    // Get options or use defaults
+    let exec_options = if options.is_null() {
+        QueryExecutionOptions::default()
+    } else {
+        (*options).inner.clone()
+    };
 
     match runtime.block_on(async {
         let mut rust_query = match query_box
@@ -616,8 +721,26 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
         if let Some(ef) = query_box.ef {
             rust_query = rust_query.ef(ef);
         }
+        // Handle nprobes range: if either min or max is set, call minimum_nprobes first
+        if query_box.min_nprobes > 0 || query_box.max_nprobes.is_some() {
+            let min = if query_box.min_nprobes > 0 {
+                query_box.min_nprobes
+            } else {
+                1 // Default minimum when only max is set
+            };
+            rust_query = rust_query.minimum_nprobes(min)?;
+        }
+        if query_box.max_nprobes.is_some() {
+            rust_query = rust_query.maximum_nprobes(query_box.max_nprobes)?;
+        }
+        if query_box.distance_range_lower.is_some() || query_box.distance_range_upper.is_some() {
+            rust_query = rust_query.distance_range(
+                query_box.distance_range_lower,
+                query_box.distance_range_upper,
+            );
+        }
 
-        rust_query.execute().await
+        rust_query.execute_with_options(exec_options).await
     }) {
         Ok(stream) => {
             let result = Box::new(LanceDBQueryResult {
@@ -768,5 +891,89 @@ pub unsafe extern "C" fn lancedb_free_arrow_arrays(
             }
         }
         libc::free(batches as *mut libc::c_void);
+    }
+}
+
+/// Create new QueryExecutionOptions with default values
+///
+/// # Safety
+/// This function is safe to call from C
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_execution_options_new() -> *mut LanceDBQueryExecutionOptions
+{
+    let options = Box::new(LanceDBQueryExecutionOptions {
+        inner: QueryExecutionOptions::default(),
+    });
+    Box::into_raw(options)
+}
+
+/// Set maximum batch length for query execution
+///
+/// # Safety
+/// - `options` must be a valid pointer returned from `lancedb_query_execution_options_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_execution_options_set_max_batch_length(
+    options: *mut LanceDBQueryExecutionOptions,
+    max_batch_length: u32,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if options.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    // Note: The underlying lancedb library accepts 0 but returns 0 batches (no data)
+    if max_batch_length == 0 {
+        if !error_message.is_null() {
+            if let Ok(c_str) = std::ffi::CString::new("max_batch_length must be greater than 0") {
+                *error_message = c_str.into_raw();
+            }
+        }
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*options).inner.max_batch_length = max_batch_length;
+    LanceDBError::Success
+}
+
+/// Set timeout for query execution
+///
+/// # Safety
+/// - `options` must be a valid pointer returned from `lancedb_query_execution_options_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_execution_options_set_timeout(
+    options: *mut LanceDBQueryExecutionOptions,
+    timeout_ms: u32,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if options.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+
+    // 0 means no timeout
+    (*options).inner.timeout = if timeout_ms == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(timeout_ms as u64))
+    };
+
+    LanceDBError::Success
+}
+
+/// Free QueryExecutionOptions
+///
+/// # Safety
+/// - `options` must be a valid pointer returned from `lancedb_query_execution_options_new`
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_execution_options_free(
+    options: *mut LanceDBQueryExecutionOptions,
+) {
+    if !options.is_null() {
+        let _ = Box::from_raw(options);
     }
 }

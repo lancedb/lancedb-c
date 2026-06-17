@@ -61,6 +61,11 @@ typedef struct LanceDBQueryResult LanceDBQueryResult;
 typedef struct LanceDBSession LanceDBSession;
 
 /**
+ * Opaque handle to a LanceDB QueryExecutionOptions
+ */
+typedef struct LanceDBQueryExecutionOptions LanceDBQueryExecutionOptions;
+
+/**
  * Opaque handle to Arrow RecordBatchReader
  */
 typedef struct LanceDBRecordBatchReader LanceDBRecordBatchReader;
@@ -1048,22 +1053,11 @@ LanceDBError lancedb_vector_query_distance_type(
 /**
  * Set number of probes for vector query
  *
- * This parameter controls how many partitions to search in IVF (Inverted File) based indices
- * such as IVF_FLAT, IVF_PQ, IVF_HNSW_PQ, and IVF_HNSW_SQ.
- *
- * IVF indices partition the vector space into clusters. During search, nprobes determines
- * how many of these partitions are searched. Higher values improve recall (find more relevant
- * results) at the cost of slower queries. Lower values make queries faster but may miss
- * relevant results that are in non-searched partitions.
- *
- * Typical values:
- * - Default is usually 20
- * - Range: 1 to num_partitions (specified during index creation)
- * - Higher nprobes (e.g., num_partitions/2) → better recall, slower queries
- * - Lower nprobes (e.g., 1-10) → faster queries, lower recall
+ * Controls how many partitions to search in IVF PQ indexes. Higher values improve
+ * recall at the cost of slower queries.
  *
  * @param query - pointer to LanceDBVectorQuery
- * @param nprobes - number of IVF partitions to search (must be <= num_partitions)
+ * @param nprobes - number of IVF partitions to search (must be <= num_partitions, use 0 to unset)
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
@@ -1079,26 +1073,9 @@ LanceDBError lancedb_vector_query_nprobes(
 /**
  * Set refine factor for vector query
  *
- * This parameter enables a refinement step to improve result accuracy for approximate
- * vector indices (IVF_PQ, IVF_HNSW_PQ, IVF_HNSW_SQ).
- *
- * When refine_factor is set, the search process works in two stages:
- * 1. Fetch (limit × refine_factor) approximate nearest neighbors using the index
- * 2. Re-rank these candidates using exact distance calculations on original vectors
- * 3. Return the top 'limit' results after refinement
- *
- * This improves accuracy because approximate indices (especially quantized ones like PQ/SQ)
- * can have ranking errors. Refinement corrects these errors by recalculating exact distances.
- *
- * Typical values:
- * - Default: No refinement (refine_factor = 1 or not set)
- * - Range: 1 to ~100
- * - refine_factor = 1 → no refinement (fastest, least accurate)
- * - refine_factor = 10 → fetch 10x results and refine (good balance)
- * - refine_factor = 50+ → very accurate but slower
- *
- * Note: Higher values increase query latency proportionally. Not useful for exact indices
- * like IVF_FLAT which already use exact distances.
+ * Controls how many additional rows are examined for IVF PQ refinement. The query
+ * fetches (limit × refine_factor) candidates and re-ranks using exact distances.
+ * Higher values improve accuracy at the cost of slower queries.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param refine_factor - multiplier for candidate set size (fetches limit × refine_factor results)
@@ -1117,31 +1094,8 @@ LanceDBError lancedb_vector_query_refine_factor(
 /**
  * Set ef parameter for HNSW vector query
  *
- * This parameter controls the exploration factor for HNSW (Hierarchical Navigable Small World)
- * based indices such as IVF_HNSW_PQ and IVF_HNSW_SQ.
- *
- * HNSW is a graph-based index that navigates through a multi-layer graph to find nearest
- * neighbors. The 'ef' parameter determines the size of the dynamic candidate list maintained
- * during the graph traversal. A larger candidate list explores more of the graph, leading to
- * better recall but slower queries.
- *
- * How it works:
- * - During search, HNSW maintains a priority queue of size 'ef' with candidate neighbors
- * - The algorithm explores neighbors of candidates in this queue
- * - Larger ef → explores more paths through the graph → better recall
- * - After exploration, the top 'limit' results are returned
- *
- * Typical values:
- * - Default is usually 100
- * - Must be >= limit (query result size)
- * - Range: limit to ~1000
- * - ef = limit → fastest, lowest recall
- * - ef = 100-200 → good balance for most use cases
- * - ef = 500+ → very high recall, slower queries
- *
- * Note: The ef parameter at query time is different from ef_construction used during
- * index building. Query-time ef controls search quality, while ef_construction controls
- * index quality.
+ * Manages candidate count during HNSW index refinement. Larger values explore more
+ * of the graph, leading to better recall but slower queries.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param ef - exploration factor for HNSW search (must be >= query limit)
@@ -1158,22 +1112,74 @@ LanceDBError lancedb_vector_query_ef(
 );
 
 /**
+ * Set range of probes for vector query
+ *
+ * Sets bounds on partitions searched in IVF indexes. Used with adaptive probing strategies
+ * that dynamically adjust probe count. If nprobes is set, it takes precedence.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param min_nprobes - minimum number of IVF partitions to search (must be <= max_probes (if set), use 0 to unset)
+ * @param max_nprobes - maximum number of IVF partitions to search (must be >= min_probes (if set), use 0 to unset)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_nprobes_range(
+    LanceDBVectorQuery* query,
+    size_t min_nprobes,
+    size_t max_nprobes,
+    char** error_message
+);
+
+/**
+ * Set distance range filter for vector query
+ *
+ * Filters results by distance bounds [lower_bound, upper_bound). Useful for finding
+ * all vectors within a similarity threshold rather than top-k nearest neighbors.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param lower_bound - minimum distance (inclusive) (must be < upper_bound (if set), use -1.0 to unset)
+ * @param upper_bound - maximum distance (exclusive), (must be > lower_bound (if set), use -1.0 to unset)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_distance_range(
+    LanceDBVectorQuery* query,
+    float lower_bound,
+    float upper_bound,
+    char** error_message
+);
+
+/**
  * Execute query and return streaming result
  *
  * @param query - pointer to LanceDBQuery (consumed by this function)
+ * @param options - optional pointer to LanceDBQueryExecutionOptions (not consumed, can be NULL for defaults)
  * @return Pointer to LanceDBQueryResult on success, NULL on failure
  *         Caller must free with lancedb_query_result_free()
  */
-LanceDBQueryResult* lancedb_query_execute(LanceDBQuery* query);
+LanceDBQueryResult* lancedb_query_execute(
+    LanceDBQuery* query,
+    const LanceDBQueryExecutionOptions* options
+);
 
 /**
  * Execute vector query and return streaming result
  *
  * @param query - pointer to LanceDBVectorQuery (consumed by this function)
+ * @param options - pointer to LanceDBQueryExecutionOptions (not consumed, can be NULL for defaults)
  * @return Pointer to LanceDBQueryResult on success, NULL on failure
  *         Caller must free with lancedb_query_result_free()
  */
-LanceDBQueryResult* lancedb_vector_query_execute(LanceDBVectorQuery* query);
+LanceDBQueryResult* lancedb_vector_query_execute(
+    LanceDBVectorQuery* query,
+    const LanceDBQueryExecutionOptions* options
+);
 
 /**
  * Convert query result to Arrow RecordBatch arrays
@@ -1217,6 +1223,64 @@ void lancedb_vector_query_free(LanceDBVectorQuery* query);
  * @param result - pointer to LanceDBQueryResult
  */
 void lancedb_query_result_free(LanceDBQueryResult* result);
+
+/**
+ * Create new QueryExecutionOptions with default values
+ *
+ * Default values:
+ * - max_batch_length: 1024
+ * - timeout: 0 (no timeout)
+ *
+ * @return pointer to LanceDBQueryExecutionOptions or NULL on error
+ *         Caller must free with lancedb_query_execution_options_free()
+ */
+LanceDBQueryExecutionOptions* lancedb_query_execution_options_new(void);
+
+/**
+ * Set maximum batch length for query execution
+ *
+ * Sets the target maximum number of rows per RecordBatch returned by the query.
+ *
+ * @param options - pointer to LanceDBQueryExecutionOptions
+ * @param max_batch_length - target maximum rows per batch (must be > 0)
+ * Note: The underlying lancedb Rust library accepts max_batch_length=0 but returns 0 batches (no data)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_execution_options_set_max_batch_length(
+    LanceDBQueryExecutionOptions* options,
+    unsigned int max_batch_length,
+    char** error_message
+);
+
+/**
+ * Set timeout for query execution
+ *
+ * Maximum duration to wait before the query times out.
+ *
+ * @param options - pointer to LanceDBQueryExecutionOptions
+ * @param timeout_ms - timeout in milliseconds, or 0 to disable timeout
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_execution_options_set_timeout(
+    LanceDBQueryExecutionOptions* options,
+    unsigned int timeout_ms,
+    char** error_message
+);
+
+/**
+ * Free QueryExecutionOptions
+ *
+ * @param options - pointer to LanceDBQueryExecutionOptions to be freed
+ */
+void lancedb_query_execution_options_free(LanceDBQueryExecutionOptions* options);
 
 /**
  * Vector search using nearest_to with full result conversion

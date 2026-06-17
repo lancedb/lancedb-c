@@ -375,7 +375,7 @@ int main() {
             } else {
               std::cout << "set query distance type to: L2" << std::endl;
               // execute the query
-              if (LanceDBQueryResult* query_result = lancedb_vector_query_execute(query); query_result) {
+              if (LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr); query_result) {
                 std::cout << "executed query" << std::endl;
                 // get the result as arrow arrays
                 struct ArrowArray** c_arrays_ptr;

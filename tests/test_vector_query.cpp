@@ -4,6 +4,7 @@
  */
 
 #include "test_common.h"
+#include <limits>
 #include <random>
 
 // Helper function to generate random query vector
@@ -171,7 +172,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - paged query with limit 
       REQUIRE(error_message == nullptr);
 
       // Execute query (consumes the query object)
-      LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+      LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
       REQUIRE(query_result != nullptr);
 
       // Convert to Arrow
@@ -251,7 +252,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - nearest_to with IVF_FLA
     FFI_ArrowArray** result_arrays = nullptr;
     FFI_ArrowSchema* result_schema = nullptr;
     size_t count = 0;
-    char* error_message = nullptr;
     constexpr size_t limit = 5;
 
     result = lancedb_table_nearest_to(
@@ -290,7 +290,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - nearest_to with IVF_FLA
     FFI_ArrowArray** result_arrays = nullptr;
     FFI_ArrowSchema* result_schema = nullptr;
     size_t count = 0;
-    char* error_message = nullptr;
     constexpr size_t limit = 500;
 
     // Request more rows than exist in table
@@ -326,15 +325,45 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - nearest_to with IVF_FLA
   lancedb_table_free(table);
 }
 
+void verify_vector_row_count(size_t limit, LanceDBVectorQuery* query) {
+    char* error_message = nullptr;
+    auto result = lancedb_vector_query_limit(query, limit, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
+    REQUIRE(query_result != nullptr);
+
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+    error_message = nullptr;
+    result = lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message);
+
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+    REQUIRE(count > 0);
+    REQUIRE(result_arrays != nullptr);
+
+    size_t sum_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+      sum_rows += reinterpret_cast<ArrowArray*>(result_arrays[i])->length;
+    }
+    REQUIRE(sum_rows == limit);
+
+    lancedb_free_arrow_arrays(result_arrays, count);
+    lancedb_free_arrow_schema(result_schema);
+}
+
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameters", "[vector_query]") {
   const std::string table_name = "vector_query_config_test";
-  constexpr size_t total_rows = 256;
+  constexpr size_t total_rows = 2048;
 
   // Create table with data
   LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
   REQUIRE(table != nullptr);
 
-  // Create IVF_FLAT vector index on "data" column for testing nprobes
+  // Create vector index on "data" column for testing nprobes
   const char* vector_columns[] = {"data"};
   LanceDBVectorIndexConfig config = {
     .num_partitions = 4,
@@ -348,7 +377,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
 
   char* error_message = nullptr;
   LanceDBError result = lancedb_table_create_vector_index(
-      table, vector_columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, &error_message);
+      table, vector_columns, 1, LANCEDB_INDEX_IVF_PQ, &config, &error_message);
 
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
@@ -363,7 +392,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     );
     REQUIRE(query != nullptr);
 
-    // Set L2 distance type
     error_message = nullptr;
     result = lancedb_vector_query_distance_type(query, LANCEDB_DISTANCE_L2, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -376,7 +404,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -427,7 +455,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -477,7 +505,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -527,7 +555,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -564,13 +592,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     );
     REQUIRE(query != nullptr);
 
-    // Set nprobes
+    // Set nprobes to 3 (smaller then 4 partitions)
     error_message = nullptr;
     result = lancedb_vector_query_nprobes(query, 3, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    // Set refine_factor
+    // Set refine_factor to 5
     error_message = nullptr;
     result = lancedb_vector_query_refine_factor(query, 5, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -589,7 +617,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - configuration parameter
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -641,7 +669,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - HNSW parameters", "[vec
 
   char* error_message = nullptr;
   LanceDBError result = lancedb_table_create_vector_index(
-      table, vector_columns, 1, LANCEDB_INDEX_IVF_HNSW_SQ, &config, &error_message);
+      table, vector_columns, 1, LANCEDB_INDEX_IVF_HNSW_PQ, &config, &error_message);
 
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
@@ -669,7 +697,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - HNSW parameters", "[vec
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -712,20 +740,598 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - HNSW parameters", "[vec
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    // Set nprobes (IVF_HNSW_SQ has IVF component too)
+    // Set nprobes (IVF_HNSW_PQ has IVF component too)
     error_message = nullptr;
     result = lancedb_vector_query_nprobes(query, 2, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 50;
+    verify_vector_row_count(limit, query);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - min_nprobes and max_nprobes parameters", "[vector_query]") {
+  const std::string table_name = "vector_query_minmax_nprobes_test";
+  constexpr size_t total_rows = 256;
+
+  // Create table with data
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  // Create vector index on "data" column for testing min/max nprobes
+  const char* vector_columns[] = {"data"};
+  LanceDBVectorIndexConfig config = {
+    .num_partitions = 8,  // Use 8 partitions to allow meaningful min/max range
+    .num_sub_vectors = -1,
+    .max_iterations = -1,
+    .sample_rate = 0.0f,
+    .distance_type = LANCEDB_DISTANCE_L2,
+    .accelerator = nullptr,
+    .replace = 0
+  };
+
+  char* error_message = nullptr;
+  LanceDBError result = lancedb_table_create_vector_index(
+      table, vector_columns, 1, LANCEDB_INDEX_IVF_PQ, &config, &error_message);
+  REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+  SECTION("Test min_nprobes parameter") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(error_message == nullptr);
+    REQUIRE(query != nullptr);
+
+    // Set min_nprobes to 2
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 2, 0, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
+    constexpr size_t limit = 10;
+    verify_vector_row_count(limit, query);
+  }
+
+  SECTION("Test max_nprobes parameter") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set max_nprobes to 6
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 0, 6, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 10;
+    verify_vector_row_count(limit, query);
+  }
+
+  SECTION("Test combined min_nprobes and max_nprobes parameters") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 3, 7, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 15;
+    verify_vector_row_count(limit, query);
+  }
+
+  SECTION("Test combined min_nprobes, max_nprobes, and refine_factor parameters") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 2, 6, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    error_message = nullptr;
+    result = lancedb_vector_query_refine_factor(query, 5, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 8;
+    verify_vector_row_count(limit, query);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - min_nprobes and max_nprobes error/edge cases", "[vector_query]") {
+  const std::string table_name = "vector_query_nprobes_error_test";
+  constexpr size_t total_rows = 256;
+
+  // Create table with data
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  // Create vector index on "data" column with 8 partitions
+  const char* vector_columns[] = {"data"};
+  LanceDBVectorIndexConfig config = {
+    .num_partitions = 8,
+    .num_sub_vectors = -1,
+    .max_iterations = -1,
+    .sample_rate = 0.0f,
+    .distance_type = LANCEDB_DISTANCE_L2,
+    .accelerator = nullptr,
+    .replace = 0
+  };
+
+  char* error_message = nullptr;
+  LanceDBError result = lancedb_table_create_vector_index(
+      table, vector_columns, 1, LANCEDB_INDEX_IVF_PQ, &config, &error_message);
+  REQUIRE(result == LANCEDB_SUCCESS);
+
+  SECTION("Test max_nprobes < min_nprobes") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 5, 3, &error_message);
+    REQUIRE(result != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Test valid boundary case - min_nprobes equals max_nprobes") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 4, 4, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 10;
+    verify_vector_row_count(limit, query);
+  }
+
+  SECTION("Test min/max_nprobes values against num_partitions (index has 8 partitions)") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set min_nprobes to 12 and max_nprobes to 20 (index has 8 partitions)
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes_range(query, 12, 20,  &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 5;
+    verify_vector_row_count(limit, query);
+  }
+
+  SECTION("Test nprobes values against num_partitions (index has 8 partitions)") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set nprobes to 20 (index has 8 partitions)
+    error_message = nullptr;
+    result = lancedb_vector_query_nprobes(query, 20,  &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    constexpr size_t limit = 5;
+    verify_vector_row_count(limit, query);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - distance_range parameter", "[vector_query]") {
+  const std::string table_name = "vector_query_distance_range_test";
+  constexpr size_t total_rows = 100;
+
+  // Create table with data
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  // Create IVF_FLAT vector index on "data" column
+  const char* vector_columns[] = {"data"};
+  LanceDBVectorIndexConfig config = {
+    .num_partitions = 4,
+    .num_sub_vectors = -1,
+    .max_iterations = -1,
+    .sample_rate = 0.0f,
+    .distance_type = LANCEDB_DISTANCE_L2,
+    .accelerator = nullptr,
+    .replace = 0
+  };
+
+  char* error_message = nullptr;
+  LanceDBError result = lancedb_table_create_vector_index(
+      table, vector_columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, &error_message);
+  REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+  // Run baseline query without distance range to determine actual min/max distances
+  std::vector<float> baseline_query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+  LanceDBVectorQuery* baseline_query = lancedb_vector_query_new(
+      table,
+      baseline_query_vector.data(),
+      TEST_SCHEMA_DIMENSIONS
+  );
+  REQUIRE(baseline_query != nullptr);
+
+  error_message = nullptr;
+  result = lancedb_vector_query_limit(baseline_query, total_rows, &error_message);
+  REQUIRE(result == LANCEDB_SUCCESS);
+
+  LanceDBQueryResult* baseline_result = lancedb_vector_query_execute(baseline_query, nullptr);
+  REQUIRE(baseline_result != nullptr);
+
+  FFI_ArrowArray** baseline_arrays = nullptr;
+  FFI_ArrowSchema* baseline_schema = nullptr;
+  size_t batch_count = 0;
+  error_message = nullptr;
+  result = lancedb_query_result_to_arrow(
+      baseline_result, &baseline_arrays, &baseline_schema, &batch_count, &error_message);
+  REQUIRE(result == LANCEDB_SUCCESS);
+  REQUIRE(batch_count > 0);
+
+  // Extract min and max distances from baseline results
+  float min_distance = std::numeric_limits<float>::max();
+  float max_distance = std::numeric_limits<float>::min();
+
+  for (size_t batch_idx = 0; batch_idx < batch_count; batch_idx++) {
+    ArrowArray* batch_array = reinterpret_cast<ArrowArray*>(baseline_arrays[batch_idx]);
+    ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(baseline_schema);
+
+    // Find the _distance column (typically the last column in vector query results)
+    int distance_col_idx = -1;
+    for (int64_t i = 0; i < schema->n_children; i++) {
+      if (std::string(schema->children[i]->name) == "_distance") {
+        distance_col_idx = i;
+        break;
+      }
+    }
+    REQUIRE(distance_col_idx >= 0);
+
+    ArrowArray* distance_array = batch_array->children[distance_col_idx];
+    const float* distance_data = static_cast<const float*>(distance_array->buffers[1]);
+
+    // find min/max within thebatch
+    for (int64_t i = 0; i < distance_array->length; i++) {
+      float dist = distance_data[i];
+      min_distance = std::min(min_distance, dist);
+      max_distance = std::max(max_distance, dist);
+    }
+  }
+
+  INFO("Baseline query found distances in range [" << min_distance << ", " << max_distance << "]");
+
+  lancedb_free_arrow_arrays(baseline_arrays, batch_count);
+  lancedb_free_arrow_schema(baseline_schema);
+
+  SECTION("Test distance_range with both lower and upper bounds") {
+    std::vector<float> query_vector = baseline_query_vector;  // Use same query vector
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set distance range to min/max distance values
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, min_distance, max_distance, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    // Set limit high to see all results in range
+    error_message = nullptr;
+    constexpr size_t limit = 50;
+    result = lancedb_vector_query_limit(query, limit, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    // Execute query
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
+    REQUIRE(query_result != nullptr);
+
+    // Convert to Arrow and verify results
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+    error_message = nullptr;
+    result = lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    // Verify that the returned distances fall within the range [min_distance, max_distance)
+    size_t total_rows = 0;
+    for (size_t batch_idx = 0; batch_idx < count; batch_idx++) {
+      ArrowArray* batch_array = reinterpret_cast<ArrowArray*>(result_arrays[batch_idx]);
+      ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(result_schema);
+
+      // Find the _distance column
+      int distance_col_idx = -1;
+      for (int64_t i = 0; i < schema->n_children; i++) {
+        if (std::string(schema->children[i]->name) == "_distance") {
+          distance_col_idx = i;
+          break;
+        }
+      }
+      REQUIRE(distance_col_idx >= 0);
+
+      ArrowArray* distance_array = batch_array->children[distance_col_idx];
+      const float* distance_data = static_cast<const float*>(distance_array->buffers[1]);
+
+      for (int64_t i = 0; i < distance_array->length; i++) {
+        float dist = distance_data[i];
+        REQUIRE(dist >= min_distance);
+        REQUIRE(dist < max_distance);  // Upper bound is exclusive
+        total_rows++;
+      }
+    }
+
+    // With range [min, max) we should get all results up to the limit
+    REQUIRE(total_rows == limit);
+
+    // Clean up
+    lancedb_free_arrow_arrays(result_arrays, count);
+    lancedb_free_arrow_schema(result_schema);
+  }
+
+  SECTION("Test distance_range with only lower bound") {
+    std::vector<float> query_vector = baseline_query_vector;  // Use same query vector
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set only lower bound (filter out closest results)
+    const float lower_bound = min_distance + (max_distance - min_distance) * 0.3f;
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, lower_bound, -1.0f, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    // Execute query
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
+    REQUIRE(query_result != nullptr);
+
+    // Convert to Arrow and verify results
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+    error_message = nullptr;
+    result = lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    // Verify that the returned distances are above the lower bound
+    size_t total_rows = 0;
+    for (size_t batch_idx = 0; batch_idx < count; batch_idx++) {
+      ArrowArray* batch_array = reinterpret_cast<ArrowArray*>(result_arrays[batch_idx]);
+      ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(result_schema);
+
+      // Find the _distance column
+      int distance_col_idx = -1;
+      for (int64_t i = 0; i < schema->n_children; i++) {
+        if (std::string(schema->children[i]->name) == "_distance") {
+          distance_col_idx = i;
+          break;
+        }
+      }
+      REQUIRE(distance_col_idx >= 0);
+
+      ArrowArray* distance_array = batch_array->children[distance_col_idx];
+      const float* distance_data = static_cast<const float*>(distance_array->buffers[1]);
+
+      for (int64_t i = 0; i < distance_array->length; i++) {
+        float dist = distance_data[i];
+        REQUIRE(dist >= lower_bound);
+        total_rows++;
+      }
+    }
+
+    INFO("Got " << total_rows << " results with distance >= " << lower_bound);
+
+    // Clean up
+    lancedb_free_arrow_arrays(result_arrays, count);
+    lancedb_free_arrow_schema(result_schema);
+  }
+
+  SECTION("Test distance_range with only upper bound") {
+    std::vector<float> query_vector = baseline_query_vector;  // Use same query vector
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set only upper bound (filter out furthest results)
+    const float upper_bound = min_distance + (max_distance - min_distance) * 0.7f;
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, -1.0f, upper_bound, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    // Execute query
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
+    REQUIRE(query_result != nullptr);
+
+    // Convert to Arrow and verify results
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+    error_message = nullptr;
+    result = lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    // Verify that the returned distances are below the upper bound
+    size_t total_rows = 0;
+    for (size_t batch_idx = 0; batch_idx < count; batch_idx++) {
+      ArrowArray* batch_array = reinterpret_cast<ArrowArray*>(result_arrays[batch_idx]);
+      ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(result_schema);
+
+      // Find the _distance column
+      int distance_col_idx = -1;
+      for (int64_t i = 0; i < schema->n_children; i++) {
+        if (std::string(schema->children[i]->name) == "_distance") {
+          distance_col_idx = i;
+          break;
+        }
+      }
+      REQUIRE(distance_col_idx >= 0);
+
+      ArrowArray* distance_array = batch_array->children[distance_col_idx];
+      const float* distance_data = static_cast<const float*>(distance_array->buffers[1]);
+
+      for (int64_t i = 0; i < distance_array->length; i++) {
+        float dist = distance_data[i];
+        REQUIRE(dist < upper_bound);  // Upper bound is exclusive
+        total_rows++;
+      }
+    }
+
+    INFO("Got " << total_rows << " results with distance < " << upper_bound);
+
+    // Clean up
+    lancedb_free_arrow_arrays(result_arrays, count);
+    lancedb_free_arrow_schema(result_schema);
+  }
+
+  SECTION("Test distance_range with lower and upper bound") {
+    std::vector<float> query_vector = baseline_query_vector;  // Use same query vector
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set lower and upper bounds (middle range)
+    const float lower_bound = min_distance + (max_distance - min_distance) * 0.3f;
+    const float upper_bound = min_distance + (max_distance - min_distance) * 0.7f;
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, lower_bound, upper_bound, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
+    // Execute query
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
+    REQUIRE(query_result != nullptr);
+
+    // Convert to Arrow and verify results
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+    error_message = nullptr;
+    result = lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    // Verify that the returned distances fall within [lower_bound, upper_bound)
+    size_t total_rows = 0;
+    for (size_t batch_idx = 0; batch_idx < count; batch_idx++) {
+      ArrowArray* batch_array = reinterpret_cast<ArrowArray*>(result_arrays[batch_idx]);
+      ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(result_schema);
+
+      // Find the _distance column
+      int distance_col_idx = -1;
+      for (int64_t i = 0; i < schema->n_children; i++) {
+        if (std::string(schema->children[i]->name) == "_distance") {
+          distance_col_idx = i;
+          break;
+        }
+      }
+      REQUIRE(distance_col_idx >= 0);
+
+      ArrowArray* distance_array = batch_array->children[distance_col_idx];
+      const float* distance_data = static_cast<const float*>(distance_array->buffers[1]);
+
+      for (int64_t i = 0; i < distance_array->length; i++) {
+        float dist = distance_data[i];
+        REQUIRE(dist >= lower_bound);
+        REQUIRE(dist < upper_bound);  // Upper bound is exclusive
+        total_rows++;
+      }
+    }
+
+    INFO("Got " << total_rows << " results with distance in [" << lower_bound << ", " << upper_bound << ")");
+
+    // Clean up
+    lancedb_free_arrow_arrays(result_arrays, count);
+    lancedb_free_arrow_schema(result_schema);
+  }
+
+  SECTION("Test distance_range with neither bound set") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set neither bound (both -1.0) - should return all results
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, -1.0f, -1.0f, &error_message);
+    REQUIRE((error_message == nullptr && result == LANCEDB_SUCCESS));
+
     // Set limit
     error_message = nullptr;
-    result = lancedb_vector_query_limit(query, 5, &error_message);
+    constexpr size_t limit = 50;
+    result = lancedb_vector_query_limit(query, limit, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Execute query
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     // Convert to Arrow and verify results
@@ -745,11 +1351,56 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - HNSW parameters", "[vec
     for (size_t i = 0; i < count; i++) {
       sum_rows += reinterpret_cast<ArrowArray*>(result_arrays[i])->length;
     }
-    REQUIRE(sum_rows == 5);
+    REQUIRE(sum_rows == limit);
 
     // Clean up
     lancedb_free_arrow_arrays(result_arrays, count);
     lancedb_free_arrow_schema(result_schema);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - distance_range error cases", "[vector_query]") {
+  const std::string table_name = "vector_query_distance_range_error_test";
+  constexpr size_t total_rows = 100;
+
+  // Create table with data
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("Test distance_range with lower_bound > upper_bound") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set invalid range: lower > upper (10.0 > 5.0)
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, 10.0f, 5.0f, &error_message);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(result != LANCEDB_SUCCESS);
+  }
+
+  SECTION("Test distance_range with lower_bound == upper_bound") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS
+    );
+    REQUIRE(query != nullptr);
+
+    // Set empty range (upper is exclusive)
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_vector_query_distance_range(query, 10.0f, 10.0f, &error_message);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(result != LANCEDB_SUCCESS);
   }
 
   lancedb_table_free(table);
@@ -820,7 +1471,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - error cases", "[vector_
     }
   }
 
-
   lancedb_table_free(table);
 }
 
@@ -852,7 +1502,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Filter on non-existent 
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
-  LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+  LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
   REQUIRE(query_result == nullptr);
 
   lancedb_table_free(table);
@@ -888,7 +1538,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - DataFusion Expr Filter"
     result = lancedb_vector_query_limit(query, 10, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
 
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     FFI_ArrowArray** result_arrays = nullptr;
@@ -933,7 +1583,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - DataFusion Expr Filter"
     result = lancedb_vector_query_limit(query, 10, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
 
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     FFI_ArrowArray** result_arrays = nullptr;
@@ -980,7 +1630,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - DataFusion Expr Filter"
     result = lancedb_vector_query_limit(query, 10, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
 
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     FFI_ArrowArray** result_arrays = nullptr;
@@ -1022,7 +1672,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - DataFusion Expr Filter"
     result = lancedb_vector_query_limit(query, 10, &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
 
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
 
     FFI_ArrowArray** result_arrays = nullptr;
@@ -1058,7 +1708,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - DataFusion Expr Filter"
     REQUIRE(result == LANCEDB_SUCCESS);
 
     // Error should be caught at execution time
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result == nullptr);
   }
 
@@ -1122,7 +1772,6 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Vector Query - repeated queries
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 
-  
   constexpr size_t repeat_count = 20;
   constexpr size_t limit = 10;
   for (size_t i = 0; i < repeat_count; i++) {
@@ -1138,7 +1787,7 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Vector Query - repeated queries
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, nullptr);
     REQUIRE(query_result != nullptr);
     lancedb_query_result_free(query_result);
   }
@@ -1155,3 +1804,233 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Vector Query - repeated queries
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query Execution Options - Basic operations", "[vector_query]") {
+  // Create a table with test data
+  LanceDBTable* table = create_table_with_data("options_test_basic", 100, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("Test setting max_batch_length") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        1000,
+        &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test setting timeout") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_timeout(
+        options,
+        30,  // 30 seconds
+        &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test setting both max_batch_length and timeout") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        500,
+        &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+
+    result = lancedb_query_execution_options_set_timeout(
+        options,
+        60,
+        &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test using options with vector query") {
+    SUCCEED("This is currently failing, See: https://github.com/lancedb/lance/issues/3220");
+    return;
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+
+    constexpr unsigned int batch_size = 10;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        batch_size,
+        &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    constexpr unsigned int query_limit = 500;
+    LanceDBError limit_result = lancedb_vector_query_limit(query, query_limit, &error_message);
+    REQUIRE(limit_result == LANCEDB_SUCCESS);
+
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, options);
+    REQUIRE(query_result != nullptr);
+
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+
+    LanceDBError collect_result = lancedb_query_result_to_arrow(
+        query_result,
+        &result_arrays,
+        &result_schema,
+        &count,
+        &error_message);
+
+    REQUIRE(collect_result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    size_t total_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+      const auto length = reinterpret_cast<ArrowArray*>(result_arrays[i])->length;
+      INFO("Batch " << i << ": " << length << " rows (target was " << batch_size << ")");
+      REQUIRE(length <= batch_size);
+      total_rows += length;
+    }
+
+    REQUIRE(total_rows == query_limit);
+
+    lancedb_free_arrow_arrays(result_arrays, count);
+    if (result_schema != nullptr) {
+      lancedb_free_arrow_schema(result_schema);
+    }
+    lancedb_query_execution_options_free(options);
+  }
+
+  SECTION("Test setting zero timeout") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_timeout(
+        options,
+        0,  // Zero timeout
+        &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table,
+        query_vector.data(),
+        TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    constexpr unsigned int query_limit = 10;
+    LanceDBError limit_result = lancedb_vector_query_limit(query, query_limit, &error_message);
+    REQUIRE(limit_result == LANCEDB_SUCCESS);
+
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query, options);
+    REQUIRE(query_result != nullptr);
+
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+
+    LanceDBError collect_result = lancedb_query_result_to_arrow(
+        query_result,
+        &result_arrays,
+        &result_schema,
+        &count,
+        &error_message);
+
+    REQUIRE(collect_result == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+
+    size_t total_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+      total_rows += reinterpret_cast<ArrowArray*>(result_arrays[i])->length;
+    }
+
+    INFO("Got " << total_rows << " rows with zero timeout");
+    REQUIRE(total_rows == query_limit);
+
+    lancedb_free_arrow_arrays(result_arrays, count);
+    if (result_schema != nullptr) {
+      lancedb_free_arrow_schema(result_schema);
+    }
+    lancedb_query_execution_options_free(options);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query Execution Options - Error cases", "[vector_query]") {
+  SECTION("Test setting max_batch_length with NULL options") {
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        nullptr,  // NULL options
+        1000,
+        &error_message);
+
+    REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    INFO("Expected error: " << error_message);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Test setting timeout with NULL options") {
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_timeout(
+        nullptr,  // NULL options
+        30,
+        &error_message);
+
+    REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    INFO("Expected error: " << error_message);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Test freeing NULL options (should not crash)") {
+    // This should be safe and not crash
+    lancedb_query_execution_options_free(nullptr);
+  }
+
+  SECTION("Test setting zero max_batch_length") {
+    LanceDBQueryExecutionOptions* options = lancedb_query_execution_options_new();
+    REQUIRE(options != nullptr);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_execution_options_set_max_batch_length(
+        options,
+        0,  // Zero batch length - should be rejected
+        &error_message);
+
+    // Setting zero should fail
+    REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    INFO("Expected error: " << error_message);
+    lancedb_free_string(error_message);
+
+    lancedb_query_execution_options_free(options);
+  }
+}
+

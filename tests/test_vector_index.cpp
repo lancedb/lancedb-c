@@ -35,6 +35,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     // List indices (should have one index)
     char** indices = nullptr;
     size_t count = 0;
+    error_message = nullptr;
     result = lancedb_table_list_indices(table, &indices, &count, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -54,6 +55,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     auto reader = create_reader_from_batch(batch);
     REQUIRE(reader != nullptr);
 
+    error_message = nullptr;
     result = lancedb_table_add(table, reader, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -94,6 +96,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     auto reader = create_reader_from_batch(batch);
     REQUIRE(reader != nullptr);
 
+    error_message = nullptr;
     result = lancedb_table_add(table, reader, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -134,6 +137,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     auto reader = create_reader_from_batch(batch);
     REQUIRE(reader != nullptr);
 
+    error_message = nullptr;
     result = lancedb_table_add(table, reader, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -174,6 +178,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     auto reader = create_reader_from_batch(batch);
     REQUIRE(reader != nullptr);
 
+    error_message = nullptr;
     result = lancedb_table_add(table, reader, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -244,6 +249,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
 
     // Replace with IVF_PQ index
     config.replace = 1;
+    error_message = nullptr;
     result = lancedb_table_create_vector_index(
         table, columns, 1, LANCEDB_INDEX_IVF_PQ, &config, &error_message);
 
@@ -284,6 +290,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
     // List indices to get the index name
     char** indices = nullptr;
     size_t count = 0;
+    error_message = nullptr;
     result = lancedb_table_list_indices(table, &indices, &count, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -299,6 +306,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
     lancedb_free_index_list(indices, count);
 
     // Drop the index
+    error_message = nullptr;
     result = lancedb_table_drop_index(table, index_name.c_str(), &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -307,6 +315,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
     // List indices again (should be empty)
     indices = nullptr;
     count = 0;
+    error_message = nullptr;
     result = lancedb_table_list_indices(table, &indices, &count, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -347,6 +356,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
       .replace = 0
     };
 
+    error_message = nullptr;
     result = lancedb_table_create_vector_index(
         table, vector_columns, 1, LANCEDB_INDEX_IVF_FLAT, &vector_config, &error_message);
 
@@ -356,6 +366,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
     // List indices (should have two indices)
     char** indices = nullptr;
     size_t count = 0;
+    error_message = nullptr;
     result = lancedb_table_list_indices(table, &indices, &count, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -376,6 +387,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
     lancedb_free_index_list(indices, count);
 
     // Drop the first index
+    error_message = nullptr;
     result = lancedb_table_drop_index(table, first_index_name.c_str(), &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -384,6 +396,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index List and Drop", "[vector_
     // List indices again (should have one index remaining)
     indices = nullptr;
     count = 0;
+    error_message = nullptr;
     result = lancedb_table_list_indices(table, &indices, &count, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);

@@ -141,6 +141,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     auto reader2 = create_reader_from_batch(batch2);
     REQUIRE(reader2 != nullptr);
 
+    error_message = nullptr;
     result = lancedb_table_add(table, reader2, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
@@ -174,6 +175,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     auto reader2 = create_reader_from_batch(batch2);
     REQUIRE(reader2 != nullptr);
 
+    error_message = nullptr;
     result = lancedb_table_add(table, reader2, &error_message);
 
     REQUIRE(result == LANCEDB_SUCCESS);
