@@ -562,6 +562,29 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_vector_query_tests)
 
+  add_executable(lancedb_stack_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_stack.cpp
+  )
+  target_link_libraries(lancedb_stack_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_stack_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_stack_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_stack_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_stack_tests)
+
   # Enable CTest
   enable_testing()
 
@@ -683,6 +706,8 @@ if(BUILD_TESTS)
   add_test(NAME lancedb_vector_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_index_tests>)
   # Run vector query tests WITHOUT valgrind (too slow under valgrind)
   add_test(NAME lancedb_vector_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_query_tests>)
+  # Small-stack regression tests run on dedicated 256 KiB pthreads; not under valgrind
+  add_test(NAME lancedb_stack_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_stack_tests>)
 
   if(BUILD_COVERAGE)
     set(PROFDATA_FILE "${CMAKE_BINARY_DIR}/coverage.profdata")

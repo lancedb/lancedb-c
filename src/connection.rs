@@ -87,12 +87,8 @@ pub struct LanceDBSessionCacheStats {
 const DEFAULT_INDEX_CACHE_SIZE_BYTES: usize = 6 * 1024 * 1024 * 1024;
 const DEFAULT_METADATA_CACHE_SIZE_BYTES: usize = 1024 * 1024 * 1024;
 
-/// Runtime to handle async operations
-static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
-}
+/// Runtime to handle async operations (see `crate::runtime`).
+use crate::runtime::{run_blocking, run_blocking_infallible};
 
 /// Create a ConnectBuilder for the given URI
 ///
@@ -150,8 +146,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_execute(
         return LanceDBError::InvalidArgument;
     }
 
-    let runtime = get_runtime();
-    match runtime.block_on(connect_builder.execute()) {
+    match run_blocking(connect_builder.execute()) {
         Ok(conn) => {
             let boxed_connection = Box::new(LanceDBConnection {
                 inner: conn,
@@ -488,8 +483,12 @@ pub unsafe extern "C" fn lancedb_session_index_cache_stats(
         return LanceDBError::InvalidArgument;
     }
 
-    let session_ref = &*session;
-    let stats = get_runtime().block_on(session_ref.inner.index_cache_stats());
+    let session_inner = (*session).inner.clone();
+    let stats =
+        match run_blocking_infallible(async move { session_inner.index_cache_stats().await }) {
+            Ok(stats) => stats,
+            Err(e) => return handle_error(&e, error_message),
+        };
     *out_stats = LanceDBSessionCacheStats {
         hits: stats.hits,
         misses: stats.misses,
@@ -519,8 +518,12 @@ pub unsafe extern "C" fn lancedb_session_metadata_cache_stats(
         return LanceDBError::InvalidArgument;
     }
 
-    let session_ref = &*session;
-    let stats = get_runtime().block_on(session_ref.inner.metadata_cache_stats());
+    let session_inner = (*session).inner.clone();
+    let stats =
+        match run_blocking_infallible(async move { session_inner.metadata_cache_stats().await }) {
+            Ok(stats) => stats,
+            Err(e) => return handle_error(&e, error_message),
+        };
     *out_stats = LanceDBSessionCacheStats {
         hits: stats.hits,
         misses: stats.misses,
@@ -573,38 +576,40 @@ pub unsafe extern "C" fn lancedb_table_create(
         return LanceDBError::InvalidArgument;
     };
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let conn = (*connection).inner.clone();
+    let table_name_owned = table_name_str.to_string();
 
-    match runtime.block_on(async {
-        // Import schema from Arrow C ABI
-        let schema = match Schema::try_from(&*schema_ptr) {
-            Ok(s) => Arc::new(s),
-            Err(_) => {
-                return Err(lancedb::error::Error::InvalidInput {
-                    message: "Failed to import Arrow schema from C ABI".to_string(),
-                })
-            }
-        };
+    // Import schema from Arrow C ABI (synchronously: raw pointers must not
+    // cross onto the runtime's worker threads)
+    let schema = match Schema::try_from(&*schema_ptr) {
+        Ok(s) => Arc::new(s),
+        Err(_) => {
+            let e = lancedb::error::Error::InvalidInput {
+                message: "Failed to import Arrow schema from C ABI".to_string(),
+            };
+            return handle_error(&e, error_message);
+        }
+    };
 
-        let batch_reader: Box<dyn RecordBatchReader + Send> = if reader.is_null() {
-            // Create empty reader with the schema
-            let empty_batches = RecordBatchIterator::new(
-                std::iter::empty::<Result<RecordBatch, arrow_schema::ArrowError>>(),
-                schema.clone(),
-            );
-            Box::new(empty_batches)
-        } else {
-            // Take ownership of the reader
-            let reader_box = Box::from_raw(reader);
-            reader_box.into_inner()
-        };
+    let batch_reader: Box<dyn RecordBatchReader + Send> = if reader.is_null() {
+        // Create empty reader with the schema
+        let empty_batches = RecordBatchIterator::new(
+            std::iter::empty::<Result<RecordBatch, arrow_schema::ArrowError>>(),
+            schema.clone(),
+        );
+        Box::new(empty_batches)
+    } else {
+        // Take ownership of the reader
+        let reader_box = Box::from_raw(reader);
+        reader_box.into_inner()
+    };
 
+    match run_blocking(async move {
         // lancedb panics on an invalid table name instead of returning an error,
         // so the name is validated before the table is created
-        validate_table_name(table_name_str)?;
+        validate_table_name(&table_name_owned)?;
 
-        conn.create_table(table_name_str, batch_reader)
+        conn.create_table(table_name_owned, batch_reader)
             .execute()
             .await
     }) {
@@ -640,10 +645,9 @@ pub unsafe extern "C" fn lancedb_connection_table_names(
         return LanceDBError::InvalidArgument;
     }
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let conn = (*connection).inner.clone();
 
-    match runtime.block_on(conn.table_names().execute()) {
+    match run_blocking(async move { conn.table_names().execute().await }) {
         Ok(names) => {
             let count = names.len();
             *count_out = count;
@@ -831,9 +835,7 @@ pub unsafe extern "C" fn lancedb_table_names_builder_execute(
 
     let table_names_builder = *builder_box.inner;
 
-    let runtime = get_runtime();
-
-    match runtime.block_on(table_names_builder.execute()) {
+    match run_blocking(table_names_builder.execute()) {
         Ok(names) => {
             let count = names.len();
             *count_out = count;
@@ -933,15 +935,15 @@ pub unsafe extern "C" fn lancedb_connection_open_table(
         return LanceDBError::InvalidArgument;
     };
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let conn = (*connection).inner.clone();
+    let table_name_owned = table_name_str.to_string();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         // lancedb panics on an invalid table name instead of returning an error,
         // so the name is validated before the table is opened
-        validate_table_name(table_name_str)?;
+        validate_table_name(&table_name_owned)?;
 
-        conn.open_table(table_name_str).execute().await
+        conn.open_table(table_name_owned).execute().await
     }) {
         Ok(table) => {
             let boxed_table = Box::new(LanceDBTable { inner: table });
@@ -979,18 +981,20 @@ pub unsafe extern "C" fn lancedb_connection_drop_table(
         return LanceDBError::InvalidArgument;
     };
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let conn = (*connection).inner.clone();
+    let table_name_owned = table_name_str.to_string();
 
-    let result = if namespace.is_null() {
-        runtime.block_on(conn.drop_table(table_name_str, &[]))
+    let namespace_vec: Vec<String> = if namespace.is_null() {
+        Vec::new()
     } else {
         let Ok(namespace_str) = CStr::from_ptr(namespace).to_str() else {
             set_invalid_argument_message(error_message);
             return LanceDBError::InvalidArgument;
         };
-        runtime.block_on(conn.drop_table(table_name_str, &[String::from(namespace_str)]))
+        vec![String::from(namespace_str)]
     };
+    let result =
+        run_blocking(async move { conn.drop_table(&table_name_owned, &namespace_vec).await });
 
     match result {
         Ok(_) => LanceDBError::Success,
@@ -1033,7 +1037,6 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
 
     let cur_namespace_vec = if cur_namespace.is_null() {
         Vec::new()
@@ -1055,12 +1058,18 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
         vec![String::from(new_namespace_str)]
     };
 
-    match runtime.block_on(conn.rename_table(
-        old_name_str,
-        new_name_str,
-        &cur_namespace_vec,
-        &new_namespace_vec,
-    )) {
+    let conn = conn.clone();
+    let old_name_owned = old_name_str.to_string();
+    let new_name_owned = new_name_str.to_string();
+    match run_blocking(async move {
+        conn.rename_table(
+            &old_name_owned,
+            &new_name_owned,
+            &cur_namespace_vec,
+            &new_namespace_vec,
+        )
+        .await
+    }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1087,17 +1096,18 @@ pub unsafe extern "C" fn lancedb_connection_drop_all_tables(
     }
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
 
-    let result = if namespace.is_null() {
-        runtime.block_on(conn.drop_all_tables(&[]))
+    let conn = conn.clone();
+    let namespace_vec: Vec<String> = if namespace.is_null() {
+        Vec::new()
     } else {
         let Ok(namespace_str) = CStr::from_ptr(namespace).to_str() else {
             set_invalid_argument_message(error_message);
             return LanceDBError::InvalidArgument;
         };
-        runtime.block_on(conn.drop_all_tables(&[String::from(namespace_str)]))
+        vec![String::from(namespace_str)]
     };
+    let result = run_blocking(async move { conn.drop_all_tables(&namespace_vec).await });
 
     match result {
         Ok(_) => LanceDBError::Success,
@@ -1131,11 +1141,11 @@ pub unsafe extern "C" fn lancedb_connection_create_namespace(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
 
     let mut request = CreateNamespaceRequest::new();
     request.id = Some(vec![namespace_str.to_string()]);
-    match runtime.block_on(conn.create_namespace(request)) {
+    let conn = conn.clone();
+    match run_blocking(async move { conn.create_namespace(request).await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1167,11 +1177,11 @@ pub unsafe extern "C" fn lancedb_connection_drop_namespace(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
 
     let mut request = DropNamespaceRequest::new();
     request.id = Some(vec![namespace_str.to_string()]);
-    match runtime.block_on(conn.drop_namespace(request)) {
+    let conn = conn.clone();
+    match run_blocking(async move { conn.drop_namespace(request).await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1213,11 +1223,11 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces(
     };
 
     let conn = &(*connection).inner;
-    let runtime = get_runtime();
 
     let mut request = ListNamespacesRequest::new();
     request.id = Some(parent_namespace);
-    match runtime.block_on(conn.list_namespaces(request)) {
+    let conn = conn.clone();
+    match run_blocking(async move { conn.list_namespaces(request).await }) {
         Ok(response) => {
             let namespaces = response.namespaces;
             let count = namespaces.len();

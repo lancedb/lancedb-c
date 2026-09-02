@@ -776,6 +776,32 @@ void lancedb_session_free(LanceDBSession* session);
 void lancedb_table_free(LanceDBTable* table);
 
 /**
+ * Threading model
+ *
+ * Every database-executing function in this API is synchronous from the
+ * caller's point of view, but the work itself runs on the library's own
+ * tokio worker threads: the calling thread only blocks until the operation
+ * completes. The caller's stack is therefore never used for query planning
+ * or execution, so the API is safe to call from threads, coroutines or
+ * fibers with small fixed-size stacks. The worker stack size defaults to
+ * 8 MiB and can be overridden with the LANCEDB_C_WORKER_STACK_SIZE
+ * environment variable (bytes); LANCEDB_C_WORKER_THREADS overrides the
+ * worker count.
+ *
+ * Do not call this API from within a tokio async context (e.g. from a task
+ * running on the library's own runtime); doing so is reported as
+ * LANCEDB_ERROR_RUNTIME.
+ *
+ * Arrow objects handed to the library (record batch readers, schemas) may be
+ * consumed and released on those worker threads, i.e. on a different thread
+ * than the one that produced them. Producers must therefore tolerate
+ * release callbacks from another thread — the Arrow C data interface does
+ * not require this by itself.
+ *
+ * lancedb_run_on_stack() below is no longer required for the above and is
+ * retained for compatibility with callers that already use it.
+ */
+/**
  * Run a callback on an extended stack.
  *
  * If the remaining stack is below red_zone bytes, a new stack segment
