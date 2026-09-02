@@ -17,10 +17,11 @@ use lancedb::index::vector::{
 };
 use lancedb::index::Index;
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::LanceDBTable;
 use crate::error::{
     handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
 };
+use crate::runtime::run_blocking;
 use crate::types::LanceDBDistanceType;
 
 /// Index type enum for C API
@@ -160,7 +161,6 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     // Use default config if none provided
     let cfg = if config.is_null() {
@@ -243,9 +243,12 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
         }
     };
 
-    match runtime.block_on(async {
+    let replace = cfg.replace != 0;
+    let tbl = tbl.clone();
+    let column_names: Vec<String> = column_names.iter().map(|s| s.to_string()).collect();
+    match run_blocking(async move {
         let mut index_builder = tbl.create_index(&column_names, index);
-        if cfg.replace == 0 {
+        if !replace {
             index_builder = index_builder.replace(false);
         }
         index_builder.execute().await
@@ -300,7 +303,6 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     // Use default config if none provided
     let cfg = if config.is_null() {
@@ -322,9 +324,12 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
         }
     };
 
-    match runtime.block_on(async {
+    let replace = cfg.replace != 0;
+    let tbl = tbl.clone();
+    let column_names: Vec<String> = column_names.iter().map(|s| s.to_string()).collect();
+    match run_blocking(async move {
         let mut index_builder = tbl.create_index(&column_names, index);
-        if cfg.replace == 0 {
+        if !replace {
             index_builder = index_builder.replace(false);
         }
         index_builder.execute().await
@@ -378,7 +383,6 @@ pub unsafe extern "C" fn lancedb_table_create_fts_index(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     // Use default config if none provided
     let cfg = if config.is_null() {
@@ -423,9 +427,12 @@ pub unsafe extern "C" fn lancedb_table_create_fts_index(
 
     let index = Index::FTS(builder);
 
-    match runtime.block_on(async {
+    let replace = cfg.replace != 0;
+    let tbl = tbl.clone();
+    let column_names: Vec<String> = column_names.iter().map(|s| s.to_string()).collect();
+    match run_blocking(async move {
         let mut index_builder = tbl.create_index(&column_names, index);
-        if cfg.replace == 0 {
+        if !replace {
             index_builder = index_builder.replace(false);
         }
         index_builder.execute().await
@@ -458,10 +465,9 @@ pub unsafe extern "C" fn lancedb_table_list_indices(
         return LanceDBError::InvalidArgument;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
 
-    match runtime.block_on(tbl.list_indices()) {
+    match run_blocking(async move { tbl.list_indices().await }) {
         Ok(indices) => {
             let count = indices.len();
             *count_out = count;
@@ -531,10 +537,10 @@ pub unsafe extern "C" fn lancedb_table_drop_index(
         return LanceDBError::InvalidArgument;
     };
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
+    let index_name = index_name_str.to_string();
 
-    match runtime.block_on(tbl.drop_index(index_name_str)) {
+    match run_blocking(async move { tbl.drop_index(&index_name).await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -560,7 +566,6 @@ pub unsafe extern "C" fn lancedb_table_optimize(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     use lancedb::table::{OptimizeAction, OptimizeOptions};
 
@@ -578,7 +583,8 @@ pub unsafe extern "C" fn lancedb_table_optimize(
         LanceDBOptimizeType::Index => OptimizeAction::Index(OptimizeOptions::default()),
     };
 
-    match runtime.block_on(tbl.optimize(action)) {
+    let tbl = tbl.clone();
+    match run_blocking(async move { tbl.optimize(action).await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -640,10 +646,10 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
         return LanceDBError::InvalidArgument;
     };
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
+    let name = name_str.to_string();
 
-    match runtime.block_on(tbl.index_stats(name_str)) {
+    match run_blocking(async move { tbl.index_stats(&name).await }) {
         Ok(Some(stats)) => {
             (*stats_out).num_indexed_rows = stats.num_indexed_rows;
             (*stats_out).num_unindexed_rows = stats.num_unindexed_rows;

@@ -16,12 +16,13 @@ use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
 use lancedb::query::{ExecutableQuery, QueryBase};
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::LanceDBTable;
 use crate::error::{
     handle_error, set_invalid_argument_message, set_not_supported_message,
     set_unknown_error_message, LanceDBError,
 };
 use crate::expr::LanceDBExpr;
+use crate::runtime::run_blocking;
 use crate::types::{LanceDBMergeInsertConfig, LanceDBRecordBatchReader};
 
 /// Get table schema as Arrow C ABI
@@ -45,10 +46,9 @@ pub unsafe extern "C" fn lancedb_table_arrow_schema(
         return LanceDBError::InvalidArgument;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
 
-    match runtime.block_on(tbl.schema()) {
+    match run_blocking(async move { tbl.schema().await }) {
         Ok(schema) => {
             // Convert to Arrow C ABI
             let ffi_schema =
@@ -80,13 +80,12 @@ pub unsafe extern "C" fn lancedb_table_add(
         return LanceDBError::InvalidArgument;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
 
     // Take ownership of the reader
-    let reader_box = Box::from_raw(reader);
+    let reader = Box::from_raw(reader).into_inner();
 
-    match runtime.block_on(tbl.add(reader_box.into_inner()).execute()) {
+    match run_blocking(async move { tbl.add(reader).execute().await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -177,32 +176,38 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
         }
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
+    let column_names: Vec<String> = column_names.iter().map(|s| s.to_string()).collect();
 
-    match runtime.block_on(async {
-        let mut merge_builder = tbl.merge_insert(&column_names);
+    // Read the remaining configuration synchronously (raw pointers must not
+    // cross onto the runtime's worker threads); default is upsert behaviour.
+    let (update_all, insert_all) = if config.is_null() {
+        (true, true)
+    } else {
+        let cfg = &*config;
+        (
+            cfg.when_matched_update_all != 0,
+            cfg.when_not_matched_insert_all != 0,
+        )
+    };
 
-        // Apply configuration if provided
-        if !config.is_null() {
-            let cfg = &*config;
-            if cfg.when_matched_update_all != 0 {
-                if let Some(expr) = update_condition_expr {
-                    merge_builder.when_matched_update_all_expr(expr);
-                } else {
-                    merge_builder.when_matched_update_all(update_condition_sql);
-                }
+    // The reader was taken over above (data_box); hand it to the task
+    let data = data_box.into_inner();
+
+    match run_blocking(async move {
+        let on: Vec<&str> = column_names.iter().map(String::as_str).collect();
+        let mut merge_builder = tbl.merge_insert(&on);
+        if update_all {
+            if let Some(expr) = update_condition_expr {
+                merge_builder.when_matched_update_all_expr(expr);
+            } else {
+                merge_builder.when_matched_update_all(update_condition_sql);
             }
-            if cfg.when_not_matched_insert_all != 0 {
-                merge_builder.when_not_matched_insert_all();
-            }
-        } else {
-            // Default upsert behavior
-            merge_builder.when_matched_update_all(None);
+        }
+        if insert_all {
             merge_builder.when_not_matched_insert_all();
         }
-
-        merge_builder.execute(data_box.into_inner()).await
+        merge_builder.execute(data).await
     }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
@@ -336,10 +341,9 @@ pub unsafe extern "C" fn lancedb_table_version(table: *const LanceDBTable) -> u6
         return 0;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
 
-    runtime.block_on(tbl.version()).unwrap_or(0)
+    run_blocking(async move { tbl.version().await }).unwrap_or(0)
 }
 
 /// Count rows in table
@@ -355,10 +359,9 @@ pub unsafe extern "C" fn lancedb_table_count_rows(table: *const LanceDBTable) ->
         return 0;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
 
-    match runtime.block_on(tbl.count_rows(None)) {
+    match run_blocking(async move { tbl.count_rows(None).await }) {
         Ok(count) => count as u64,
         Err(_) => 0,
     }
@@ -389,10 +392,10 @@ pub unsafe extern "C" fn lancedb_table_delete(
         return LanceDBError::InvalidArgument;
     };
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
+    let predicate = predicate_str.to_string();
 
-    match runtime.block_on(tbl.delete(predicate_str)) {
+    match run_blocking(async move { tbl.delete(&predicate).await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -425,10 +428,9 @@ pub unsafe extern "C" fn lancedb_table_df_delete(
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
 
-    match runtime.block_on(tbl.delete(&expr_box.inner)) {
+    match run_blocking(async move { tbl.delete(&expr_box.inner).await }) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -472,8 +474,7 @@ pub unsafe extern "C" fn lancedb_table_nearest_to(
         return LanceDBError::InvalidArgument;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
     let vec_slice = std::slice::from_raw_parts(vector, dimension);
     let vec_data: Vec<f32> = vec_slice.to_vec();
 
@@ -481,7 +482,7 @@ pub unsafe extern "C" fn lancedb_table_nearest_to(
         None
     } else {
         match CStr::from_ptr(column).to_str() {
-            Ok(s) => Some(s),
+            Ok(s) => Some(s.to_string()),
             Err(_) => {
                 set_invalid_argument_message(error_message);
                 return LanceDBError::InvalidArgument;
@@ -489,11 +490,11 @@ pub unsafe extern "C" fn lancedb_table_nearest_to(
         }
     };
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let mut query = tbl.query().limit(limit).nearest_to(vec_data)?;
 
         if let Some(col) = column_name {
-            query = query.column(col);
+            query = query.column(&col);
         }
 
         let batches: Vec<RecordBatch> = query.execute().await?.try_collect().await?;
@@ -587,11 +588,10 @@ pub unsafe extern "C" fn lancedb_table_list_versions(
         return LanceDBError::InvalidArgument;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
+    let tbl = (*table).inner.clone();
     let include_metadata = !metadata_out.is_null();
 
-    match runtime.block_on(tbl.list_versions()) {
+    match run_blocking(async move { tbl.list_versions().await }) {
         Ok(versions) => {
             let count = versions.len();
             *count_out = count;
@@ -777,7 +777,6 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     let ds = match tbl.dataset() {
         Some(ds) => ds,
@@ -787,16 +786,9 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
         }
     };
 
-    let guard = match runtime.block_on(ds.get()) {
-        Ok(g) => g,
-        Err(e) => return handle_error(&e, error_message),
-    };
-
-    let metadata = &guard.manifest().table_metadata;
-
-    // Collect matching entries: either filtered or all
-    let entries: Vec<(&str, &str)> = if !filter_keys.is_null() && filter_count > 0 {
-        let mut result = Vec::with_capacity(filter_count);
+    // Parse the filter keys synchronously (raw pointers stay on this thread)
+    let filter: Option<Vec<String>> = if !filter_keys.is_null() && filter_count > 0 {
+        let mut keys = Vec::with_capacity(filter_count);
         for i in 0..filter_count {
             let key_ptr = *filter_keys.add(i);
             if key_ptr.is_null() {
@@ -807,16 +799,33 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
                 set_invalid_argument_message(error_message);
                 return LanceDBError::InvalidArgument;
             };
-            if let Some(value) = metadata.get(key_str) {
-                result.push((key_str, value.as_str()));
-            }
+            keys.push(key_str.to_string());
         }
-        result
+        Some(keys)
     } else {
-        metadata
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect()
+        None
+    };
+
+    // The dataset read guard cannot leave the worker thread: copy the
+    // matching entries out while holding it.
+    let ds = ds.clone();
+    let entries: Vec<(String, String)> = match run_blocking(async move {
+        let guard = ds.get().await?;
+        let metadata = &guard.manifest().table_metadata;
+        let entries = match &filter {
+            Some(keys) => keys
+                .iter()
+                .filter_map(|k| metadata.get(k).map(|v| (k.clone(), v.clone())))
+                .collect(),
+            None => metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+        Ok(entries)
+    }) {
+        Ok(entries) => entries,
+        Err(e) => return handle_error(&e, error_message),
     };
 
     let count = entries.len();
@@ -844,8 +853,8 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
     }
 
     for (i, (key, value)) in entries.iter().enumerate() {
-        let c_key = CString::new(*key).unwrap_or_default();
-        let c_value = CString::new(*value).unwrap_or_default();
+        let c_key = CString::new(key.as_str()).unwrap_or_default();
+        let c_value = CString::new(value.as_str()).unwrap_or_default();
         *keys_array.add(i) = c_key.into_raw();
         *values_array.add(i) = c_value.into_raw();
     }
@@ -904,7 +913,6 @@ pub unsafe extern "C" fn lancedb_table_set_metadata(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     let ds = match tbl.dataset() {
         Some(ds) => ds,
@@ -914,7 +922,8 @@ pub unsafe extern "C" fn lancedb_table_set_metadata(
         }
     };
 
-    match runtime.block_on(async {
+    let ds = ds.clone();
+    match run_blocking(async move {
         ds.ensure_mutable()?;
         let mut dataset = (*ds.get().await?).clone();
         dataset.update_metadata(entries).await?;
@@ -969,7 +978,6 @@ pub unsafe extern "C" fn lancedb_table_delete_metadata(
     }
 
     let tbl = &(*table).inner;
-    let runtime = get_runtime();
 
     let ds = match tbl.dataset() {
         Some(ds) => ds,
@@ -979,7 +987,8 @@ pub unsafe extern "C" fn lancedb_table_delete_metadata(
         }
     };
 
-    match runtime.block_on(async {
+    let ds = ds.clone();
+    match run_blocking(async move {
         ds.ensure_mutable()?;
         let mut dataset = (*ds.get().await?).clone();
         dataset.update_metadata(entries).await?;

@@ -19,9 +19,10 @@ use datafusion_expr::Expr;
 use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
 use lancedb::{DistanceType, Table};
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::LanceDBTable;
 use crate::error::{set_invalid_argument_message, set_unknown_error_message, LanceDBError};
 use crate::expr::LanceDBExpr;
+use crate::runtime::run_blocking;
 use crate::types::LanceDBDistanceType;
 
 /// Opaque handle to a LanceDB Query
@@ -529,9 +530,8 @@ pub unsafe extern "C" fn lancedb_query_execute(
     }
 
     let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let mut rust_query = query_box.table.query();
 
         if let Some(limit) = query_box.limit {
@@ -575,9 +575,8 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
     }
 
     let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let mut rust_query = match query_box
             .table
             .query()
@@ -651,9 +650,8 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
     }
 
     let result_box = Box::from_raw(result);
-    let runtime = get_runtime();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let batches: Vec<RecordBatch> = result_box.inner.try_collect().await?;
         Ok::<Vec<RecordBatch>, lancedb::error::Error>(batches)
     }) {
