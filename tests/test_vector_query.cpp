@@ -1273,3 +1273,112 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
 
   lancedb_table_free(table);
 }
+
+// Tests for lancedb_vector_query_explain_plan (explain-plan FFI).
+// explain_plan does NOT consume the query: it can still be executed afterwards.
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - explain plan", "[vector_query][explain_plan]") {
+  const std::string table_name = "vector_query_explain_plan_test";
+  constexpr size_t total_rows = 100;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS, 42);
+  const char* columns[] = {"key", "data"};
+
+  SECTION("Explain plan for a basic vector query, non-verbose and verbose") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_select(query, columns, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_vector_query_explain_plan(query, false, &plan, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).length() > 0);
+    lancedb_free_string(plan);
+
+    plan = nullptr;
+    result = lancedb_vector_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).length() > 0);
+    lancedb_free_string(plan);
+
+    // explain_plan does not consume the query: it can still be executed
+    LanceDBQueryResult* query_result = lancedb_vector_query_execute(query);
+    REQUIRE(query_result != nullptr);
+    lancedb_query_result_free(query_result);
+  }
+
+  SECTION("Explain plan with distance type and tuning options") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_distance_type(query, LANCEDB_DISTANCE_L2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_nprobes(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_refine_factor(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_ef(query, 50, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 8, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_vector_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).length() > 0);
+    lancedb_free_string(plan);
+
+    lancedb_vector_query_free(query);
+  }
+
+  SECTION("Explain plan reflects a DataFusion filter") {
+    LanceDBExpr* col_expr = lancedb_expr_column("key");
+    LanceDBExpr* val_expr = lancedb_expr_literal_string("key_42");
+    LanceDBExpr* eq_expr = lancedb_expr_binary(col_expr, LANCEDB_BINARY_OP_EQ, val_expr);
+    REQUIRE(eq_expr != nullptr);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_select(query, columns, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_df_filter(query, eq_expr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_vector_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).length() > 0);
+    lancedb_free_string(plan);
+
+    lancedb_vector_query_free(query);
+  }
+
+  SECTION("Explain plan rejects null arguments") {
+    char* plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(nullptr, true, &plan, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_vector_query_explain_plan(query, true, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    lancedb_vector_query_free(query);
+  }
+
+  lancedb_table_free(table);
+}

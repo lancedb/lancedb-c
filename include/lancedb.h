@@ -1288,6 +1288,54 @@ LanceDBError lancedb_vector_query_ef(
 );
 
 /**
+ * Get the query execution plan without executing the query
+ *
+ * Returns a human-readable string describing what steps will be taken
+ * to execute the query. Does NOT consume the query — it can still be
+ * executed afterwards.
+ *
+ * @param query - pointer to LanceDBQuery (NOT consumed)
+ * @param verbose - if true, include additional detail in the plan
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Caller must free the returned plan string with lancedb_free_string().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_explain_plan(
+    const LanceDBQuery* query,
+    bool verbose,
+    char** plan_out,
+    char** error_message
+);
+
+/**
+ * Get the vector query execution plan without executing the query
+ *
+ * Returns a human-readable string describing what steps will be taken
+ * to execute the query. Does NOT consume the query — it can still be
+ * executed afterwards.
+ *
+ * @param query - pointer to LanceDBVectorQuery (NOT consumed)
+ * @param verbose - if true, include additional detail in the plan
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Caller must free the returned plan string with lancedb_free_string().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_explain_plan(
+    const LanceDBVectorQuery* query,
+    bool verbose,
+    char** plan_out,
+    char** error_message
+);
+
+/**
  * Execute query and return streaming result
  *
  * @param query - pointer to LanceDBQuery (consumed by this function)
