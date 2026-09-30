@@ -134,14 +134,16 @@
 }
 
 # Rust std allocates the Thread handle on the first access to a thread local
-# (e.g. when the fastrand global RNG is seeded), and releases it on thread exit
+# when the fastrand global RNG is seeded
 {
-   rust_std_thread_current_init
+   rust_std_thread_current_init_fastrand
    Memcheck:Leak
    match-leak-kinds: possible
    fun:malloc
    ...
-   fun:*init_current*
+   fun:*std*thread*Thread*new*
+   ...
+   fun:*fastrand*global_rng*
    ...
 }
 
