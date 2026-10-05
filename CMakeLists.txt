@@ -131,7 +131,7 @@ include(cmake/ProbeRustNativeLibs.cmake)
 configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
 # rust-lib target
-  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
+set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
 if(BUILD_COVERAGE)
   set(PROFRAW_DIR "${CMAKE_BINARY_DIR}/profraw")
   set(BUILD_PROFRAW_DIR "${PROFRAW_DIR}/build")
@@ -562,6 +562,52 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_vector_query_tests)
 
+  add_executable(lancedb_stack_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_stack.cpp
+  )
+  target_link_libraries(lancedb_stack_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_stack_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_stack_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_stack_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_stack_tests)
+
+  add_executable(lancedb_runtime_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_runtime.cpp
+  )
+  target_link_libraries(lancedb_runtime_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_runtime_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_runtime_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_runtime_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_runtime_tests)
+
   # Enable CTest
   enable_testing()
 
@@ -570,6 +616,33 @@ if(BUILD_TESTS)
     set(TEST_ENV_PREFIX ${CMAKE_COMMAND} -E env "LLVM_PROFILE_FILE=${PROFRAW_DIR}/%p_%m.profraw")
   else()
     set(TEST_ENV_PREFIX)
+  endif()
+
+  # Rust unit tests (src/runtime/tests.rs). They are built and registered with
+  # ctest only in a coverage build, where they are needed for the coverage of
+  # the runtime module; otherwise run them with `cargo test --lib`. The test
+  # executable is compiled as part of the build, so that running it from ctest
+  # compiles nothing and only the tests themselves write to the profraw dir.
+  if(BUILD_COVERAGE)
+    set(RUST_TEST_ARGS ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --lib --target-dir "${CMAKE_BINARY_DIR}/target")
+    add_custom_target(rust-tests ALL
+      COMMAND ${CMAKE_COMMAND} -E env "CARGO_ENCODED_RUSTFLAGS=-Cinstrument-coverage" "${BUILD_PROFRAW_ENV}"
+        cargo test --no-run ${RUST_TEST_ARGS}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      COMMENT "Building Rust unit tests..."
+    )
+    add_dependencies(rust-tests rust-lib)
+    # cargo holds a lock on the shared target dir; run the cargo steps one
+    # after the other instead of having them wait on each other's lock
+    if(TARGET external-provider-lib)
+      add_dependencies(rust-tests external-provider-lib)
+    endif()
+    list(APPEND TEST_TARGETS rust-tests)
+    add_test(NAME lancedb_rust_tests
+      COMMAND ${CMAKE_COMMAND} -E env "CARGO_ENCODED_RUSTFLAGS=-Cinstrument-coverage" "LLVM_PROFILE_FILE=${PROFRAW_DIR}/%p_%m.profraw"
+        cargo test ${RUST_TEST_ARGS}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
   endif()
 
   # Check if valgrind is available
@@ -683,10 +756,52 @@ if(BUILD_TESTS)
   add_test(NAME lancedb_vector_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_index_tests>)
   # Run vector query tests WITHOUT valgrind (too slow under valgrind)
   add_test(NAME lancedb_vector_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_query_tests>)
+  # Exercise 256 KiB callers; the suite configures the minimum worker stack.
+  if(VALGRIND_EXECUTABLE)
+    add_test(NAME lancedb_stack_tests
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite,possible
+        --errors-for-leak-kinds=definite,possible
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_stack.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_stack_tests>
+    )
+  else()
+    add_test(NAME lancedb_stack_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_stack_tests>)
+  endif()
+  # Runtime tests (configuration API)
+  if(VALGRIND_EXECUTABLE)
+    add_test(NAME lancedb_runtime_tests
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite,possible
+        --errors-for-leak-kinds=definite,possible
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_runtime.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_runtime_tests>
+    )
+  else()
+    add_test(NAME lancedb_runtime_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_runtime_tests>)
+  endif()
 
   if(BUILD_COVERAGE)
     set(PROFDATA_FILE "${CMAKE_BINARY_DIR}/coverage.profdata")
     set(COVERAGE_REPORT_DIR "${CMAKE_BINARY_DIR}/coverage-report")
+    # the text summary; CI reads the total from this file
+    set(COVERAGE_SUMMARY_FILE "${CMAKE_BINARY_DIR}/coverage-summary.txt")
+
+    # The Rust unit-test executable(s). Cargo names the file with a hash and
+    # leaves executables of earlier build configurations behind, so every
+    # match is passed to llvm-cov; clean the target dir if stale ones show up
+    # as mismatched data in the report.
+    set(RUST_TEST_OBJECTS "$(find ${RUST_TARGET_DIR} -type f -executable -name 'lancedb-*' ! -name '*.*' | sed 's/^/--object /')")
 
     add_custom_target(coverage
       # Run tests via ctest with profiling output directed to profraw dir
@@ -694,19 +809,15 @@ if(BUILD_TESTS)
         ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} -j
       # Merge profiling data
       COMMAND sh -c "${LLVM_PROFDATA} merge -sparse ${PROFRAW_DIR}/*.profraw -o ${PROFDATA_FILE}"
-      # Print coverage summary
-      COMMAND ${LLVM_COV} report ${SHARED_LIB_PATH}
-        --instr-profile=${PROFDATA_FILE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/
+      # Print coverage summary. The Rust unit-test executable is an additional
+      # object, so the lines its tests cover count as well.
+      COMMAND sh -c "${LLVM_COV} report ${SHARED_LIB_PATH} ${RUST_TEST_OBJECTS} --instr-profile=${PROFDATA_FILE} --ignore-filename-regex='/tests[.]rs$' ${CMAKE_CURRENT_SOURCE_DIR}/src/ > ${COVERAGE_SUMMARY_FILE} && cat ${COVERAGE_SUMMARY_FILE}"
       # Generate HTML report
-      COMMAND ${LLVM_COV} show ${SHARED_LIB_PATH}
-        --instr-profile=${PROFDATA_FILE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/
-        --format=html
-        --output-dir=${COVERAGE_REPORT_DIR}
-      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+      COMMAND sh -c "${LLVM_COV} show ${SHARED_LIB_PATH} ${RUST_TEST_OBJECTS} --instr-profile=${PROFDATA_FILE} --ignore-filename-regex='/tests[.]rs$' ${CMAKE_CURRENT_SOURCE_DIR}/src/ --format=html --output-dir=${COVERAGE_REPORT_DIR}"
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
       DEPENDS ${TEST_TARGETS}
       COMMENT "Running tests and generating Rust code coverage report..."
+      VERBATIM
     )
   endif()
 endif()

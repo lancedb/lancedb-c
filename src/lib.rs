@@ -13,6 +13,7 @@ pub mod expr;
 pub mod index;
 pub mod json;
 pub mod query;
+pub(crate) mod runtime;
 pub mod table;
 pub mod types;
 
