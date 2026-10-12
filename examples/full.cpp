@@ -479,6 +479,14 @@ int main() {
         // check number of rows in the table after deletion
         row_count = lancedb_table_count_rows(tbl);
         std::cout << "after deletion table: " << table_names[i] << " has: " << row_count << " rows" << std::endl;
+        // table statistics after deletion: deleted rows stay on disk until compaction
+        if (LanceDBTableStats stats{}; lancedb_table_stats(tbl, &stats, nullptr) == LANCEDB_SUCCESS) {
+          std::cout << "table: " << table_names[i] << " stats: " << stats.num_rows << " rows, "
+                    << stats.num_deleted_rows << " deleted rows, " << stats.num_indices << " indices, "
+                    << stats.fragment_stats.num_fragments << " fragments, " << stats.total_bytes << " bytes" << std::endl;
+        } else {
+          std::cerr << "error getting stats for table: " << table_names[i] << std::endl;
+        }
 
         // perform table upsert with 3 new rows and 3 updated rows
         arrow::StringBuilder key_builder;
