@@ -364,6 +364,112 @@ pub unsafe extern "C" fn lancedb_table_count_rows(table: *const LanceDBTable) ->
     }
 }
 
+/// Statistics on the number of rows in table fragments, part of `LanceDBTableStats`
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBFragmentSummaryStats {
+    pub min: usize,
+    pub max: usize,
+    pub mean: usize,
+    pub p25: usize,
+    pub p50: usize,
+    pub p75: usize,
+    pub p99: usize,
+}
+
+/// Statistics on table fragments, part of `LanceDBTableStats`
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBFragmentStats {
+    pub num_fragments: usize,
+    pub num_small_fragments: usize,
+    pub lengths: LanceDBFragmentSummaryStats,
+}
+
+/// Table statistics returned by `lancedb_table_stats`
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBTableStats {
+    pub total_bytes: usize,
+    pub num_rows: usize,
+    /// Rows marked as deleted but not yet compacted away, or -1 if unknown
+    pub num_deleted_rows: i64,
+    pub num_indices: usize,
+    pub fragment_stats: LanceDBFragmentStats,
+}
+
+/// Get table statistics
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `stats_out` must be a valid pointer to receive the statistics
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_stats(
+    table: *const LanceDBTable,
+    stats_out: *mut LanceDBTableStats,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || stats_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    let stats = match runtime.block_on(tbl.stats()) {
+        Ok(stats) => stats,
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    // Deleted rows are only marked in the deletion files of the underlying
+    // lance dataset, so they are counted from there. Remote tables do not
+    // expose their dataset, in which case the count is reported as unknown.
+    let num_deleted_rows = match tbl.dataset() {
+        Some(ds) => {
+            let count = runtime.block_on(async {
+                let dataset = ds.get().await?;
+                dataset
+                    .count_deleted_rows()
+                    .await
+                    .map_err(lancedb::Error::from)
+            });
+            match count {
+                Ok(count) => count as i64,
+                Err(e) => return handle_error(&e, error_message),
+            }
+        }
+        None => -1,
+    };
+
+    let lengths = &stats.fragment_stats.lengths;
+    *stats_out = LanceDBTableStats {
+        total_bytes: stats.total_bytes,
+        num_rows: stats.num_rows,
+        num_deleted_rows,
+        num_indices: stats.num_indices,
+        fragment_stats: LanceDBFragmentStats {
+            num_fragments: stats.fragment_stats.num_fragments,
+            num_small_fragments: stats.fragment_stats.num_small_fragments,
+            lengths: LanceDBFragmentSummaryStats {
+                min: lengths.min,
+                max: lengths.max,
+                mean: lengths.mean,
+                p25: lengths.p25,
+                p50: lengths.p50,
+                p75: lengths.p75,
+                p99: lengths.p99,
+            },
+        },
+    };
+
+    LanceDBError::Success
+}
+
 /// Delete rows from table based on predicate
 ///
 /// # Safety

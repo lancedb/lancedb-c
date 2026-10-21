@@ -856,6 +856,62 @@ unsigned long long lancedb_table_version(const LanceDBTable* table);
 unsigned long long lancedb_table_count_rows(const LanceDBTable* table);
 
 /**
+ * Statistics on the number of rows in table fragments
+ */
+typedef struct {
+    size_t min;
+    size_t max;
+    size_t mean;
+    size_t p25;
+    size_t p50;
+    size_t p75;
+    size_t p99;
+} LanceDBFragmentSummaryStats;
+
+/**
+ * Statistics on table fragments
+ */
+typedef struct {
+    size_t num_fragments;                 // Number of fragments in the table
+    size_t num_small_fragments;           // Number of fragments with fewer than 100000 rows
+    LanceDBFragmentSummaryStats lengths;  // Statistics on the number of rows per fragment
+} LanceDBFragmentStats;
+
+/**
+ * Table statistics structure
+ */
+typedef struct {
+    size_t total_bytes;                   // Total number of bytes in the table (data and index files)
+    size_t num_rows;                      // Number of rows in the table (deleted rows excluded)
+    int64_t num_deleted_rows;             // Rows marked as deleted but still on disk (-1 = unknown)
+    size_t num_indices;                   // Number of indices in the table
+    LanceDBFragmentStats fragment_stats;  // Statistics on table fragments
+} LanceDBTableStats;
+
+/**
+ * Get table statistics
+ *
+ * @param table - pointer to LanceDBTable
+ * @param stats_out - pointer to receive the table statistics
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * num_deleted_rows counts rows that were deleted but still occupy space on
+ * disk, since deletions are only marked in deletion files until the table is
+ * compacted (see lancedb_table_optimize()). A large value indicates that the
+ * table should be compacted. Fragments in which every row was deleted are
+ * dropped outright, so their rows are not counted. The value is -1 when the
+ * backend (e.g. a remote table) does not report deletion counts.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_stats(
+    const LanceDBTable* table,
+    LanceDBTableStats* stats_out,
+    char** error_message
+);
+
+/**
  * Add data to table using Arrow RecordBatchReader
  *
  * @param table - pointer to LanceDBTable

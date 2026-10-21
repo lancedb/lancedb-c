@@ -593,3 +593,207 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Metadata - invalid arguments", "
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Stats", "[table]") {
+  LanceDBTable* table = create_table_with_data("stats_table", 10, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("Stats on freshly created table") {
+    LanceDBTableStats stats{};
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.total_bytes > 0);
+    REQUIRE(stats.num_rows == 10);
+    REQUIRE(stats.num_deleted_rows == 0);
+    REQUIRE(stats.num_indices == 0);
+    REQUIRE(stats.fragment_stats.num_fragments == 1);
+    REQUIRE(stats.fragment_stats.num_small_fragments == 1);
+    REQUIRE(stats.fragment_stats.lengths.min == 10);
+    REQUIRE(stats.fragment_stats.lengths.max == 10);
+    REQUIRE(stats.fragment_stats.lengths.mean == 10);
+    REQUIRE(stats.fragment_stats.lengths.p25 == 10);
+    REQUIRE(stats.fragment_stats.lengths.p50 == 10);
+    REQUIRE(stats.fragment_stats.lengths.p75 == 10);
+    REQUIRE(stats.fragment_stats.lengths.p99 == 10);
+  }
+
+  SECTION("Deleted rows are counted until the table is compacted") {
+    // A second fragment, holding only rows that the delete below removes
+    auto batch = create_test_record_batch(3, 20);
+    auto reader = create_reader_from_batch(batch);
+    REQUIRE(reader != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBTableStats stats{};
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_rows == 13);
+    REQUIRE(stats.num_deleted_rows == 0);
+    REQUIRE(stats.fragment_stats.num_fragments == 2);
+    REQUIRE(stats.fragment_stats.lengths.min == 3);
+    REQUIRE(stats.fragment_stats.lengths.max == 10);
+    const size_t total_bytes_before_delete = stats.total_bytes;
+
+    // Delete every row of the second fragment and 3 rows of the first one.
+    // The emptied fragment is dropped outright rather than kept with a
+    // deletion file, so only the 3 rows marked in the surviving fragment
+    // are counted as deleted.
+    REQUIRE(lancedb_table_delete(table,
+        "key IN ('key_20', 'key_21', 'key_22', 'key_1', 'key_2', 'key_3')",
+        &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_rows == 7);
+    REQUIRE(stats.num_deleted_rows == 3);
+    REQUIRE(stats.fragment_stats.num_fragments == 1);
+    // The marked rows are physically still in the fragment, so they count
+    // towards its length even though they are excluded from num_rows
+    REQUIRE(stats.fragment_stats.lengths.max == 10);
+    // Deletion files do not count toward total_bytes
+    REQUIRE(stats.total_bytes < total_bytes_before_delete);
+
+    // Compaction materializes the deletions
+    REQUIRE(lancedb_table_optimize(table, LANCEDB_OPTIMIZE_COMPACT, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_rows == 7);
+    REQUIRE(stats.num_deleted_rows == 0);
+    REQUIRE(stats.fragment_stats.num_fragments == 1);
+    REQUIRE(stats.fragment_stats.lengths.max == 7);
+  }
+
+  SECTION("Indices are counted") {
+    LanceDBTableStats stats{};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_indices == 0);
+
+    const char* columns[] = {"key"};
+    LanceDBScalarIndexConfig config = {.replace = 0};
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_rows == 10);
+    REQUIRE(stats.num_deleted_rows == 0);
+
+    // Find the index name and drop it
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(lancedb_table_drop_index(table, indices[0], &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_free_index_list(indices, count);
+
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_indices == 0);
+    REQUIRE(stats.num_rows == 10);
+    REQUIRE(stats.num_deleted_rows == 0);
+  }
+
+  SECTION("Fragments with at least 100000 rows are not small") {
+    // A single fragment holding 100000 rows is right at the threshold
+    constexpr auto row_num1 = 100000;
+    LanceDBTable* large_table = create_table_with_data("large_stats_table", row_num1, 0);
+    REQUIRE(large_table != nullptr);
+
+    LanceDBTableStats stats{};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_stats(large_table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_rows == row_num1);
+    REQUIRE(stats.fragment_stats.num_fragments == 1);
+    REQUIRE(stats.fragment_stats.num_small_fragments == 0);
+    REQUIRE(stats.fragment_stats.lengths.min == row_num1);
+    REQUIRE(stats.fragment_stats.lengths.max == row_num1);
+
+    // Adding a small fragment next to the large one is counted as small
+    constexpr auto row_num2 = 10;
+    auto batch = create_test_record_batch(row_num2, row_num1);
+    auto reader = create_reader_from_batch(batch);
+    REQUIRE(reader != nullptr);
+    REQUIRE(lancedb_table_add(large_table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(lancedb_table_stats(large_table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_rows == row_num1 + row_num2);
+    REQUIRE(stats.fragment_stats.num_fragments == 2);
+    REQUIRE(stats.fragment_stats.num_small_fragments == 1);
+    REQUIRE(stats.fragment_stats.lengths.min == row_num2);
+    REQUIRE(stats.fragment_stats.lengths.max == row_num1);
+    REQUIRE(stats.fragment_stats.lengths.mean == (row_num1 + row_num2) / 2);
+
+    lancedb_table_free(large_table);
+  }
+
+  SECTION("Fragment length percentiles") {
+    // Add fragments of 1, 2, 4 and 20 rows next to the existing 10 row one,
+    // so that the sorted fragment lengths are 1, 2, 4, 10, 20
+    char* error_message = nullptr;
+    constexpr auto existing_batch_size = 10;
+    constexpr auto num_batches = 4;
+    constexpr std::array<unsigned, num_batches> num_rows_arr = {1, 2, 4, 20};
+    constexpr auto total_rows = std::accumulate(num_rows_arr.begin(),
+        num_rows_arr.end(),
+        0) + 10; // include the 10 rows already in the first fragment
+    constexpr auto total_num_batches = num_batches + 1; // include the first fragment
+    auto start_index = existing_batch_size;
+    for (int num_rows : num_rows_arr) {
+      auto batch = create_test_record_batch(num_rows, start_index);
+      auto reader = create_reader_from_batch(batch);
+      REQUIRE(reader != nullptr);
+      REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      start_index += num_rows;
+    }
+
+    LanceDBTableStats stats{};
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.num_rows == total_rows);
+    REQUIRE(stats.fragment_stats.num_fragments == total_num_batches);
+    REQUIRE(stats.fragment_stats.num_small_fragments == total_num_batches);
+    REQUIRE(stats.fragment_stats.lengths.min == num_rows_arr[0]);
+    REQUIRE(stats.fragment_stats.lengths.max == num_rows_arr[3]);
+    REQUIRE(stats.fragment_stats.lengths.mean == (total_rows / total_num_batches));
+    REQUIRE(stats.fragment_stats.lengths.p25 == num_rows_arr[1]);
+    REQUIRE(stats.fragment_stats.lengths.p50 == num_rows_arr[2]);
+    REQUIRE(stats.fragment_stats.lengths.p75 == existing_batch_size);
+    REQUIRE(stats.fragment_stats.lengths.p99 == num_rows_arr[3]);
+  }
+
+  SECTION("Stats with null arguments should fail") {
+    LanceDBTableStats stats{};
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_stats(nullptr, &stats, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_stats(table, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // Null error message is allowed
+    REQUIRE(lancedb_table_stats(nullptr, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+  }
+
+  lancedb_table_free(table);
+}
