@@ -131,7 +131,14 @@ include(cmake/ProbeRustNativeLibs.cmake)
 configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
 # rust-lib target
-  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
+# Test builds enable the `test-hooks` feature, which exports a few C entry
+# points that exist only to exercise runtime failure paths from the C++ tests.
+if(BUILD_TESTS)
+  set(CARGO_FEATURES --features test-hooks)
+else()
+  set(CARGO_FEATURES)
+endif()
+set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} ${CARGO_FEATURES} --target-dir "${CMAKE_BINARY_DIR}/target")
 if(BUILD_COVERAGE)
   set(PROFRAW_DIR "${CMAKE_BINARY_DIR}/profraw")
   set(BUILD_PROFRAW_DIR "${PROFRAW_DIR}/build")
@@ -562,6 +569,52 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_vector_query_tests)
 
+  add_executable(lancedb_stack_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_stack.cpp
+  )
+  target_link_libraries(lancedb_stack_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_stack_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_stack_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_stack_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_stack_tests)
+
+  add_executable(lancedb_runtime_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_runtime.cpp
+  )
+  target_link_libraries(lancedb_runtime_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_runtime_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_runtime_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_runtime_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_runtime_tests)
+
   # Enable CTest
   enable_testing()
 
@@ -683,6 +736,45 @@ if(BUILD_TESTS)
   add_test(NAME lancedb_vector_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_index_tests>)
   # Run vector query tests WITHOUT valgrind (too slow under valgrind)
   add_test(NAME lancedb_vector_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_query_tests>)
+  # Exercise 256 KiB callers with both default and minimum worker stacks.
+  foreach(STACK_VARIANT IN ITEMS stack stack_minimum)
+    if(VALGRIND_EXECUTABLE)
+      add_test(NAME lancedb_${STACK_VARIANT}_tests
+        COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+          --tool=memcheck
+          --leak-check=full
+          --show-leak-kinds=definite,possible
+          --errors-for-leak-kinds=definite,possible
+          --track-origins=yes
+          --error-exitcode=1
+          --log-file=${CMAKE_BINARY_DIR}/valgrind_${STACK_VARIANT}.txt
+          --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+          $<TARGET_FILE:lancedb_stack_tests>
+      )
+    else()
+      add_test(NAME lancedb_${STACK_VARIANT}_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_stack_tests>)
+    endif()
+  endforeach()
+  set_tests_properties(lancedb_stack_minimum_tests PROPERTIES
+    ENVIRONMENT "LANCEDB_C_WORKER_STACK_SIZE=2097152"
+  )
+  # Runtime tests (configuration API, panic and misuse reporting via test hooks)
+  if(VALGRIND_EXECUTABLE)
+    add_test(NAME lancedb_runtime_tests
+      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite,possible
+        --errors-for-leak-kinds=definite,possible
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_runtime.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_runtime_tests>
+    )
+  else()
+    add_test(NAME lancedb_runtime_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_runtime_tests>)
+  endif()
 
   if(BUILD_COVERAGE)
     set(PROFDATA_FILE "${CMAKE_BINARY_DIR}/coverage.profdata")

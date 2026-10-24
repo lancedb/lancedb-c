@@ -55,6 +55,12 @@ jobs:
       - name: Build
         run: ninja -C build
 
+      - name: Test Rust runtime
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: cargo test --release --lib --features test-hooks --target-dir build/target
+
       - name: Check
         if: matrix.lib_type == 'shared'
         run: ninja -C build check
