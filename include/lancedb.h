@@ -1978,6 +1978,26 @@ LanceDBExpr* lancedb_expr_array_has(
 );
 
 /**
+ * Create a starts_with expression: check if a string expression starts with a prefix
+ *
+ * Returns a boolean expression that is true when str_expr starts with prefix_expr.
+ *
+ * @param str_expr    - pointer to LanceDBExpr for the string column/expression (consumed)
+ * @param prefix_expr - pointer to LanceDBExpr for the prefix to check against (consumed)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Non-null pointer to LanceDBExpr on success, NULL on failure
+ *         Both inputs are consumed; do not use or free them after calling
+ *         Caller must free result with lancedb_expr_free()
+ *         If error_message is provided and an error occurs, the caller must free
+ *         the message with lancedb_free_string()
+ */
+LanceDBExpr* lancedb_expr_starts_with(
+    LanceDBExpr* str_expr,
+    LanceDBExpr* prefix_expr,
+    char** error_message
+);
+
+/**
  * Clone an expression (creates an independent copy)
  *
  * @param expr - pointer to LanceDBExpr to clone (not consumed)

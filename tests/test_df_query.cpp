@@ -481,6 +481,145 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - DataFusion Expr Filter", "[que
     lancedb_free_string(error_message);
   }
 
+  // ── starts_with tests ─────────────────────────────────────────────────────
+  // Table has 100 rows with keys "key_0" .. "key_99".
+  // Keys starting with "key_1" are: key_1, key_10..key_19 -> 11 rows.
+
+  SECTION("starts_with matches correct rows") {
+    // Build expr: starts_with(key, "key_1")
+    char* sw_err = nullptr;
+    LanceDBExpr* sw_expr = lancedb_expr_starts_with(
+        lancedb_expr_column("key"),
+        lancedb_expr_literal_string("key_1"),
+        &sw_err);
+    REQUIRE(sw_expr != nullptr);
+    REQUIRE(sw_err == nullptr);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key", "data"};
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    result = lancedb_query_df_filter(query, sw_expr, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    REQUIRE(query_result != nullptr);
+
+    // key_1, key_10..key_19 = 11 rows
+    verify_query_result(query_result, 11);
+  }
+
+  SECTION("starts_with with no matches returns empty result") {
+    // Build expr: starts_with(key, "zzz")
+    char* sw_err = nullptr;
+    LanceDBExpr* sw_expr = lancedb_expr_starts_with(
+        lancedb_expr_column("key"),
+        lancedb_expr_literal_string("zzz"),
+        &sw_err);
+    REQUIRE(sw_expr != nullptr);
+    REQUIRE(sw_err == nullptr);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key", "data"};
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    result = lancedb_query_df_filter(query, sw_expr, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    REQUIRE(query_result != nullptr);
+
+    // Convert to Arrow - should return empty result
+    FFI_ArrowArray** result_arrays = nullptr;
+    FFI_ArrowSchema* result_schema = nullptr;
+    size_t count = 0;
+    result = lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(result_arrays == nullptr);
+    REQUIRE(result_schema == nullptr);
+  }
+
+  SECTION("starts_with combined with AND") {
+    // Build expr: starts_with(key, "key_4") AND key != "key_40"
+    // "key_4" matches key_4, key_40..key_49 (11 rows); excluding key_40 gives 10 rows
+    char* sw_err = nullptr;
+    LanceDBExpr* sw_expr = lancedb_expr_starts_with(
+        lancedb_expr_column("key"),
+        lancedb_expr_literal_string("key_4"),
+        &sw_err);
+    REQUIRE(sw_expr != nullptr);
+    REQUIRE(sw_err == nullptr);
+
+    LanceDBExpr* neq_expr = lancedb_expr_binary(
+        lancedb_expr_column("key"),
+        LANCEDB_BINARY_OP_NOT_EQ,
+        lancedb_expr_literal_string("key_40"));
+    REQUIRE(neq_expr != nullptr);
+
+    LanceDBExpr* and_expr = lancedb_expr_and(sw_expr, neq_expr);
+    REQUIRE(and_expr != nullptr);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key", "data"};
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    result = lancedb_query_df_filter(query, and_expr, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    REQUIRE(query_result != nullptr);
+
+    verify_query_result(query_result, 10);
+  }
+
+  SECTION("starts_with null arguments return null and set error message") {
+    // Both null
+    char* err = nullptr;
+    REQUIRE(lancedb_expr_starts_with(nullptr, nullptr, &err) == nullptr);
+    REQUIRE(err != nullptr);
+    lancedb_free_string(err);
+
+    // str_expr null
+    err = nullptr;
+    LanceDBExpr* prefix = lancedb_expr_literal_string("key_");
+    REQUIRE(prefix != nullptr);
+    REQUIRE(lancedb_expr_starts_with(nullptr, prefix, &err) == nullptr);
+    REQUIRE(err != nullptr);
+    lancedb_free_string(err);
+
+    // prefix_expr null
+    err = nullptr;
+    LanceDBExpr* str_e = lancedb_expr_column("key");
+    REQUIRE(str_e != nullptr);
+    REQUIRE(lancedb_expr_starts_with(str_e, nullptr, &err) == nullptr);
+    REQUIRE(err != nullptr);
+    lancedb_free_string(err);
+
+    // error_message is optional: NULL must not crash
+    REQUIRE(lancedb_expr_starts_with(nullptr, nullptr, nullptr) == nullptr);
+  }
+
   lancedb_table_free(table);
 }
 
