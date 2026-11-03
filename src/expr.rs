@@ -9,10 +9,9 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
+use crate::error::set_invalid_argument_message;
 use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
 use datafusion_expr::{col, lit, Expr, Operator};
-
-use crate::error::set_invalid_argument_message;
 
 /// Opaque handle to a DataFusion Expr
 pub struct LanceDBExpr {
@@ -209,6 +208,47 @@ pub unsafe extern "C" fn lancedb_expr_is_null(expr: *mut LanceDBExpr) -> *mut La
     Box::into_raw(Box::new(LanceDBExpr {
         inner: Expr::IsNull(Box::new(inner)),
     }))
+}
+
+/// Create a STARTS WITH expression
+///
+/// # Safety
+/// - `str_expr` must be a valid pointer returned from lancedb_expr_* functions
+/// - `prefix_expr` must be a valid pointer returned from lancedb_expr_* functions
+/// - Both inputs are consumed; do not use or free them after calling
+/// - `error_message` may be NULL; otherwise it receives an error message on failure
+///   that the caller must free with lancedb_free_string()
+///
+/// # Returns
+/// - Non-null pointer to LanceDBExpr on success, NULL on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_expr_starts_with(
+    str_expr: *mut LanceDBExpr,
+    prefix_expr: *mut LanceDBExpr,
+    error_message: *mut *mut c_char,
+) -> *mut LanceDBExpr {
+    let str_e = if !str_expr.is_null() {
+        Some(Box::from_raw(str_expr).inner)
+    } else {
+        None
+    };
+
+    let pre_e = if !prefix_expr.is_null() {
+        Some(Box::from_raw(prefix_expr).inner)
+    } else {
+        None
+    };
+
+    let (Some(str_e), Some(pre_e)) = (str_e, pre_e) else {
+        set_invalid_argument_message(error_message);
+        return std::ptr::null_mut();
+    };
+
+    let udf = datafusion_functions::string::starts_with();
+
+    let func_expr = Expr::ScalarFunction(ScalarFunction::new_udf(udf, vec![str_e, pre_e]));
+
+    Box::into_raw(Box::new(LanceDBExpr { inner: func_expr }))
 }
 
 /// Create an IS NOT NULL expression
