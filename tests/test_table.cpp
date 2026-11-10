@@ -7,48 +7,6 @@
 #include <memory>
 #include "test_common.h"
 
-struct RunOnStackCtx {
-  LanceDBTable* table;
-  LanceDBError result;
-  char* error_message;
-};
-
-extern "C" void merge_insert_on_stack(void* p) {
-  auto* c = static_cast<RunOnStackCtx*>(p);
-  try {
-    auto schema = create_test_schema();
-    arrow::StringBuilder key_builder;
-    arrow::FixedSizeListBuilder data_builder(arrow::default_memory_pool(),
-        std::make_unique<arrow::FloatBuilder>(), TEST_SCHEMA_DIMENSIONS);
-    for (int i = 0; i < 5; i++) {
-      key_builder.Append("key_" + std::to_string(i + 10)).ok();
-      auto* fb = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
-      for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
-        fb->Append(static_cast<float>(i)).ok();
-      }
-      data_builder.Append().ok();
-    }
-    std::shared_ptr<arrow::Array> key_array, data_array;
-    key_builder.Finish(&key_array).ok();
-    data_builder.Finish(&data_array).ok();
-
-    auto batch = arrow::RecordBatch::Make(schema, 5, {key_array, data_array});
-    auto reader = create_reader_from_batch(batch);
-
-    const char* on_columns[] = {"key"};
-    LanceDBMergeInsertConfig config = {
-      .when_matched_update_all = 1,
-      .when_not_matched_insert_all = 1,
-      .when_matched_update_all_condition = nullptr,
-      .when_matched_update_all_expr = nullptr
-    };
-    c->result = lancedb_table_merge_insert(
-        c->table, reader, on_columns, 1, &config, &c->error_message);
-  } catch (...) {
-    c->result = LANCEDB_UNKNOWN;
-  }
-}
-
 // Read the first value of the "data" column of the row with the given key
 static float first_data_value(LanceDBTable* table, const std::string& key) {
   LanceDBQuery* query = lancedb_query_new(table);
@@ -112,15 +70,6 @@ static LanceDBRecordBatchReader* create_reader_with_value(int num_rows, int star
 
   auto batch = arrow::RecordBatch::Make(schema, num_rows, {key_array, data_array});
   return create_reader_from_batch(batch);
-}
-
-extern "C" void sql_delete_on_stack(void* p) {
-  auto* c = static_cast<RunOnStackCtx*>(p);
-  try {
-    c->result = lancedb_table_delete(c->table, "key = 'key_0'", &c->error_message);
-  } catch (...) {
-    c->result = LANCEDB_UNKNOWN;
-  }
 }
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Creation", "[table]") {
@@ -1269,48 +1218,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table DF Delete", "[table]") {
     REQUIRE(result == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
-  }
-
-  lancedb_table_free(table);
-}
-
-TEST_CASE_METHOD(LanceDBFixture, "LanceDB run_on_stack wrapping", "[table]") {
-  const std::string table_name = "test_run_on_stack";
-  create_empty_table(table_name);
-
-  LanceDBTable* table = open_table(table_name);
-
-  constexpr auto row_num = 10;
-  auto initial_batch = create_test_record_batch(row_num, 0);
-  auto initial_reader = create_reader_from_batch(initial_batch);
-  REQUIRE(initial_reader != nullptr);
-
-  char* error_message = nullptr;
-  LanceDBError result = lancedb_table_add(table, initial_reader, &error_message);
-  REQUIRE(result == LANCEDB_SUCCESS);
-  REQUIRE(error_message == nullptr);
-  REQUIRE(lancedb_table_count_rows(table) == row_num);
-
-  SECTION("No-op run_on_stack") {
-    lancedb_run_on_stack(nullptr, nullptr, 0, 0);
-  }
-
-  SECTION("Merge insert via run_on_stack") {
-    RunOnStackCtx ctx{table, LANCEDB_UNKNOWN, nullptr};
-    lancedb_run_on_stack(merge_insert_on_stack, &ctx, 512 * 1024, 1024 * 1024);
-
-    REQUIRE(ctx.result == LANCEDB_SUCCESS);
-    REQUIRE(ctx.error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num + 5);
-  }
-
-  SECTION("SQL delete via run_on_stack") {
-    RunOnStackCtx ctx{table, LANCEDB_UNKNOWN, nullptr};
-    lancedb_run_on_stack(sql_delete_on_stack, &ctx, 512 * 1024, 1024 * 1024);
-
-    REQUIRE(ctx.result == LANCEDB_SUCCESS);
-    REQUIRE(ctx.error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == row_num - 1);
   }
 
   lancedb_table_free(table);

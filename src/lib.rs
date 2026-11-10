@@ -13,7 +13,10 @@ pub mod expr;
 pub mod index;
 pub mod json;
 pub mod query;
+pub(crate) mod runtime;
 pub mod table;
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
 pub mod types;
 
 // Re-export all public FFI functions

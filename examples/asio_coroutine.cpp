@@ -333,27 +333,17 @@ int main(int argc, char* argv[]) {
 
   boost::asio::spawn(io, std::allocator_arg, stack_alloc,
     [tbl, num_vectors](boost::asio::yield_context yield) {
-      std::cout << "--- shared stack (single lancedb_run_on_stack) ---" << std::endl;
-      struct Ctx { LanceDBTable* tbl; int n; boost::asio::yield_context* y; };
-      Ctx ctx{tbl, num_vectors, &yield};
-      lancedb_run_on_stack([](void* p) {
-        auto* c = static_cast<Ctx*>(p);
-        do_upsert(c->tbl, c->n, *c->y);
-        do_delete(c->tbl, c->n, *c->y);
-        do_delete_sql(c->tbl, c->n, *c->y);
-        do_query(c->tbl, *c->y);
-      }, &ctx, 512 * 1024, 1024 * 1024);
+      std::cout << "--- all operations in one coroutine ---" << std::endl;
+      do_upsert(tbl, num_vectors, yield);
+      do_delete(tbl, num_vectors, yield);
+      do_delete_sql(tbl, num_vectors, yield);
+      do_query(tbl, yield);
     }, boost::asio::detached);
 
   boost::asio::spawn(io, std::allocator_arg, stack_alloc,
     [tbl, num_vectors](boost::asio::yield_context yield) {
-      std::cout << "--- per-operation coroutines (selective wrapping) ---" << std::endl;
-      struct Ctx { LanceDBTable* tbl; int n; boost::asio::yield_context* y; };
-      Ctx ctx{tbl, num_vectors, &yield};
-      lancedb_run_on_stack([](void* p) {
-        auto* c = static_cast<Ctx*>(p);
-        do_upsert(c->tbl, c->n, *c->y);
-      }, &ctx, 512 * 1024, 1024 * 1024);
+      std::cout << "--- per-operation coroutines ---" << std::endl;
+      do_upsert(tbl, num_vectors, yield);
     }, boost::asio::detached);
 
   boost::asio::spawn(io, std::allocator_arg, stack_alloc,
@@ -363,12 +353,7 @@ int main(int argc, char* argv[]) {
 
   boost::asio::spawn(io, std::allocator_arg, stack_alloc,
     [tbl, num_vectors](boost::asio::yield_context yield) {
-      struct Ctx { LanceDBTable* tbl; int n; boost::asio::yield_context* y; };
-      Ctx ctx{tbl, num_vectors, &yield};
-      lancedb_run_on_stack([](void* p) {
-        auto* c = static_cast<Ctx*>(p);
-        do_delete_sql(c->tbl, c->n, *c->y);
-      }, &ctx, 512 * 1024, 1024 * 1024);
+      do_delete_sql(tbl, num_vectors, yield);
     }, boost::asio::detached);
 
   boost::asio::spawn(io, std::allocator_arg, stack_alloc,
@@ -379,26 +364,16 @@ int main(int argc, char* argv[]) {
   boost::coroutines::attributes attrs(COROUTINE_STACK_SIZE);
 
   boost::asio::spawn(io, [tbl, num_vectors](boost::asio::yield_context yield) {
-    std::cout << "--- shared stack (single lancedb_run_on_stack) ---" << std::endl;
-    struct Ctx { LanceDBTable* tbl; int n; boost::asio::yield_context* y; };
-    Ctx ctx{tbl, num_vectors, &yield};
-    lancedb_run_on_stack([](void* p) {
-      auto* c = static_cast<Ctx*>(p);
-      do_upsert(c->tbl, c->n, *c->y);
-      do_delete(c->tbl, c->n, *c->y);
-      do_delete_sql(c->tbl, c->n, *c->y);
-      do_query(c->tbl, *c->y);
-    }, &ctx, 512 * 1024, 1024 * 1024);
+    std::cout << "--- all operations in one coroutine ---" << std::endl;
+    do_upsert(tbl, num_vectors, yield);
+    do_delete(tbl, num_vectors, yield);
+    do_delete_sql(tbl, num_vectors, yield);
+    do_query(tbl, yield);
   }, attrs);
 
   boost::asio::spawn(io, [tbl, num_vectors](boost::asio::yield_context yield) {
-    std::cout << "--- per-operation coroutines (selective wrapping) ---" << std::endl;
-    struct Ctx { LanceDBTable* tbl; int n; boost::asio::yield_context* y; };
-    Ctx ctx{tbl, num_vectors, &yield};
-    lancedb_run_on_stack([](void* p) {
-      auto* c = static_cast<Ctx*>(p);
-      do_upsert(c->tbl, c->n, *c->y);
-    }, &ctx, 512 * 1024, 1024 * 1024);
+    std::cout << "--- per-operation coroutines ---" << std::endl;
+    do_upsert(tbl, num_vectors, yield);
   }, attrs);
 
   boost::asio::spawn(io, [tbl, num_vectors](boost::asio::yield_context yield) {
@@ -406,12 +381,7 @@ int main(int argc, char* argv[]) {
   }, attrs);
 
   boost::asio::spawn(io, [tbl, num_vectors](boost::asio::yield_context yield) {
-    struct Ctx { LanceDBTable* tbl; int n; boost::asio::yield_context* y; };
-    Ctx ctx{tbl, num_vectors, &yield};
-    lancedb_run_on_stack([](void* p) {
-      auto* c = static_cast<Ctx*>(p);
-      do_delete_sql(c->tbl, c->n, *c->y);
-    }, &ctx, 512 * 1024, 1024 * 1024);
+        do_delete_sql(tbl, num_vectors, yield);
   }, attrs);
 
   boost::asio::spawn(io, [tbl](boost::asio::yield_context yield) {

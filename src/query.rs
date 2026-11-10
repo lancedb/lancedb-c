@@ -19,11 +19,12 @@ use datafusion_expr::Expr;
 use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
 use lancedb::{DistanceType, Table};
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::LanceDBTable;
 use crate::error::{
     handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
 };
 use crate::expr::LanceDBExpr;
+use crate::runtime::run_blocking;
 use crate::types::LanceDBDistanceType;
 
 /// Opaque handle to a LanceDB Query
@@ -540,23 +541,29 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
         return LanceDBError::InvalidArgument;
     }
 
+    // The plan does not consume the query, so copy what the worker needs out
+    // of it before hopping threads; the caller keeps the handle.
     let query_ref = &*query;
-    let runtime = get_runtime();
+    let table = query_ref.table.clone();
+    let limit = query_ref.limit;
+    let offset = query_ref.offset;
+    let select = query_ref.select.clone();
+    let df_filter = query_ref.df_filter.clone();
 
-    match runtime.block_on(async {
-        let mut rust_query = query_ref.table.query();
+    match run_blocking(async move {
+        let mut rust_query = table.query();
 
-        if let Some(limit) = query_ref.limit {
+        if let Some(limit) = limit {
             rust_query = rust_query.limit(limit);
         }
-        if let Some(offset) = query_ref.offset {
+        if let Some(offset) = offset {
             rust_query = rust_query.offset(offset);
         }
-        if let Some(ref select) = query_ref.select {
-            rust_query = rust_query.select(select.clone());
+        if let Some(select) = select {
+            rust_query = rust_query.select(select);
         }
-        if let Some(ref df_filter) = query_ref.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
+        if let Some(df_filter) = df_filter {
+            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
         }
 
         rust_query.explain_plan(verbose).await
@@ -598,44 +605,51 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         return LanceDBError::InvalidArgument;
     }
 
+    // As above: the plan does not consume the query, copy its parameters.
     let query_ref = &*query;
-    let runtime = get_runtime();
+    let table = query_ref.table.clone();
+    let query_vector = query_ref.query_vector.clone();
+    let column = query_ref.column.clone();
+    let limit = query_ref.limit;
+    let offset = query_ref.offset;
+    let select = query_ref.select.clone();
+    let df_filter = query_ref.df_filter.clone();
+    let distance_type = query_ref.distance_type;
+    let nprobes = query_ref.nprobes;
+    let refine_factor = query_ref.refine_factor;
+    let ef = query_ref.ef;
 
-    match runtime.block_on(async {
-        let mut rust_query = match query_ref
-            .table
-            .query()
-            .nearest_to(query_ref.query_vector.clone())
-        {
+    match run_blocking(async move {
+        let mut rust_query = match table.query().nearest_to(query_vector) {
             Ok(q) => q,
             Err(e) => return Err(e),
         };
 
-        if let Some(ref column) = query_ref.column {
-            rust_query = rust_query.column(column);
+        if let Some(column) = column {
+            rust_query = rust_query.column(&column);
         }
-        if let Some(limit) = query_ref.limit {
+        if let Some(limit) = limit {
             rust_query = rust_query.limit(limit);
         }
-        if let Some(offset) = query_ref.offset {
+        if let Some(offset) = offset {
             rust_query = rust_query.offset(offset);
         }
-        if let Some(ref select) = query_ref.select {
-            rust_query = rust_query.select(select.clone());
+        if let Some(select) = select {
+            rust_query = rust_query.select(select);
         }
-        if let Some(ref df_filter) = query_ref.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
+        if let Some(df_filter) = df_filter {
+            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
         }
-        if let Some(distance_type) = query_ref.distance_type {
+        if let Some(distance_type) = distance_type {
             rust_query = rust_query.distance_type(distance_type);
         }
-        if let Some(nprobes) = query_ref.nprobes {
+        if let Some(nprobes) = nprobes {
             rust_query = rust_query.nprobes(nprobes);
         }
-        if let Some(refine_factor) = query_ref.refine_factor {
+        if let Some(refine_factor) = refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);
         }
-        if let Some(ef) = query_ref.ef {
+        if let Some(ef) = ef {
             rust_query = rust_query.ef(ef);
         }
 
@@ -669,9 +683,8 @@ pub unsafe extern "C" fn lancedb_query_execute(
     }
 
     let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let mut rust_query = query_box.table.query();
 
         if let Some(limit) = query_box.limit {
@@ -715,9 +728,8 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
     }
 
     let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let mut rust_query = match query_box
             .table
             .query()
@@ -791,9 +803,8 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
     }
 
     let result_box = Box::from_raw(result);
-    let runtime = get_runtime();
 
-    match runtime.block_on(async {
+    match run_blocking(async move {
         let batches: Vec<RecordBatch> = result_box.inner.try_collect().await?;
         Ok::<Vec<RecordBatch>, lancedb::error::Error>(batches)
     }) {
