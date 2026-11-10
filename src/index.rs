@@ -9,6 +9,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
 
+use lance::index::DatasetIndexExt;
 use lancedb::index::scalar::{
     BTreeIndexBuilder, BitmapIndexBuilder, FmIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
 };
@@ -16,11 +17,12 @@ use lancedb::index::vector::{
     IvfFlatIndexBuilder, IvfHnswFlatIndexBuilder, IvfHnswPqIndexBuilder, IvfHnswSqIndexBuilder,
     IvfPqIndexBuilder, IvfRqIndexBuilder, IvfSqIndexBuilder,
 };
-use lancedb::index::Index;
+use lancedb::index::{Index, IndexType};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+    handle_error, set_custom_error_message, set_invalid_argument_message,
+    set_unknown_error_message, LanceDBError,
 };
 use crate::types::LanceDBDistanceType;
 
@@ -41,6 +43,29 @@ pub enum LanceDBIndexType {
     IvfRq = 10,
     IvfHnswFlat = 11,
     Fm = 12,
+    /// An index type this version of the bindings does not know. Only reported by the
+    /// index stats, it cannot be created
+    Unknown = 99,
+}
+
+impl From<IndexType> for LanceDBIndexType {
+    fn from(index_type: IndexType) -> Self {
+        match index_type {
+            IndexType::IvfFlat => Self::IvfFlat,
+            IndexType::IvfSq => Self::IvfSq,
+            IndexType::IvfPq => Self::IvfPq,
+            IndexType::IvfRq => Self::IvfRq,
+            IndexType::IvfHnswPq => Self::IvfHnswPq,
+            IndexType::IvfHnswSq => Self::IvfHnswSq,
+            IndexType::IvfHnswFlat => Self::IvfHnswFlat,
+            IndexType::BTree => Self::BTree,
+            IndexType::Bitmap => Self::Bitmap,
+            IndexType::LabelList => Self::LabelList,
+            IndexType::Fm => Self::Fm,
+            IndexType::FTS => Self::FTS,
+            IndexType::Unknown => Self::Unknown,
+        }
+    }
 }
 
 /// Apply the parameters shared by all the vector index types to an index builder
@@ -595,6 +620,85 @@ pub struct LanceDBIndexStats {
     pub num_indexed_rows: usize,
     pub num_unindexed_rows: usize,
     pub num_indices: u32,
+    pub num_indexed_fragments: usize,
+    pub num_unindexed_fragments: usize,
+    pub num_deleted_indexed_rows: usize,
+    pub index_type: LanceDBIndexType,
+    pub num_partitions: u32,
+    pub dataset_version: u64,
+}
+
+/// The part of the index statistics that LanceDB does not compute, read from the
+/// manifest of a native table
+#[derive(Debug, Default)]
+struct ManifestIndexStats {
+    num_indexed_fragments: usize,
+    num_unindexed_fragments: usize,
+    num_deleted_indexed_rows: usize,
+    num_partitions: u32,
+    dataset_version: u64,
+}
+
+/// Read the manifest-level statistics of a named index
+///
+/// The fragment coverage, the deleted rows and the dataset version are taken from the
+/// index metadata in the manifest, with no data reads. The number of partitions is only
+/// known to the vector index itself, so for a vector index the index statistics of lance
+/// are consulted as well
+async fn manifest_index_stats(
+    dataset: &lance::Dataset,
+    index_name: &str,
+    is_vector: bool,
+) -> lancedb::Result<ManifestIndexStats> {
+    let segments = dataset.load_indices_by_name(index_name).await?;
+    let covered = |fragment_id: u64| {
+        segments.iter().any(|segment| {
+            segment
+                .fragment_bitmap
+                .as_ref()
+                .is_some_and(|bitmap| bitmap.contains(fragment_id as u32))
+        })
+    };
+
+    let mut stats = ManifestIndexStats {
+        dataset_version: segments
+            .iter()
+            .map(|segment| segment.dataset_version)
+            .max()
+            .unwrap_or(0),
+        ..Default::default()
+    };
+    for fragment in dataset.fragments().iter() {
+        if covered(fragment.id) {
+            stats.num_indexed_fragments += 1;
+            stats.num_deleted_indexed_rows += fragment
+                .deletion_file
+                .as_ref()
+                .and_then(|deletion_file| deletion_file.num_deleted_rows)
+                .unwrap_or(0);
+        } else {
+            stats.num_unindexed_fragments += 1;
+        }
+    }
+
+    if is_vector {
+        // the statistics of a vector index list its segments, each with its own
+        // partition count
+        let json = dataset.index_statistics(index_name).await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| lancedb::Error::Runtime {
+                message: format!("Failed to parse index statistics: {e}"),
+            })?;
+        stats.num_partitions = value["indices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|segment| segment["num_partitions"].as_u64())
+            .max()
+            .unwrap_or(0) as u32;
+    }
+
+    Ok(stats)
 }
 
 /// Get statistics for a named index on the table
@@ -629,17 +733,37 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
     let tbl = &(*table).inner;
     let runtime = get_runtime();
 
-    match runtime.block_on(tbl.index_stats(name_str)) {
-        Ok(Some(stats)) => {
-            (*stats_out).num_indexed_rows = stats.num_indexed_rows;
-            (*stats_out).num_unindexed_rows = stats.num_unindexed_rows;
-            (*stats_out).num_indices = stats.num_indices.unwrap_or(0);
-            LanceDBError::Success
-        }
+    let stats = match runtime.block_on(tbl.index_stats(name_str)) {
+        Ok(Some(stats)) => stats,
         Ok(None) => {
-            // Index not found
-            LanceDBError::IndexNotFound
+            set_custom_error_message(error_message, &format!("Index not found: {name_str}"));
+            return LanceDBError::IndexNotFound;
         }
-        Err(e) => handle_error(&e, error_message),
-    }
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    // the manifest is only reachable on a native table; a remote table reports zeros
+    let manifest_stats = match tbl.dataset() {
+        Some(ds) => match runtime.block_on(async {
+            let dataset = ds.get().await?;
+            manifest_index_stats(&dataset, name_str, stats.distance_type.is_some()).await
+        }) {
+            Ok(manifest_stats) => manifest_stats,
+            Err(e) => return handle_error(&e, error_message),
+        },
+        None => ManifestIndexStats::default(),
+    };
+
+    *stats_out = LanceDBIndexStats {
+        num_indexed_rows: stats.num_indexed_rows,
+        num_unindexed_rows: stats.num_unindexed_rows,
+        num_indices: stats.num_indices.unwrap_or(0),
+        num_indexed_fragments: manifest_stats.num_indexed_fragments,
+        num_unindexed_fragments: manifest_stats.num_unindexed_fragments,
+        num_deleted_indexed_rows: manifest_stats.num_deleted_indexed_rows,
+        index_type: stats.index_type.into(),
+        num_partitions: manifest_stats.num_partitions,
+        dataset_version: manifest_stats.dataset_version,
+    };
+    LanceDBError::Success
 }

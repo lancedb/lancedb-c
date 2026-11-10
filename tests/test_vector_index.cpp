@@ -489,3 +489,111 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index - explicit tuning paramet
 
   lancedb_table_free(table);
 }
+
+// Number of IVF partitions of the index created by create_ivf_pq_index()
+static constexpr int REINDEX_NUM_PARTITIONS = 4;
+
+// Create an IVF_PQ index on the "data" column
+static void create_ivf_pq_index(LanceDBTable* table) {
+  const char* columns[] = {"data"};
+  LanceDBVectorIndexConfig config = {
+    .num_partitions = REINDEX_NUM_PARTITIONS,
+    .num_sub_vectors = 2,
+    .max_iterations = -1,
+    .sample_rate = 0.0f,
+    .distance_type = LANCEDB_DISTANCE_L2,
+    .replace = 0
+  };
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_vector_index(
+      table, columns, 1, LANCEDB_INDEX_IVF_PQ, &config, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
+// The names of the indices on the table
+static std::vector<std::string> list_index_names(LanceDBTable* table) {
+  char** indices = nullptr;
+  size_t count = 0;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  std::vector<std::string> names;
+  for (size_t i = 0; i < count; ++i) {
+    names.emplace_back(indices[i]);
+  }
+  lancedb_free_index_list(indices, count);
+  return names;
+}
+
+// The name of the only index on the table
+static std::string single_index_name(LanceDBTable* table) {
+  const auto names = list_index_names(table);
+  REQUIRE(names.size() == 1);
+  return names[0];
+}
+
+static void add_rows(LanceDBTable* table, int num_rows, int start_index) {
+  auto reader = create_reader_from_batch(create_test_record_batch(num_rows, start_index));
+  REQUIRE(reader != nullptr);
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
+static LanceDBIndexStats index_stats(LanceDBTable* table, const std::string& index_name) {
+  LanceDBIndexStats stats = {};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_index_stats(table, index_name.c_str(), &stats, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  return stats;
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index Stats", "[vector_index]") {
+  const std::string table_name = "vector_index_stats_test";
+
+  SECTION("Stats describe the index and its coverage") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    // An index records the table version it was trained on, which is the version
+    // before the commit that added it
+    const unsigned long long index_version = lancedb_table_version(table);
+    create_ivf_pq_index(table);
+    const std::string index_name = single_index_name(table);
+    REQUIRE(lancedb_table_version(table) == index_version + 1);
+
+    LanceDBIndexStats stats = index_stats(table, index_name);
+    REQUIRE(stats.index_type == LANCEDB_INDEX_IVF_PQ);
+    REQUIRE(stats.num_partitions == REINDEX_NUM_PARTITIONS);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_fragments == 1);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+    REQUIRE(stats.num_deleted_indexed_rows == 0);
+    REQUIRE(stats.dataset_version == index_version);
+
+    // New rows land in a fragment the index does not cover
+    add_rows(table, 50, 256);
+    stats = index_stats(table, index_name);
+    REQUIRE(stats.num_indexed_fragments == 1);
+    REQUIRE(stats.num_unindexed_fragments == 1);
+    REQUIRE(stats.dataset_version == index_version);
+
+    // Deleting indexed rows is counted, deleting unindexed rows is not
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_delete(table, "key IN ('key_0', 'key_1', 'key_300')", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    stats = index_stats(table, index_name);
+    REQUIRE(stats.num_deleted_indexed_rows == 2);
+
+    // Optimizing the index covers the new fragment and moves the index version forward
+    REQUIRE(lancedb_table_optimize(table, LANCEDB_OPTIMIZE_INDEX, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    stats = index_stats(table, index_name);
+    REQUIRE(stats.num_indexed_fragments == 2);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+    REQUIRE(stats.num_deleted_indexed_rows == 3);
+    REQUIRE(stats.dataset_version > index_version);
+    REQUIRE(stats.dataset_version <= lancedb_table_version(table));
+
+    lancedb_table_free(table);
+  }
+}

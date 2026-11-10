@@ -201,6 +201,15 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Stats", "[index]") {
     // After creating the index, all rows should be indexed
     REQUIRE(stats.num_indexed_rows == 100);
     REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_fragments == 1);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+    REQUIRE(stats.num_deleted_indexed_rows == 0);
+    REQUIRE(stats.index_type == LANCEDB_INDEX_BTREE);
+    // A scalar index has no partitions
+    REQUIRE(stats.num_partitions == 0);
+    // The index was trained on the version before the commit that added it
+    REQUIRE(stats.dataset_version + 1 == lancedb_table_version(table));
 
     lancedb_table_free(table);
   }
@@ -248,6 +257,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Stats", "[index]") {
 
     REQUIRE(stats.num_indexed_rows == 100);
     REQUIRE(stats.num_unindexed_rows == 50);
+    REQUIRE(stats.num_indexed_fragments == 1);
+    REQUIRE(stats.num_unindexed_fragments == 1);
 
     lancedb_table_free(table);
   }
