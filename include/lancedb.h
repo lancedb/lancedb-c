@@ -198,7 +198,9 @@ typedef enum {
     LANCEDB_INDEX_IVF_SQ = 9,
     LANCEDB_INDEX_IVF_RQ = 10,
     LANCEDB_INDEX_IVF_HNSW_FLAT = 11,
-    LANCEDB_INDEX_FM = 12
+    LANCEDB_INDEX_FM = 12,
+    LANCEDB_INDEX_UNKNOWN = 99   // An index type unknown to this version of the library. Only
+                                 // reported by lancedb_table_index_stats(); cannot be created
 } LanceDBIndexType;
 
 /**
@@ -1656,11 +1658,21 @@ void lancedb_free_index_list(char** indices, size_t count);
 
 /**
  * Index statistics structure
+ *
+ * The fragment, deleted-row and version fields are read from the table manifest and are
+ * only available on local tables; on a remote table they are reported as 0.
+ * num_partitions is only available for vector indices.
  */
 typedef struct {
-    size_t num_indexed_rows;     // Rows covered by the index
-    size_t num_unindexed_rows;   // Rows not yet indexed
-    unsigned int num_indices;    // Number of index parts (0 if unknown)
+    size_t num_indexed_rows;            // Rows covered by the index
+    size_t num_unindexed_rows;          // Rows not yet indexed
+    unsigned int num_indices;           // Number of index parts (segments/delta indices, 0 if unknown)
+    size_t num_indexed_fragments;       // Fragments covered by the index
+    size_t num_unindexed_fragments;     // Fragments with no coverage
+    size_t num_deleted_indexed_rows;    // Rows deleted from indexed fragments since the build
+    LanceDBIndexType index_type;        // IVF_PQ, BTREE, FTS, ...
+    unsigned int num_partitions;        // Vector indices only; 0 otherwise
+    unsigned long long dataset_version; // Table version the newest segment was built against
 } LanceDBIndexStats;
 
 /**
