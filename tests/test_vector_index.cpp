@@ -490,11 +490,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index - explicit tuning paramet
   lancedb_table_free(table);
 }
 
-// Number of IVF partitions of the index created by create_ivf_pq_index()
+// Number of IVF partitions of the index created by create_vector_index()
 static constexpr int REINDEX_NUM_PARTITIONS = 4;
 
-// Create an IVF_PQ index on the "data" column
-static void create_ivf_pq_index(LanceDBTable* table) {
+// Create a vector index on the "data" column
+static void create_vector_index(LanceDBTable* table, LanceDBIndexType index_type = LANCEDB_INDEX_IVF_PQ) {
   const char* columns[] = {"data"};
   LanceDBVectorIndexConfig config = {
     .num_partitions = REINDEX_NUM_PARTITIONS,
@@ -506,7 +506,17 @@ static void create_ivf_pq_index(LanceDBTable* table) {
   };
   char* error_message = nullptr;
   REQUIRE(lancedb_table_create_vector_index(
-      table, columns, 1, LANCEDB_INDEX_IVF_PQ, &config, &error_message) == LANCEDB_SUCCESS);
+      table, columns, 1, index_type, &config, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
+// Create a BTREE index on the "key" column
+static void create_btree_index(LanceDBTable* table) {
+  const char* columns[] = {"key"};
+  LanceDBScalarIndexConfig config = {.replace = 0};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_scalar_index(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 }
 
@@ -548,6 +558,282 @@ static LanceDBIndexStats index_stats(LanceDBTable* table, const std::string& ind
   return stats;
 }
 
+static void optimize_indices(LanceDBTable* table, const LanceDBOptimizeIndexOptions* options) {
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_optimize_indices(table, options, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
+static void optimize_indices(LanceDBTable* table, LanceDBReindexMode mode) {
+  LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+  options.mode = mode;
+  optimize_indices(table, &options);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices", "[vector_index]") {
+  const std::string table_name = "optimize_indices_test";
+  // Every reindex mode is exercised on every vector index type
+  const LanceDBIndexType index_type = GENERATE(
+      LANCEDB_INDEX_IVF_FLAT, LANCEDB_INDEX_IVF_SQ, LANCEDB_INDEX_IVF_PQ, LANCEDB_INDEX_IVF_RQ,
+      LANCEDB_INDEX_IVF_HNSW_PQ, LANCEDB_INDEX_IVF_HNSW_SQ, LANCEDB_INDEX_IVF_HNSW_FLAT);
+  CAPTURE(index_type);
+
+  SECTION("APPEND adds a delta index covering the new rows") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table, index_type);
+    const std::string index_name = single_index_name(table);
+    add_rows(table, 50, 256);
+
+    LanceDBIndexStats stats = index_stats(table, index_name);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 256);
+    REQUIRE(stats.num_unindexed_rows == 50);
+
+    optimize_indices(table, LANCEDB_REINDEX_APPEND);
+
+    stats = index_stats(table, index_name);
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 306);
+    REQUIRE(stats.num_unindexed_rows == 0);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("MERGE collapses the delta indices") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table, index_type);
+    const std::string index_name = single_index_name(table);
+
+    // Two appends leave three segments
+    add_rows(table, 50, 256);
+    optimize_indices(table, LANCEDB_REINDEX_APPEND);
+    add_rows(table, 50, 306);
+    optimize_indices(table, LANCEDB_REINDEX_APPEND);
+    REQUIRE(index_stats(table, index_name).num_indices == 3);
+
+    // Merging one segment folds the latest segment into a new one
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.mode = LANCEDB_REINDEX_MERGE;
+    options.num_indices_to_merge = 1;
+    optimize_indices(table, &options);
+    REQUIRE(index_stats(table, index_name).num_indices == 3);
+
+    // Merging more segments than there are folds all of them into one
+    options.num_indices_to_merge = 100;
+    optimize_indices(table, &options);
+    LanceDBIndexStats stats = index_stats(table, index_name);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 356);
+    REQUIRE(stats.num_unindexed_rows == 0);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("MERGE with -1 lets Lance pick the segments to merge") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table, index_type);
+    const std::string index_name = single_index_name(table);
+    add_rows(table, 50, 256);
+    optimize_indices(table, LANCEDB_REINDEX_APPEND);
+    add_rows(table, 50, 306);
+
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.mode = LANCEDB_REINDEX_MERGE;
+    options.num_indices_to_merge = -1;
+    optimize_indices(table, &options);
+
+    // Everything is indexed, how many segments remain is up to Lance
+    LanceDBIndexStats stats = index_stats(table, index_name);
+    INFO("Segments after merging with -1: " << stats.num_indices);
+    REQUIRE(stats.num_indices >= 1);
+    REQUIRE(stats.num_indexed_rows == 356);
+    REQUIRE(stats.num_unindexed_rows == 0);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("RETRAIN collapses a vector index to a single segment") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table, index_type);
+    const std::string index_name = single_index_name(table);
+    add_rows(table, 50, 256);
+    optimize_indices(table, LANCEDB_REINDEX_APPEND);
+    add_rows(table, 50, 306);
+    REQUIRE(index_stats(table, index_name).num_indices == 2);
+
+    optimize_indices(table, LANCEDB_REINDEX_RETRAIN);
+
+    LanceDBIndexStats stats = index_stats(table, index_name);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 356);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    // The retrain re-fits the partitions to the data, so their count may change
+    REQUIRE(stats.num_partitions > 0);
+
+    lancedb_table_free(table);
+  }
+
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices Options", "[vector_index]") {
+  const std::string table_name = "optimize_indices_options_test";
+
+  SECTION("The default options match the legacy index optimization") {
+    const LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    REQUIRE(options.mode == LANCEDB_REINDEX_DEFAULT);
+    REQUIRE(options.num_indices_to_merge == -1);
+    REQUIRE(options.index_names == nullptr);
+    REQUIRE(options.num_index_names == 0);
+    REQUIRE(options.transaction_property_keys == nullptr);
+    REQUIRE(options.transaction_property_values == nullptr);
+    REQUIRE(options.num_transaction_properties == 0);
+  }
+
+  SECTION("Only the named indices are optimized") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table);
+    const std::string vector_index_name = single_index_name(table);
+    create_btree_index(table);
+    std::string btree_index_name;
+    for (const auto& name : list_index_names(table)) {
+      if (name != vector_index_name) {
+        btree_index_name = name;
+      }
+    }
+    REQUIRE(!btree_index_name.empty());
+    add_rows(table, 50, 256);
+
+    const char* names[] = {vector_index_name.c_str()};
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.mode = LANCEDB_REINDEX_APPEND;
+    options.index_names = names;
+    options.num_index_names = 1;
+    optimize_indices(table, &options);
+
+    REQUIRE(index_stats(table, vector_index_name).num_unindexed_rows == 0);
+    REQUIRE(index_stats(table, btree_index_name).num_unindexed_rows == 50);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("An unknown index name is reported") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table);
+
+    const char* names[] = {"no_such_index"};
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.index_names = names;
+    options.num_index_names = 1;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, &error_message) == LANCEDB_INDEX_NOT_FOUND);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no_such_index") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("NULL options behave like the legacy index optimization") {
+    LanceDBTable* legacy_table = create_table_with_data(table_name + "_legacy", 256, 0);
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(legacy_table != nullptr);
+    REQUIRE(table != nullptr);
+    for (auto* t : {legacy_table, table}) {
+      create_vector_index(t);
+      add_rows(t, 50, 256);
+    }
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize(legacy_table, LANCEDB_OPTIMIZE_INDEX, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    optimize_indices(table, nullptr);
+
+    const LanceDBIndexStats legacy_stats = index_stats(legacy_table, single_index_name(legacy_table));
+    const LanceDBIndexStats stats = index_stats(table, single_index_name(table));
+    REQUIRE(stats.num_indices == legacy_stats.num_indices);
+    REQUIRE(stats.num_indexed_rows == legacy_stats.num_indexed_rows);
+    REQUIRE(stats.num_unindexed_rows == legacy_stats.num_unindexed_rows);
+    REQUIRE(stats.num_unindexed_rows == 0);
+
+    lancedb_table_free(legacy_table);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Transaction properties are accepted") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table);
+    const std::string index_name = single_index_name(table);
+    add_rows(table, 50, 256);
+    const unsigned long long version_before = lancedb_table_version(table);
+
+    const char* keys[] = {"job_id", "source"};
+    const char* values[] = {"42", "test"};
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.mode = LANCEDB_REINDEX_APPEND;
+    options.transaction_property_keys = keys;
+    options.transaction_property_values = values;
+    options.num_transaction_properties = 2;
+    optimize_indices(table, &options);
+
+    // The reindex committed a new version
+    REQUIRE(lancedb_table_version(table) > version_before);
+    REQUIRE(index_stats(table, index_name).num_unindexed_rows == 0);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Invalid arguments are rejected") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table);
+    const std::string index_name = single_index_name(table);
+    const char* names[] = {index_name.c_str()};
+    const char* invalid_names[] = {"\xff\xfe"};
+    const char* null_names[] = {nullptr};
+
+    REQUIRE(lancedb_table_optimize_indices(nullptr, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.mode = LANCEDB_REINDEX_MERGE;
+    options.num_indices_to_merge = -2;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // A negative merge count is ignored outside of the MERGE mode
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices(table, &options);
+
+    options = lancedb_optimize_index_options_default();
+    options.num_index_names = 1;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    options.index_names = invalid_names;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    options.index_names = null_names;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    options = lancedb_optimize_index_options_default();
+    options.num_transaction_properties = 1;
+    options.transaction_property_keys = names;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    options.transaction_property_keys = nullptr;
+    options.transaction_property_values = names;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    options.transaction_property_keys = invalid_names;
+    REQUIRE(lancedb_table_optimize_indices(table, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    lancedb_table_free(table);
+  }
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index Stats", "[vector_index]") {
   const std::string table_name = "vector_index_stats_test";
 
@@ -557,7 +843,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index Stats", "[vector_index]")
     // An index records the table version it was trained on, which is the version
     // before the commit that added it
     const unsigned long long index_version = lancedb_table_version(table);
-    create_ivf_pq_index(table);
+    create_vector_index(table);
     const std::string index_name = single_index_name(table);
     REQUIRE(lancedb_table_version(table) == index_version + 1);
 
