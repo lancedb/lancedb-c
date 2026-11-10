@@ -214,6 +214,44 @@ typedef enum {
 } LanceDBOptimizeType;
 
 /**
+ * How unindexed rows are folded into existing indices by lancedb_table_optimize_indices()
+ */
+typedef enum {
+    // Lance decides, depending on the index type:
+    // - vector index: add a new delta segment like APPEND, unless a partition has grown
+    //   too large or is too small. In that case the partition is split, or joined into
+    //   its neighbours, and all segments are merged into one
+    // - scalar or full-text index: merge the new rows into the newest segment, so the
+    //   number of segments does not grow
+    LANCEDB_REINDEX_DEFAULT = 0,
+    // Add a new delta segment over the new rows; never touch existing segments
+    LANCEDB_REINDEX_APPEND  = 1,
+    // Merge the new rows and the newest num_indices_to_merge segments into one segment
+    LANCEDB_REINDEX_MERGE   = 2,
+    // Retrain a vector index on the current data and collapse it to one segment. Other
+    // indices have nothing to train; for them it behaves like DEFAULT
+    LANCEDB_REINDEX_RETRAIN = 3
+} LanceDBReindexMode;
+
+/**
+ * Options for lancedb_table_optimize_indices()
+ *
+ * Use lancedb_optimize_index_options_default() to get the same behaviour as
+ * lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX). All strings are borrowed for the
+ * duration of the call only.
+ */
+typedef struct {
+    LanceDBReindexMode mode;
+    int num_indices_to_merge;                       // MERGE only: newest segments to merge with the new rows. A count above
+                                                    // the number of segments merges them all; -1 behaves like DEFAULT
+    const char* const* index_names;                 // Indices to optimize (NULL = all indices)
+    size_t num_index_names;
+    const char* const* transaction_property_keys;   // Optional key-value pairs stored in the commit
+    const char* const* transaction_property_values; // Parallel to transaction_property_keys
+    size_t num_transaction_properties;
+} LanceDBOptimizeIndexOptions;
+
+/**
  * Binary operator enum for DataFusion expressions
  */
 typedef enum {
@@ -1639,12 +1677,45 @@ LanceDBError lancedb_table_drop_index(
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
+ * Using LANCEDB_OPTIMIZE_INDEX type is equivalent to
+ * lancedb_table_optimize_indices(table, NULL, ...).
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_optimize(
     const LanceDBTable* table,
     LanceDBOptimizeType optimize_type,
+    char** error_message
+);
+
+/**
+ * Get the default options for lancedb_table_optimize_indices()
+ *
+ * @return options equivalent to lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX):
+ *         LANCEDB_REINDEX_DEFAULT, all indices, no transaction properties
+ */
+LanceDBOptimizeIndexOptions lancedb_optimize_index_options_default(void);
+
+/**
+ * Optimize (reindex) the table's indices with explicit options
+ *
+ * Full rebuilds stay on lancedb_table_create_*_index() with replace = 1.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param options - reindex options; NULL behaves like lancedb_optimize_index_options_default()
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS on success,
+ *         LANCEDB_INVALID_ARGUMENT for a bad mode, count or array combination,
+ *         LANCEDB_INDEX_NOT_FOUND if a named index does not exist,
+ *         LANCEDB_NOT_SUPPORTED on a remote table, or if the mode is not supported for the
+ *         index type by the underlying Lance version
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_optimize_indices(
+    const LanceDBTable* table,
+    const LanceDBOptimizeIndexOptions* options,
     char** error_message
 );
 

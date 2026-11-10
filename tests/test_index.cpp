@@ -626,6 +626,128 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Scalar Indices", "[index]") {
+  const std::string table_name = "optimize_scalar_indices_test";
+  LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+  REQUIRE(table != nullptr);
+
+  const char* columns[] = {"key"};
+  LanceDBScalarIndexConfig config = {.replace = 0};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_scalar_index(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  char** indices = nullptr;
+  size_t count = 0;
+  REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(count == 1);
+  const std::string index_name = indices[0];
+  lancedb_free_index_list(indices, count);
+
+  const auto add_rows = [&](int num_rows, int start_index) {
+    auto reader = create_reader_from_batch(create_test_record_batch(num_rows, start_index));
+    REQUIRE(reader != nullptr);
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  };
+  const auto index_stats = [&] {
+    LanceDBIndexStats stats = {};
+    REQUIRE(lancedb_table_index_stats(table, index_name.c_str(), &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return stats;
+  };
+  LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+  const auto optimize_indices = [&] {
+    REQUIRE(lancedb_table_optimize_indices(table, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  };
+
+  // Add rows the index does not cover
+  add_rows(20, 20);
+
+  LanceDBIndexStats stats = index_stats();
+  REQUIRE(stats.num_indices == 1);
+  REQUIRE(stats.num_indexed_rows == 20);
+  REQUIRE(stats.num_unindexed_rows == 20);
+  REQUIRE(stats.num_indexed_fragments == 1);
+  REQUIRE(stats.num_unindexed_fragments == 1);
+
+  SECTION("DEFAULT merges the new rows into the existing segment") {
+    REQUIRE(options.mode == LANCEDB_REINDEX_DEFAULT);
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 2);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("APPEND covers the new rows with a new segment") {
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 2);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("MERGE collapses the segments") {
+    // Append a segment, and add more rows that no segment covers
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices();
+    add_rows(20, 40);
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 20);
+
+    // Merge the new rows with both segments
+    options.mode = LANCEDB_REINDEX_MERGE;
+    options.num_indices_to_merge = 2;
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 60);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 3);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("RETRAIN of a scalar index behaves like DEFAULT") {
+    // Append a segment, and add more rows that no segment covers
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices();
+    add_rows(20, 40);
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 20);
+
+    // A scalar index has nothing to train, so the new rows are merged into the newest
+    // segment, and the segments are not collapsed
+    options.mode = LANCEDB_REINDEX_RETRAIN;
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 60);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 3);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  lancedb_table_free(table);
+}
+
 // A string that is not valid UTF-8, to exercise the string conversion failures
 static const char* const INVALID_UTF8 = "\xff\xfe";
 

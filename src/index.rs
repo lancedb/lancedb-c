@@ -5,6 +5,7 @@
 //!
 //! This module provides complete index management operations
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
@@ -18,6 +19,7 @@ use lancedb::index::vector::{
     IvfPqIndexBuilder, IvfRqIndexBuilder, IvfSqIndexBuilder,
 };
 use lancedb::index::{Index, IndexType};
+use lancedb::table::{OptimizeAction, OptimizeOptions};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
@@ -83,6 +85,24 @@ macro_rules! apply_ivf_config {
         }
         builder.distance_type($cfg.distance_type.into())
     }};
+}
+
+/// Convert a C array of null-terminated strings to a vector of strings
+///
+/// Returns None if any of the strings is NULL or not valid UTF-8
+///
+/// # Safety
+/// - `array` must point to `count` valid C strings
+unsafe fn c_str_array_to_vec(array: *const *const c_char, count: usize) -> Option<Vec<String>> {
+    let mut strings = Vec::with_capacity(count);
+    for i in 0..count {
+        let str_ptr = *array.add(i);
+        if str_ptr.is_null() {
+            return None;
+        }
+        strings.push(CStr::from_ptr(str_ptr).to_str().ok()?.to_string());
+    }
+    Some(strings)
 }
 
 /// Configuration for vector indices
@@ -162,6 +182,194 @@ pub enum LanceDBOptimizeType {
     Index = 3,
 }
 
+/// How unindexed rows are folded into existing indices
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBReindexMode {
+    /// Lance decides, depending on the index type:
+    /// - vector index: add a new delta segment like `Append`, unless a partition has grown
+    ///   too large or is too small. In that case the partition is split, or joined into
+    ///   its neighbours, and all segments are merged into one
+    /// - scalar or full-text index: merge the new rows into the newest segment, so the
+    ///   number of segments does not grow
+    Default = 0,
+    /// Add a new delta segment over the new rows, never touch existing segments
+    Append = 1,
+    /// Merge the new rows and the newest `num_indices_to_merge` segments into one segment
+    Merge = 2,
+    /// Retrain a vector index on the current data and collapse it to one segment. Other
+    /// indices have nothing to train, for them it behaves like `Default`
+    Retrain = 3,
+}
+
+/// Options for lancedb_table_optimize_indices
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct LanceDBOptimizeIndexOptions {
+    pub mode: LanceDBReindexMode,
+    /// MERGE only: newest segments to merge with the new rows. A count above the number
+    /// of segments merges them all, -1 behaves like the DEFAULT mode
+    pub num_indices_to_merge: c_int,
+    /// Indices to optimize (NULL = all indices)
+    pub index_names: *const *const c_char,
+    pub num_index_names: usize,
+    /// Optional key-value pairs stored in the commit
+    pub transaction_property_keys: *const *const c_char,
+    /// Parallel to `transaction_property_keys`
+    pub transaction_property_values: *const *const c_char,
+    pub num_transaction_properties: usize,
+}
+
+impl Default for LanceDBOptimizeIndexOptions {
+    fn default() -> Self {
+        Self {
+            mode: LanceDBReindexMode::Default,
+            num_indices_to_merge: -1,
+            index_names: ptr::null(),
+            num_index_names: 0,
+            transaction_property_keys: ptr::null(),
+            transaction_property_values: ptr::null(),
+            num_transaction_properties: 0,
+        }
+    }
+}
+
+/// Get the default options for lancedb_table_optimize_indices
+///
+/// Equivalent to `lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX)`
+#[no_mangle]
+pub extern "C" fn lancedb_optimize_index_options_default() -> LanceDBOptimizeIndexOptions {
+    LanceDBOptimizeIndexOptions::default()
+}
+
+/// Build the LanceDB optimize options from the C options
+///
+/// On failure the error message is set and the error code is returned
+///
+/// # Safety
+/// - the arrays in `opts` must point to as many valid C strings as their counts say
+unsafe fn build_optimize_options(
+    opts: &LanceDBOptimizeIndexOptions,
+    error_message: *mut *mut c_char,
+) -> Result<OptimizeOptions, LanceDBError> {
+    let mut options = match opts.mode {
+        LanceDBReindexMode::Default => OptimizeOptions::default(),
+        LanceDBReindexMode::Append => OptimizeOptions::append(),
+        // num_indices_to_merge is only read in the MERGE mode, the other modes ignore it
+        LanceDBReindexMode::Merge => match opts.num_indices_to_merge {
+            // None: Lance decides, same as the DEFAULT mode
+            -1 => OptimizeOptions::default(),
+            n if n >= 0 => OptimizeOptions::merge(n as usize),
+            _ => {
+                set_custom_error_message(
+                    error_message,
+                    "Invalid argument: num_indices_to_merge must be -1 or non-negative",
+                );
+                return Err(LanceDBError::InvalidArgument);
+            }
+        },
+        LanceDBReindexMode::Retrain => OptimizeOptions::retrain(),
+    };
+
+    if opts.num_index_names > 0 {
+        let names = if opts.index_names.is_null() {
+            None
+        } else {
+            c_str_array_to_vec(opts.index_names, opts.num_index_names)
+        };
+        let Some(names) = names else {
+            set_invalid_argument_message(error_message);
+            return Err(LanceDBError::InvalidArgument);
+        };
+        options = options.index_names(names);
+    }
+
+    if opts.num_transaction_properties > 0 {
+        if opts.transaction_property_keys.is_null() || opts.transaction_property_values.is_null() {
+            set_invalid_argument_message(error_message);
+            return Err(LanceDBError::InvalidArgument);
+        }
+        let keys = c_str_array_to_vec(
+            opts.transaction_property_keys,
+            opts.num_transaction_properties,
+        );
+        let values = c_str_array_to_vec(
+            opts.transaction_property_values,
+            opts.num_transaction_properties,
+        );
+        let (Some(keys), Some(values)) = (keys, values) else {
+            set_invalid_argument_message(error_message);
+            return Err(LanceDBError::InvalidArgument);
+        };
+        let properties: HashMap<String, String> = keys.into_iter().zip(values).collect();
+        options = options.transaction_properties(properties);
+    }
+
+    Ok(options)
+}
+
+/// Optimize (reindex) the table's indices with explicit options
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `options` can be NULL for the defaults; its arrays must point to as many valid C
+///   strings as their counts say
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` if the indices were optimized
+/// - `LANCEDB_INVALID_ARGUMENT` for a bad mode, count or array combination
+/// - `LANCEDB_INDEX_NOT_FOUND` if a named index does not exist
+/// - `LANCEDB_NOT_SUPPORTED` on a remote table, or when the mode is not supported for the
+///   index type by the underlying Lance version
+/// - Other error codes on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_optimize_indices(
+    table: *const LanceDBTable,
+    options: *const LanceDBOptimizeIndexOptions,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let opts = if options.is_null() {
+        LanceDBOptimizeIndexOptions::default()
+    } else {
+        (*options).clone()
+    };
+
+    let optimize_options = match build_optimize_options(&opts, error_message) {
+        Ok(options) => options,
+        Err(e) => return e,
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    // Lance silently skips the names of indices that do not exist, so they are
+    // checked here, to fail the same way lancedb_table_index_stats does
+    if let Some(names) = &optimize_options.index_names {
+        let existing = match runtime.block_on(tbl.list_indices()) {
+            Ok(indices) => indices,
+            Err(e) => return handle_error(&e, error_message),
+        };
+        if let Some(missing) = names
+            .iter()
+            .find(|name| !existing.iter().any(|index| &index.name == *name))
+        {
+            set_custom_error_message(error_message, &format!("Index not found: {missing}"));
+            return LanceDBError::IndexNotFound;
+        }
+    }
+
+    match runtime.block_on(tbl.optimize(OptimizeAction::Index(optimize_options))) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Create a vector index on table columns
 ///
 /// # Safety
@@ -187,24 +395,10 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let col_str = match CStr::from_ptr(col_ptr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-        column_names.push(col_str);
-    }
+    let Some(column_names) = c_str_array_to_vec(columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -290,24 +484,10 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let col_str = match CStr::from_ptr(col_ptr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-        column_names.push(col_str);
-    }
+    let Some(column_names) = c_str_array_to_vec(columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -369,24 +549,10 @@ pub unsafe extern "C" fn lancedb_table_create_fts_index(
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let col_str = match CStr::from_ptr(col_ptr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-        column_names.push(col_str);
-    }
+    let Some(column_names) = c_str_array_to_vec(columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -573,8 +739,6 @@ pub unsafe extern "C" fn lancedb_table_optimize(
     let tbl = &(*table).inner;
     let runtime = get_runtime();
 
-    use lancedb::table::{OptimizeAction, OptimizeOptions};
-
     let action = match optimize_type {
         LanceDBOptimizeType::All => OptimizeAction::All,
         LanceDBOptimizeType::Compat => OptimizeAction::Compact {
@@ -586,7 +750,12 @@ pub unsafe extern "C" fn lancedb_table_optimize(
             delete_unverified: None,
             error_if_tagged_old_versions: None,
         },
-        LanceDBOptimizeType::Index => OptimizeAction::Index(OptimizeOptions::default()),
+        LanceDBOptimizeType::Index => {
+            match build_optimize_options(&LanceDBOptimizeIndexOptions::default(), error_message) {
+                Ok(options) => OptimizeAction::Index(options),
+                Err(e) => return e,
+            }
+        }
     };
 
     match runtime.block_on(tbl.optimize(action)) {
