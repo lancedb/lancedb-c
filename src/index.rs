@@ -10,10 +10,11 @@ use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
 
 use lancedb::index::scalar::{
-    BTreeIndexBuilder, BitmapIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
+    BTreeIndexBuilder, BitmapIndexBuilder, FmIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
 };
 use lancedb::index::vector::{
-    IvfFlatIndexBuilder, IvfHnswPqIndexBuilder, IvfHnswSqIndexBuilder, IvfPqIndexBuilder,
+    IvfFlatIndexBuilder, IvfHnswFlatIndexBuilder, IvfHnswPqIndexBuilder, IvfHnswSqIndexBuilder,
+    IvfPqIndexBuilder, IvfRqIndexBuilder, IvfSqIndexBuilder,
 };
 use lancedb::index::Index;
 
@@ -36,6 +37,27 @@ pub enum LanceDBIndexType {
     IvfPq = 6,
     IvfHnswPq = 7,
     IvfHnswSq = 8,
+    IvfSq = 9,
+    IvfRq = 10,
+    IvfHnswFlat = 11,
+    Fm = 12,
+}
+
+/// Apply the parameters shared by all the vector index types to an index builder
+macro_rules! apply_ivf_config {
+    ($builder:expr, $cfg:expr) => {{
+        let mut builder = $builder;
+        if $cfg.num_partitions > 0 {
+            builder = builder.num_partitions($cfg.num_partitions as u32);
+        }
+        if $cfg.max_iterations > 0 {
+            builder = builder.max_iterations($cfg.max_iterations as u32);
+        }
+        if $cfg.sample_rate > 0.0 {
+            builder = builder.sample_rate($cfg.sample_rate as u32);
+        }
+        builder.distance_type($cfg.distance_type.into())
+    }};
 }
 
 /// Configuration for vector indices
@@ -172,70 +194,33 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     let index = match index_type {
         LanceDBIndexType::Auto => Index::Auto,
         LanceDBIndexType::IvfFlat => {
-            let mut builder = IvfFlatIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
-            Index::IvfFlat(builder)
+            Index::IvfFlat(apply_ivf_config!(IvfFlatIndexBuilder::default(), cfg))
+        }
+        LanceDBIndexType::IvfSq => {
+            Index::IvfSq(apply_ivf_config!(IvfSqIndexBuilder::default(), cfg))
+        }
+        LanceDBIndexType::IvfRq => {
+            Index::IvfRq(apply_ivf_config!(IvfRqIndexBuilder::default(), cfg))
         }
         LanceDBIndexType::IvfPq => {
-            let mut builder = IvfPqIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
+            let mut builder = apply_ivf_config!(IvfPqIndexBuilder::default(), cfg);
             if cfg.num_sub_vectors > 0 {
                 builder = builder.num_sub_vectors(cfg.num_sub_vectors as u32);
             }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
             Index::IvfPq(builder)
         }
         LanceDBIndexType::IvfHnswPq => {
-            let mut builder = IvfHnswPqIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
+            let mut builder = apply_ivf_config!(IvfHnswPqIndexBuilder::default(), cfg);
             if cfg.num_sub_vectors > 0 {
                 builder = builder.num_sub_vectors(cfg.num_sub_vectors as u32);
             }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
             Index::IvfHnswPq(builder)
         }
         LanceDBIndexType::IvfHnswSq => {
-            let mut builder = IvfHnswSqIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
-            Index::IvfHnswSq(builder)
+            Index::IvfHnswSq(apply_ivf_config!(IvfHnswSqIndexBuilder::default(), cfg))
+        }
+        LanceDBIndexType::IvfHnswFlat => {
+            Index::IvfHnswFlat(apply_ivf_config!(IvfHnswFlatIndexBuilder::default(), cfg))
         }
         _ => {
             set_invalid_argument_message(error_message);
@@ -316,6 +301,7 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
         }
         LanceDBIndexType::Bitmap => Index::Bitmap(BitmapIndexBuilder::default()),
         LanceDBIndexType::LabelList => Index::LabelList(LabelListIndexBuilder::default()),
+        LanceDBIndexType::Fm => Index::Fm(FmIndexBuilder::default()),
         _ => {
             set_invalid_argument_message(error_message);
             return LanceDBError::InvalidArgument;

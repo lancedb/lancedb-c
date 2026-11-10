@@ -645,6 +645,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]")
     // A vector index type is not a scalar index type
     REQUIRE(lancedb_table_create_scalar_index(
         table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_SQ, &config, nullptr) == LANCEDB_INVALID_ARGUMENT);
   }
 
   SECTION("Scalar index of every supported type") {
@@ -654,6 +656,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]")
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_table_create_scalar_index(
         table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    // FM is a substring search index over a string column
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_FM, &config, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     // Only the scalar index types are supported, AUTO is not one of them
     REQUIRE(lancedb_table_create_scalar_index(

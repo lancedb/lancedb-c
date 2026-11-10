@@ -147,6 +147,20 @@
    ...
 }
 
+# The threads of the global rayon pool, used when building an FM index, are never
+# joined, so their thread local storage is still allocated on exit
+{
+   rayon_global_pool_thread_tls
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:pthread_create*
+   ...
+   fun:*rayon_core*registry*Registry*new*
+   ...
+}
+
 # known glibc internal allocation in the DNS resolver
 {
    glibc-resolver-cache

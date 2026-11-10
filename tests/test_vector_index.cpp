@@ -435,6 +435,39 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index - explicit tuning paramet
     REQUIRE(error_message == nullptr);
   }
 
+  SECTION("IVF_SQ index with all the tuning parameters") {
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_vector_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_SQ, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+
+  SECTION("IVF_RQ index with all the tuning parameters") {
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_vector_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_RQ, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+
+  SECTION("IVF_HNSW_FLAT index with all the tuning parameters") {
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_vector_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_HNSW_FLAT, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+
+  SECTION("Vector index of every type with the default configuration") {
+    for (const LanceDBIndexType index_type : {
+        LANCEDB_INDEX_IVF_FLAT, LANCEDB_INDEX_IVF_SQ, LANCEDB_INDEX_IVF_PQ, LANCEDB_INDEX_IVF_RQ,
+        LANCEDB_INDEX_IVF_HNSW_PQ, LANCEDB_INDEX_IVF_HNSW_SQ, LANCEDB_INDEX_IVF_HNSW_FLAT}) {
+      CAPTURE(index_type);
+      char* error_message = nullptr;
+      REQUIRE(lancedb_table_create_vector_index(
+          table, columns, 1, index_type, nullptr, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+  }
+
   SECTION("Vector index with invalid arguments should fail") {
     REQUIRE(lancedb_table_create_vector_index(
         nullptr, columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, nullptr) == LANCEDB_INVALID_ARGUMENT);
@@ -450,6 +483,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index - explicit tuning paramet
     // A scalar index type is not a vector index type
     REQUIRE(lancedb_table_create_vector_index(
         table, columns, 1, LANCEDB_INDEX_BTREE, &config, nullptr) != LANCEDB_SUCCESS);
+    REQUIRE(lancedb_table_create_vector_index(
+        table, columns, 1, LANCEDB_INDEX_FM, &config, nullptr) == LANCEDB_INVALID_ARGUMENT);
   }
 
   lancedb_table_free(table);

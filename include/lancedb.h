@@ -194,7 +194,11 @@ typedef enum {
     LANCEDB_INDEX_IVF_FLAT = 5,
     LANCEDB_INDEX_IVF_PQ = 6,
     LANCEDB_INDEX_IVF_HNSW_PQ = 7,
-    LANCEDB_INDEX_IVF_HNSW_SQ = 8
+    LANCEDB_INDEX_IVF_HNSW_SQ = 8,
+    LANCEDB_INDEX_IVF_SQ = 9,
+    LANCEDB_INDEX_IVF_RQ = 10,
+    LANCEDB_INDEX_IVF_HNSW_FLAT = 11,
+    LANCEDB_INDEX_FM = 12
 } LanceDBIndexType;
 
 /**
@@ -1525,7 +1529,8 @@ void lancedb_free_arrow_schema(FFI_ArrowSchema* schema);
  * @param table - pointer to LanceDBTable
  * @param columns - array of null-terminated C strings containing column names
  * @param num_columns - number of columns in the array
- * @param index_type - type of vector index to create
+ * @param index_type - type of vector index to create: LANCEDB_INDEX_AUTO or one of the
+ *        LANCEDB_INDEX_IVF_* types
  * @param config - pointer to LanceDBVectorIndexConfig or NULL for defaults
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -1548,7 +1553,8 @@ LanceDBError lancedb_table_create_vector_index(
  * @param table - pointer to LanceDBTable
  * @param columns - array of null-terminated C strings containing column names
  * @param num_columns - number of columns in the array
- * @param index_type - type of scalar index to create
+ * @param index_type - type of scalar index to create: LANCEDB_INDEX_BTREE,
+ *        LANCEDB_INDEX_BITMAP, LANCEDB_INDEX_LABELLIST or LANCEDB_INDEX_FM
  * @param config - pointer to LanceDBScalarIndexConfig or NULL for defaults
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
