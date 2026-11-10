@@ -145,6 +145,19 @@
    ...
 }
 
+# Same as above for builds with -DBUILD_COVERAGE=ON: with -Cinstrument-coverage
+# valgrind resolves the std::thread::current::init_current frame to an adjacent
+# __covrec_* coverage record symbol, so the suppression above does not match
+{
+   rust_std_thread_current_init_coverage
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   fun:*std*thread*Thread*new*
+   fun:__covrec_*
+   ...
+}
+
 # known glibc internal allocation in the DNS resolver
 {
    glibc-resolver-cache
