@@ -3,6 +3,7 @@
  * SPDX-FileCopyrightText: Copyright The LanceDB Authors
  */
 
+#include <map>
 #include "test_common.h"
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Scalar Index", "[index]") {
@@ -743,6 +744,71 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Scalar Indices", "[index]") {
     REQUIRE(stats.num_unindexed_rows == 0);
     REQUIRE(stats.num_indexed_fragments == 3);
     REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("Transaction properties are stored with the commit") {
+    const unsigned long long version_before = lancedb_table_version(table);
+
+    const char* keys[] = {"job_id", "source"};
+    const char* values[] = {"42", "test"};
+    options.mode = LANCEDB_REINDEX_APPEND;
+    options.transaction_property_keys = keys;
+    options.transaction_property_values = values;
+    options.num_transaction_properties = 2;
+    optimize_indices();
+
+    const unsigned long long version_after = lancedb_table_version(table);
+    REQUIRE(version_after > version_before);
+
+    // The properties are read back, in no particular order, from the current version
+    // and by its number
+    for (const unsigned long long version : {0ULL, version_after}) {
+      CAPTURE(version);
+      char** keys_out = nullptr;
+      char** values_out = nullptr;
+      size_t num_properties = 0;
+      REQUIRE(lancedb_table_get_transaction_properties(
+          table, version, &keys_out, &values_out, &num_properties, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(num_properties == 2);
+      const std::map<std::string, std::string> properties = {
+        {keys_out[0], values_out[0]}, {keys_out[1], values_out[1]}};
+      REQUIRE(properties == std::map<std::string, std::string>{{"job_id", "42"}, {"source", "test"}});
+      lancedb_free_metadata(keys_out, values_out, num_properties);
+    }
+
+    // The version before the reindex was committed with no properties
+    char** keys_out = nullptr;
+    char** values_out = nullptr;
+    size_t num_properties = 1;
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, version_before, &keys_out, &values_out, &num_properties, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(num_properties == 0);
+    REQUIRE(keys_out == nullptr);
+    REQUIRE(values_out == nullptr);
+
+    // A version that does not exist is an error
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, version_after + 100, &keys_out, &values_out, &num_properties, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // With nothing left to index, the reindex succeeds without a commit, so its
+    // properties are not stored
+    const char* other_values[] = {"43", "test"};
+    options.transaction_property_values = other_values;
+    optimize_indices();
+    REQUIRE(lancedb_table_version(table) == version_after);
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, 0, &keys_out, &values_out, &num_properties, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(num_properties == 2);
+    const std::map<std::string, std::string> properties = {
+      {keys_out[0], values_out[0]}, {keys_out[1], values_out[1]}};
+    REQUIRE(properties.at("job_id") == "42");
+    lancedb_free_metadata(keys_out, values_out, num_properties);
   }
 
   lancedb_table_free(table);

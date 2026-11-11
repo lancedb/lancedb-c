@@ -3,6 +3,7 @@
  * SPDX-FileCopyrightText: Copyright The LanceDB Authors
  */
 
+#include <map>
 #include "test_common.h"
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
@@ -765,7 +766,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices Options", "[vector_in
     lancedb_table_free(table);
   }
 
-  SECTION("Transaction properties are accepted") {
+  SECTION("Transaction properties are stored with the commit") {
     LanceDBTable* table = create_table_with_data(table_name, 256, 0);
     REQUIRE(table != nullptr);
     create_vector_index(table);
@@ -783,8 +784,55 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices Options", "[vector_in
     optimize_indices(table, &options);
 
     // The reindex committed a new version
-    REQUIRE(lancedb_table_version(table) > version_before);
+    const unsigned long long version_after = lancedb_table_version(table);
+    REQUIRE(version_after > version_before);
     REQUIRE(index_stats(table, index_name).num_unindexed_rows == 0);
+
+    // The properties are read back, in no particular order, from the current version
+    // and by its number
+    for (const unsigned long long version : {0ULL, version_after}) {
+      CAPTURE(version);
+      char** keys_out = nullptr;
+      char** values_out = nullptr;
+      size_t count = 0;
+      char* error_message = nullptr;
+      REQUIRE(lancedb_table_get_transaction_properties(
+          table, version, &keys_out, &values_out, &count, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(count == 2);
+      const std::map<std::string, std::string> properties = {
+        {keys_out[0], values_out[0]}, {keys_out[1], values_out[1]}};
+      REQUIRE(properties == std::map<std::string, std::string>{{"job_id", "42"}, {"source", "test"}});
+      lancedb_free_metadata(keys_out, values_out, count);
+    }
+
+    // The version before the reindex was committed with no properties
+    char** keys_out = nullptr;
+    char** values_out = nullptr;
+    size_t count = 1;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, version_before, &keys_out, &values_out, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(keys_out == nullptr);
+    REQUIRE(values_out == nullptr);
+
+    // A version that does not exist is an error
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, version_after + 100, &keys_out, &values_out, &count, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    INFO("Error for a version that does not exist: " << error_message);
+    lancedb_free_string(error_message);
+
+    REQUIRE(lancedb_table_get_transaction_properties(
+        nullptr, 0, &keys_out, &values_out, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, 0, nullptr, &values_out, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, 0, &keys_out, nullptr, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, 0, &keys_out, &values_out, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
     lancedb_table_free(table);
   }

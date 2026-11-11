@@ -183,7 +183,15 @@ to date as the table grows. ``lancedb_table_optimize_indices()`` does that, with
     number of segments does not grow.
 
 ``index_names`` limits the work to some of the indices, and the transaction properties
-are stored with the commit, for example to record the job that ran the reindex.
+are stored with the commit, for example to record the job that ran the reindex. They are
+read back with ``lancedb_table_get_transaction_properties()``, given the table version
+that the reindex committed.
+
+The properties are stored in the same commit as the index changes, so either both are
+stored or neither. When the indices are already up to date there is nothing to commit:
+the call succeeds, no table version is added and the properties are not stored. Compare
+``lancedb_table_version()`` before and after the call to find out whether a commit was
+made.
 
 ``lancedb_table_index_stats()`` provides the inputs for that decision:
 

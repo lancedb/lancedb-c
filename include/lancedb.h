@@ -239,6 +239,12 @@ typedef enum {
  * Use lancedb_optimize_index_options_default() to get the same behaviour as
  * lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX). All strings are borrowed for the
  * duration of the call only.
+ *
+ * The transaction properties are stored in the same commit as the index changes, so
+ * either both are stored or neither. When the indices are already up to date there is
+ * nothing to commit: the call succeeds, no table version is added and the properties
+ * are not stored. Compare lancedb_table_version() before and after the call to find out
+ * whether a commit was made.
  */
 typedef struct {
     LanceDBReindexMode mode;
@@ -246,7 +252,8 @@ typedef struct {
                                                     // the number of segments merges them all; -1 behaves like DEFAULT
     const char* const* index_names;                 // Indices to optimize (NULL = all indices)
     size_t num_index_names;
-    const char* const* transaction_property_keys;   // Optional key-value pairs stored in the commit
+    const char* const* transaction_property_keys;   // Optional key-value pairs stored in the commit, see
+                                                    // lancedb_table_get_transaction_properties()
     const char* const* transaction_property_values; // Parallel to transaction_property_keys
     size_t num_transaction_properties;
 } LanceDBOptimizeIndexOptions;
@@ -1878,6 +1885,39 @@ LanceDBError lancedb_table_delete_metadata(
 );
 
 /**
+ * Get the transaction properties stored with the commit of a table version
+ *
+ * @param table - pointer to LanceDBTable
+ * @param version - table version to read the properties of, 0 for the current version
+ * @param keys_out - pointer to receive array of property key strings
+ * @param values_out - pointer to receive array of property value strings
+ * @param count_out - pointer to receive number of properties
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS on success,
+ *         LANCEDB_NOT_SUPPORTED on a remote table,
+ *         other error codes on failure, for example when the version does not exist
+ *
+ * Transaction properties are key-value pairs that the writer of a commit attached to it,
+ * for example with LanceDBOptimizeIndexOptions, to identify the job that made the commit.
+ * A version that was committed with no transaction properties has a count of zero, and
+ * NULL arrays. The properties belong to that one version only: they are not carried
+ * over to later versions, and are removed together with the version when old versions
+ * are pruned.
+ * On success, keys_out and values_out will point to parallel arrays of strings, in no
+ * particular order. The caller must free the returned arrays using lancedb_free_metadata().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_get_transaction_properties(
+    const LanceDBTable* table,
+    uint64_t version,
+    char*** keys_out,
+    char*** values_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
  * Free versions array returned by lancedb_table_list_versions
  *
  * @param versions - array of LanceDBVersion structs returned by lancedb_table_list_versions
@@ -1896,10 +1936,11 @@ void lancedb_free_versions(LanceDBVersion* versions, size_t count);
 void lancedb_free_version_metadata(LanceDBVersionMetadata* metadata, size_t count);
 
 /**
- * Free metadata arrays returned by lancedb_table_get_metadata
+ * Free metadata arrays returned by lancedb_table_get_metadata or
+ * lancedb_table_get_transaction_properties
  *
- * @param keys - array of key strings returned by lancedb_table_get_metadata
- * @param values - array of value strings returned by lancedb_table_get_metadata
+ * @param keys - array of key strings returned by one of these functions
+ * @param values - array of value strings returned by one of these functions
  * @param count - number of entries in the arrays
  *
  * Safe to call with NULL pointers.
