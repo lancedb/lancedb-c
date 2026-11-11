@@ -3,6 +3,7 @@
  * SPDX-FileCopyrightText: Copyright The LanceDB Authors
  */
 
+#include <map>
 #include "test_common.h"
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Scalar Index", "[index]") {
@@ -201,6 +202,15 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Stats", "[index]") {
     // After creating the index, all rows should be indexed
     REQUIRE(stats.num_indexed_rows == 100);
     REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_fragments == 1);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+    REQUIRE(stats.num_deleted_indexed_rows == 0);
+    REQUIRE(stats.index_type == LANCEDB_INDEX_BTREE);
+    // A scalar index has no partitions
+    REQUIRE(stats.num_partitions == 0);
+    // The index was trained on the version before the commit that added it
+    REQUIRE(stats.dataset_version + 1 == lancedb_table_version(table));
 
     lancedb_table_free(table);
   }
@@ -248,6 +258,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Stats", "[index]") {
 
     REQUIRE(stats.num_indexed_rows == 100);
     REQUIRE(stats.num_unindexed_rows == 50);
+    REQUIRE(stats.num_indexed_fragments == 1);
+    REQUIRE(stats.num_unindexed_fragments == 1);
 
     lancedb_table_free(table);
   }
@@ -517,32 +529,89 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB FTS Index", "[index]") {
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
   const std::string table_name = "optimize_test";
 
-  SECTION("Optimize with all the optimization types") {
+  SECTION("Optimize a table with fragments of unindexed rows") {
     LanceDBTable* table = create_table_with_data(table_name, 20, 0);
     REQUIRE(table != nullptr);
 
-    // Add more data, so that there is something to compact
-    auto reader = create_reader_from_batch(create_test_record_batch(20, 20));
-    REQUIRE(reader != nullptr);
+    const char* columns[] = {"key"};
+    LanceDBScalarIndexConfig config = {.replace = 0};
     char* error_message = nullptr;
-    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    const LanceDBOptimizeType types[] = {
-      LANCEDB_OPTIMIZE_COMPACT,
-      LANCEDB_OPTIMIZE_INDEX,
-      LANCEDB_OPTIMIZE_PRUNE,
-      LANCEDB_OPTIMIZE_ALL
-    };
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(count == 1);
+    const std::string index_name = indices[0];
+    lancedb_free_index_list(indices, count);
 
-    for (const auto type : types) {
-      error_message = nullptr;
-      REQUIRE(lancedb_table_optimize(table, type, &error_message) == LANCEDB_SUCCESS);
+    // Add more rows in two batches. Each batch is written to a fragment of its own, that
+    // is not covered by the index, so that there is something to compact and to index.
+    // Lance does not compact an indexed fragment with an unindexed one, so that two
+    // unindexed fragments are needed for a compaction
+    for (const int start_index : {20, 40}) {
+      auto reader = create_reader_from_batch(create_test_record_batch(20, start_index));
+      REQUIRE(reader != nullptr);
+      REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
       REQUIRE(error_message == nullptr);
     }
 
-    // No rows were lost by the optimizations
-    REQUIRE(lancedb_table_count_rows(table) == 40);
+    const auto num_fragments = [&] {
+      LanceDBTableStats stats = {};
+      REQUIRE(lancedb_table_stats(table, &stats, nullptr) == LANCEDB_SUCCESS);
+      return stats.fragment_stats.num_fragments;
+    };
+    const auto num_unindexed_rows = [&] {
+      LanceDBIndexStats stats = {};
+      REQUIRE(lancedb_table_index_stats(table, index_name.c_str(), &stats, nullptr) == LANCEDB_SUCCESS);
+      return stats.num_unindexed_rows;
+    };
+    const auto num_versions = [&] {
+      LanceDBVersion* versions = nullptr;
+      size_t num_versions = 0;
+      REQUIRE(lancedb_table_list_versions(table, &versions, nullptr, &num_versions, nullptr) == LANCEDB_SUCCESS);
+      lancedb_free_versions(versions, num_versions);
+      return num_versions;
+    };
+    const auto optimize = [&](LanceDBOptimizeType type) {
+      REQUIRE(lancedb_table_optimize(table, type, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    };
+
+    REQUIRE(num_fragments() == 3);
+    REQUIRE(num_unindexed_rows() == 40);
+
+    SECTION("COMPACT merges the unindexed fragments and leaves the index alone") {
+      optimize(LANCEDB_OPTIMIZE_COMPACT);
+      REQUIRE(num_fragments() == 2);
+      REQUIRE(num_unindexed_rows() == 40);
+    }
+
+    SECTION("INDEX covers the new rows and leaves the fragments alone") {
+      optimize(LANCEDB_OPTIMIZE_INDEX);
+      REQUIRE(num_unindexed_rows() == 0);
+      REQUIRE(num_fragments() == 3);
+    }
+
+    SECTION("PRUNE keeps the recent versions") {
+      // Only the versions older than a week are removed, and the table has none
+      const size_t versions_before = num_versions();
+      optimize(LANCEDB_OPTIMIZE_PRUNE);
+      REQUIRE(num_versions() == versions_before);
+      REQUIRE(num_fragments() == 3);
+      REQUIRE(num_unindexed_rows() == 40);
+    }
+
+    SECTION("ALL compacts the unindexed fragments and covers the new rows") {
+      optimize(LANCEDB_OPTIMIZE_ALL);
+      REQUIRE(num_fragments() == 2);
+      REQUIRE(num_unindexed_rows() == 0);
+    }
+
+    // No rows were lost by the optimization
+    REQUIRE(lancedb_table_count_rows(table) == 60);
 
     lancedb_table_free(table);
   }
@@ -556,6 +625,227 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
       lancedb_free_string(error_message);
     }
   }
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Scalar Indices", "[index]") {
+  const std::string table_name = "optimize_scalar_indices_test";
+  LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+  REQUIRE(table != nullptr);
+
+  const char* columns[] = {"key"};
+  LanceDBScalarIndexConfig config = {.replace = 0};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_scalar_index(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  char** indices = nullptr;
+  size_t count = 0;
+  REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(count == 1);
+  const std::string index_name = indices[0];
+  lancedb_free_index_list(indices, count);
+
+  const auto add_rows = [&](int num_rows, int start_index) {
+    auto reader = create_reader_from_batch(create_test_record_batch(num_rows, start_index));
+    REQUIRE(reader != nullptr);
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  };
+  const auto index_stats = [&] {
+    LanceDBIndexStats stats = {};
+    REQUIRE(lancedb_table_index_stats(table, index_name.c_str(), &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return stats;
+  };
+  LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+  const auto optimize_indices = [&] {
+    REQUIRE(lancedb_table_optimize_indices(table, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  };
+
+  // Add rows the index does not cover
+  add_rows(20, 20);
+
+  LanceDBIndexStats stats = index_stats();
+  REQUIRE(stats.num_indices == 1);
+  REQUIRE(stats.num_indexed_rows == 20);
+  REQUIRE(stats.num_unindexed_rows == 20);
+  REQUIRE(stats.num_indexed_fragments == 1);
+  REQUIRE(stats.num_unindexed_fragments == 1);
+
+  SECTION("DEFAULT merges the new rows into the existing segment") {
+    REQUIRE(options.mode == LANCEDB_REINDEX_DEFAULT);
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 2);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("APPEND covers the new rows with a new segment") {
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 2);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("MERGE collapses the segments") {
+    // Append a segment, and add more rows that no segment covers
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices();
+    add_rows(20, 40);
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 20);
+
+    // Merge the new rows with both segments
+    options.mode = LANCEDB_REINDEX_MERGE;
+    options.num_indices_to_merge = 2;
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 1);
+    REQUIRE(stats.num_indexed_rows == 60);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 3);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("RETRAIN of a scalar index behaves like DEFAULT") {
+    // Append a segment, and add more rows that no segment covers
+    options.mode = LANCEDB_REINDEX_APPEND;
+    optimize_indices();
+    add_rows(20, 40);
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 40);
+    REQUIRE(stats.num_unindexed_rows == 20);
+
+    // A scalar index has nothing to train, so the new rows are merged into the newest
+    // segment, and the segments are not collapsed
+    options.mode = LANCEDB_REINDEX_RETRAIN;
+    optimize_indices();
+
+    stats = index_stats();
+    REQUIRE(stats.num_indices == 2);
+    REQUIRE(stats.num_indexed_rows == 60);
+    REQUIRE(stats.num_unindexed_rows == 0);
+    REQUIRE(stats.num_indexed_fragments == 3);
+    REQUIRE(stats.num_unindexed_fragments == 0);
+  }
+
+  SECTION("Transaction properties are stored with the commit") {
+    const unsigned long long version_before = lancedb_table_version(table);
+
+    const char* keys[] = {"job_id", "source"};
+    const char* values[] = {"42", "test"};
+    options.mode = LANCEDB_REINDEX_APPEND;
+    options.transaction_property_keys = keys;
+    options.transaction_property_values = values;
+    options.num_transaction_properties = 2;
+    optimize_indices();
+
+    const unsigned long long version_after = lancedb_table_version(table);
+    REQUIRE(version_after > version_before);
+
+    // The properties are read back, in no particular order, from the current version
+    // and by its number
+    for (const unsigned long long version : {0ULL, version_after}) {
+      CAPTURE(version);
+      char** keys_out = nullptr;
+      char** values_out = nullptr;
+      size_t num_properties = 0;
+      REQUIRE(lancedb_table_get_transaction_properties(
+          table, version, &keys_out, &values_out, &num_properties, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(num_properties == 2);
+      const std::map<std::string, std::string> properties = {
+        {keys_out[0], values_out[0]}, {keys_out[1], values_out[1]}};
+      REQUIRE(properties == std::map<std::string, std::string>{{"job_id", "42"}, {"source", "test"}});
+      lancedb_free_metadata(keys_out, values_out, num_properties);
+    }
+
+    // The version before the reindex was committed with no properties
+    char** keys_out = nullptr;
+    char** values_out = nullptr;
+    size_t num_properties = 1;
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, version_before, &keys_out, &values_out, &num_properties, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(num_properties == 0);
+    REQUIRE(keys_out == nullptr);
+    REQUIRE(values_out == nullptr);
+
+    // A version that does not exist is an error
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, version_after + 100, &keys_out, &values_out, &num_properties, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // With nothing left to index, the reindex succeeds without a commit, so its
+    // properties are not stored
+    const char* other_values[] = {"43", "test"};
+    options.transaction_property_values = other_values;
+    optimize_indices();
+    REQUIRE(lancedb_table_version(table) == version_after);
+    REQUIRE(lancedb_table_get_transaction_properties(
+        table, 0, &keys_out, &values_out, &num_properties, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(num_properties == 2);
+    const std::map<std::string, std::string> properties = {
+      {keys_out[0], values_out[0]}, {keys_out[1], values_out[1]}};
+    REQUIRE(properties.at("job_id") == "42");
+    lancedb_free_metadata(keys_out, values_out, num_properties);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices Progress", "[index]") {
+  const std::string table_name = "optimize_indices_progress_test";
+  LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+  REQUIRE(table != nullptr);
+
+  // Merging the segments of a full-text index reports its progress
+  const char* columns[] = {"key"};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_fts_index(table, columns, 1, nullptr, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  auto reader = create_reader_from_batch(create_test_record_batch(20, 20));
+  REQUIRE(reader != nullptr);
+  REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  IndexProgressRecorder recorder;
+  LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+  options.mode = LANCEDB_REINDEX_MERGE;
+  options.num_indices_to_merge = 1;
+  options.progress_callback = IndexProgressRecorder::callback;
+  options.progress_user_data = &recorder;
+  REQUIRE(lancedb_table_optimize_indices(table, &options, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  // The names of the stages are up to Lance, so only their pairing is verified
+  REQUIRE(recorder.valid);
+  REQUIRE(!recorder.started.empty());
+  REQUIRE(recorder.all_completed());
+  REQUIRE(recorder.num_progress > 0);
+
+  lancedb_table_free(table);
 }
 
 // A string that is not valid UTF-8, to exercise the string conversion failures
@@ -588,6 +878,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]")
     // A vector index type is not a scalar index type
     REQUIRE(lancedb_table_create_scalar_index(
         table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_SQ, &config, nullptr) == LANCEDB_INVALID_ARGUMENT);
   }
 
   SECTION("Scalar index of every supported type") {
@@ -597,6 +889,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]")
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_table_create_scalar_index(
         table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    // FM is a substring search index over a string column
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_FM, &config, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     // Only the scalar index types are supported, AUTO is not one of them
     REQUIRE(lancedb_table_create_scalar_index(

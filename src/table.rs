@@ -925,6 +925,23 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
             .collect()
     };
 
+    key_value_arrays_out(&entries, keys_out, values_out, count_out, error_message)
+}
+
+/// Return key-value pairs to the caller as two parallel arrays of C strings
+///
+/// The arrays are freed with `lancedb_free_metadata`. With no entries, the arrays are NULL
+///
+/// # Safety
+/// - `keys_out`, `values_out`, and `count_out` must be valid pointers
+/// - `error_message` can be NULL to ignore detailed error messages
+unsafe fn key_value_arrays_out(
+    entries: &[(&str, &str)],
+    keys_out: *mut *mut *mut c_char,
+    values_out: *mut *mut *mut c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
     let count = entries.len();
     *count_out = count;
 
@@ -959,6 +976,68 @@ pub unsafe extern "C" fn lancedb_table_get_metadata(
     *keys_out = keys_array;
     *values_out = values_array;
     LanceDBError::Success
+}
+
+/// Get the transaction properties stored with the commit of a table version
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `keys_out`, `values_out`, and `count_out` must be valid pointers
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` if the properties were read. A version that was committed with
+///   no transaction properties has a count of zero
+/// - `LANCEDB_NOT_SUPPORTED` on a remote table
+/// - Other error codes on failure, for example when the version does not exist
+/// - The caller is responsible for freeing the returned arrays using `lancedb_free_metadata`
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_get_transaction_properties(
+    table: *const LanceDBTable,
+    version: u64,
+    keys_out: *mut *mut *mut c_char,
+    values_out: *mut *mut *mut c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || keys_out.is_null() || values_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    let ds = match tbl.dataset() {
+        Some(ds) => ds,
+        None => {
+            set_not_supported_message(error_message);
+            return LanceDBError::NotSupported;
+        }
+    };
+
+    let transaction = match runtime.block_on(async {
+        let dataset = ds.get().await?;
+        let transaction = if version == 0 {
+            dataset.read_transaction().await
+        } else {
+            dataset.read_transaction_by_version(version).await
+        };
+        transaction.map_err(lancedb::Error::from)
+    }) {
+        Ok(transaction) => transaction,
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    // a version may have no transaction file, and a transaction may have no properties
+    let properties = transaction.and_then(|transaction| transaction.transaction_properties);
+    let entries: Vec<(&str, &str)> = properties
+        .iter()
+        .flat_map(|properties| properties.iter())
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    key_value_arrays_out(&entries, keys_out, values_out, count_out, error_message)
 }
 
 /// Set (upsert) table metadata key-value pairs

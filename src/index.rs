@@ -5,21 +5,28 @@
 //!
 //! This module provides complete index management operations
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_float, c_int};
+use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::ptr;
+use std::sync::Arc;
 
+use async_trait::async_trait;
+use lance::index::{DatasetIndexExt, IndexBuildProgress};
 use lancedb::index::scalar::{
-    BTreeIndexBuilder, BitmapIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
+    BTreeIndexBuilder, BitmapIndexBuilder, FmIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
 };
 use lancedb::index::vector::{
-    IvfFlatIndexBuilder, IvfHnswPqIndexBuilder, IvfHnswSqIndexBuilder, IvfPqIndexBuilder,
+    IvfFlatIndexBuilder, IvfHnswFlatIndexBuilder, IvfHnswPqIndexBuilder, IvfHnswSqIndexBuilder,
+    IvfPqIndexBuilder, IvfRqIndexBuilder, IvfSqIndexBuilder,
 };
-use lancedb::index::Index;
+use lancedb::index::{Index, IndexType};
+use lancedb::table::{OptimizeAction, OptimizeOptions};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+    handle_error, set_custom_error_message, set_invalid_argument_message,
+    set_unknown_error_message, LanceDBError,
 };
 use crate::types::LanceDBDistanceType;
 
@@ -36,6 +43,68 @@ pub enum LanceDBIndexType {
     IvfPq = 6,
     IvfHnswPq = 7,
     IvfHnswSq = 8,
+    IvfSq = 9,
+    IvfRq = 10,
+    IvfHnswFlat = 11,
+    Fm = 12,
+    /// An index type this version of the bindings does not know. Only reported by the
+    /// index stats, it cannot be created
+    Unknown = 99,
+}
+
+impl From<IndexType> for LanceDBIndexType {
+    fn from(index_type: IndexType) -> Self {
+        match index_type {
+            IndexType::IvfFlat => Self::IvfFlat,
+            IndexType::IvfSq => Self::IvfSq,
+            IndexType::IvfPq => Self::IvfPq,
+            IndexType::IvfRq => Self::IvfRq,
+            IndexType::IvfHnswPq => Self::IvfHnswPq,
+            IndexType::IvfHnswSq => Self::IvfHnswSq,
+            IndexType::IvfHnswFlat => Self::IvfHnswFlat,
+            IndexType::BTree => Self::BTree,
+            IndexType::Bitmap => Self::Bitmap,
+            IndexType::LabelList => Self::LabelList,
+            IndexType::Fm => Self::Fm,
+            IndexType::FTS => Self::FTS,
+            IndexType::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// Apply the parameters shared by all the vector index types to an index builder
+macro_rules! apply_ivf_config {
+    ($builder:expr, $cfg:expr) => {{
+        let mut builder = $builder;
+        if $cfg.num_partitions > 0 {
+            builder = builder.num_partitions($cfg.num_partitions as u32);
+        }
+        if $cfg.max_iterations > 0 {
+            builder = builder.max_iterations($cfg.max_iterations as u32);
+        }
+        if $cfg.sample_rate > 0.0 {
+            builder = builder.sample_rate($cfg.sample_rate as u32);
+        }
+        builder.distance_type($cfg.distance_type.into())
+    }};
+}
+
+/// Convert a C array of null-terminated strings to a vector of strings
+///
+/// Returns None if any of the strings is NULL or not valid UTF-8
+///
+/// # Safety
+/// - `array` must point to `count` valid C strings
+unsafe fn c_str_array_to_vec(array: *const *const c_char, count: usize) -> Option<Vec<String>> {
+    let mut strings = Vec::with_capacity(count);
+    for i in 0..count {
+        let str_ptr = *array.add(i);
+        if str_ptr.is_null() {
+            return None;
+        }
+        strings.push(CStr::from_ptr(str_ptr).to_str().ok()?.to_string());
+    }
+    Some(strings)
 }
 
 /// Configuration for vector indices
@@ -115,6 +184,279 @@ pub enum LanceDBOptimizeType {
     Index = 3,
 }
 
+/// How unindexed rows are folded into existing indices
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBReindexMode {
+    /// Lance decides, depending on the index type:
+    /// - vector index: add a new delta segment like `Append`, unless a partition has grown
+    ///   too large or is too small. In that case the partition is split, or joined into
+    ///   its neighbours, and all segments are merged into one
+    /// - scalar or full-text index: merge the new rows into the newest segment, so the
+    ///   number of segments does not grow
+    Default = 0,
+    /// Add a new delta segment over the new rows, never touch existing segments
+    Append = 1,
+    /// Merge the new rows and the newest `num_indices_to_merge` segments into one segment
+    Merge = 2,
+    /// Retrain a vector index on the current data and collapse it to one segment. Other
+    /// indices have nothing to train, for them it behaves like `Default`
+    Retrain = 3,
+}
+
+/// Kind of event reported to a `LanceDBIndexProgressCallback`
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBIndexProgressEvent {
+    /// A stage started, `value` is its total number of work units (0 if unknown)
+    StageStart = 0,
+    /// Progress within a stage, `value` is the number of work units completed so far
+    StageProgress = 1,
+    /// A stage completed, `value` is 0
+    StageComplete = 2,
+}
+
+/// Callback reporting the progress of building indices
+pub type LanceDBIndexProgressCallback = unsafe extern "C" fn(
+    event: LanceDBIndexProgressEvent,
+    stage: *const c_char,
+    value: u64,
+    unit: *const c_char,
+    user_data: *mut c_void,
+);
+
+/// Reports the progress of an index build to a C callback
+#[derive(Debug)]
+struct CallbackIndexProgress {
+    callback: LanceDBIndexProgressCallback,
+    user_data: *mut c_void,
+}
+
+// SAFETY: the user data is only passed back to the callback, which the caller of
+// lancedb_table_optimize_indices guarantees to be thread-safe
+unsafe impl Send for CallbackIndexProgress {}
+unsafe impl Sync for CallbackIndexProgress {}
+
+impl CallbackIndexProgress {
+    fn report(&self, event: LanceDBIndexProgressEvent, stage: &str, value: u64, unit: &str) {
+        let stage = CString::new(stage).unwrap_or_default();
+        let unit = CString::new(unit).unwrap_or_default();
+        // SAFETY: the strings are valid for the duration of the call
+        unsafe {
+            (self.callback)(event, stage.as_ptr(), value, unit.as_ptr(), self.user_data);
+        }
+    }
+}
+
+#[async_trait]
+impl IndexBuildProgress for CallbackIndexProgress {
+    async fn stage_start(&self, stage: &str, total: Option<u64>, unit: &str) -> lance::Result<()> {
+        self.report(
+            LanceDBIndexProgressEvent::StageStart,
+            stage,
+            total.unwrap_or(0),
+            unit,
+        );
+        Ok(())
+    }
+
+    async fn stage_progress(&self, stage: &str, completed: u64) -> lance::Result<()> {
+        self.report(
+            LanceDBIndexProgressEvent::StageProgress,
+            stage,
+            completed,
+            "",
+        );
+        Ok(())
+    }
+
+    async fn stage_complete(&self, stage: &str) -> lance::Result<()> {
+        self.report(LanceDBIndexProgressEvent::StageComplete, stage, 0, "");
+        Ok(())
+    }
+}
+
+/// Options for lancedb_table_optimize_indices
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct LanceDBOptimizeIndexOptions {
+    pub mode: LanceDBReindexMode,
+    /// MERGE only: newest segments to merge with the new rows. A count above the number
+    /// of segments merges them all, -1 behaves like the DEFAULT mode
+    pub num_indices_to_merge: c_int,
+    /// Indices to optimize (NULL = all indices)
+    pub index_names: *const *const c_char,
+    pub num_index_names: usize,
+    /// Optional key-value pairs stored in the commit
+    pub transaction_property_keys: *const *const c_char,
+    /// Parallel to `transaction_property_keys`
+    pub transaction_property_values: *const *const c_char,
+    pub num_transaction_properties: usize,
+    /// Optional callback reporting the progress of the index build (NULL = no reports)
+    pub progress_callback: Option<LanceDBIndexProgressCallback>,
+    /// Passed as is to `progress_callback`
+    pub progress_user_data: *mut c_void,
+}
+
+impl Default for LanceDBOptimizeIndexOptions {
+    fn default() -> Self {
+        Self {
+            mode: LanceDBReindexMode::Default,
+            num_indices_to_merge: -1,
+            index_names: ptr::null(),
+            num_index_names: 0,
+            transaction_property_keys: ptr::null(),
+            transaction_property_values: ptr::null(),
+            num_transaction_properties: 0,
+            progress_callback: None,
+            progress_user_data: ptr::null_mut(),
+        }
+    }
+}
+
+/// Get the default options for lancedb_table_optimize_indices
+///
+/// Equivalent to `lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX)`
+#[no_mangle]
+pub extern "C" fn lancedb_optimize_index_options_default() -> LanceDBOptimizeIndexOptions {
+    LanceDBOptimizeIndexOptions::default()
+}
+
+/// Build the LanceDB optimize options from the C options
+///
+/// On failure the error message is set and the error code is returned
+///
+/// # Safety
+/// - the arrays in `opts` must point to as many valid C strings as their counts say
+unsafe fn build_optimize_options(
+    opts: &LanceDBOptimizeIndexOptions,
+    error_message: *mut *mut c_char,
+) -> Result<OptimizeOptions, LanceDBError> {
+    let mut options = match opts.mode {
+        LanceDBReindexMode::Default => OptimizeOptions::default(),
+        LanceDBReindexMode::Append => OptimizeOptions::append(),
+        // num_indices_to_merge is only read in the MERGE mode, the other modes ignore it
+        LanceDBReindexMode::Merge => match opts.num_indices_to_merge {
+            // None: Lance decides, same as the DEFAULT mode
+            -1 => OptimizeOptions::default(),
+            n if n >= 0 => OptimizeOptions::merge(n as usize),
+            _ => {
+                set_custom_error_message(
+                    error_message,
+                    "Invalid argument: num_indices_to_merge must be -1 or non-negative",
+                );
+                return Err(LanceDBError::InvalidArgument);
+            }
+        },
+        LanceDBReindexMode::Retrain => OptimizeOptions::retrain(),
+    };
+
+    if opts.num_index_names > 0 {
+        let names = if opts.index_names.is_null() {
+            None
+        } else {
+            c_str_array_to_vec(opts.index_names, opts.num_index_names)
+        };
+        let Some(names) = names else {
+            set_invalid_argument_message(error_message);
+            return Err(LanceDBError::InvalidArgument);
+        };
+        options = options.index_names(names);
+    }
+
+    if opts.num_transaction_properties > 0 {
+        if opts.transaction_property_keys.is_null() || opts.transaction_property_values.is_null() {
+            set_invalid_argument_message(error_message);
+            return Err(LanceDBError::InvalidArgument);
+        }
+        let keys = c_str_array_to_vec(
+            opts.transaction_property_keys,
+            opts.num_transaction_properties,
+        );
+        let values = c_str_array_to_vec(
+            opts.transaction_property_values,
+            opts.num_transaction_properties,
+        );
+        let (Some(keys), Some(values)) = (keys, values) else {
+            set_invalid_argument_message(error_message);
+            return Err(LanceDBError::InvalidArgument);
+        };
+        let properties: HashMap<String, String> = keys.into_iter().zip(values).collect();
+        options = options.transaction_properties(properties);
+    }
+
+    if let Some(callback) = opts.progress_callback {
+        options = options.progress(Arc::new(CallbackIndexProgress {
+            callback,
+            user_data: opts.progress_user_data,
+        }));
+    }
+
+    Ok(options)
+}
+
+/// Optimize (reindex) the table's indices with explicit options
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `options` can be NULL for the defaults; its arrays must point to as many valid C
+///   strings as their counts say, and its progress callback must be thread-safe
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` if the indices were optimized
+/// - `LANCEDB_INVALID_ARGUMENT` for a bad mode, count or array combination
+/// - `LANCEDB_INDEX_NOT_FOUND` if a named index does not exist
+/// - `LANCEDB_NOT_SUPPORTED` on a remote table, or when the mode is not supported for the
+///   index type by the underlying Lance version
+/// - Other error codes on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_optimize_indices(
+    table: *const LanceDBTable,
+    options: *const LanceDBOptimizeIndexOptions,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let opts = if options.is_null() {
+        LanceDBOptimizeIndexOptions::default()
+    } else {
+        (*options).clone()
+    };
+
+    let optimize_options = match build_optimize_options(&opts, error_message) {
+        Ok(options) => options,
+        Err(e) => return e,
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    // Lance silently skips the names of indices that do not exist, so they are
+    // checked here, to fail the same way lancedb_table_index_stats does
+    if let Some(names) = &optimize_options.index_names {
+        let existing = match runtime.block_on(tbl.list_indices()) {
+            Ok(indices) => indices,
+            Err(e) => return handle_error(&e, error_message),
+        };
+        if let Some(missing) = names
+            .iter()
+            .find(|name| !existing.iter().any(|index| &index.name == *name))
+        {
+            set_custom_error_message(error_message, &format!("Index not found: {missing}"));
+            return LanceDBError::IndexNotFound;
+        }
+    }
+
+    match runtime.block_on(tbl.optimize(OptimizeAction::Index(optimize_options))) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Create a vector index on table columns
 ///
 /// # Safety
@@ -140,24 +482,10 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let col_str = match CStr::from_ptr(col_ptr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-        column_names.push(col_str);
-    }
+    let Some(column_names) = c_str_array_to_vec(columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -172,70 +500,33 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     let index = match index_type {
         LanceDBIndexType::Auto => Index::Auto,
         LanceDBIndexType::IvfFlat => {
-            let mut builder = IvfFlatIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
-            Index::IvfFlat(builder)
+            Index::IvfFlat(apply_ivf_config!(IvfFlatIndexBuilder::default(), cfg))
+        }
+        LanceDBIndexType::IvfSq => {
+            Index::IvfSq(apply_ivf_config!(IvfSqIndexBuilder::default(), cfg))
+        }
+        LanceDBIndexType::IvfRq => {
+            Index::IvfRq(apply_ivf_config!(IvfRqIndexBuilder::default(), cfg))
         }
         LanceDBIndexType::IvfPq => {
-            let mut builder = IvfPqIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
+            let mut builder = apply_ivf_config!(IvfPqIndexBuilder::default(), cfg);
             if cfg.num_sub_vectors > 0 {
                 builder = builder.num_sub_vectors(cfg.num_sub_vectors as u32);
             }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
             Index::IvfPq(builder)
         }
         LanceDBIndexType::IvfHnswPq => {
-            let mut builder = IvfHnswPqIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
+            let mut builder = apply_ivf_config!(IvfHnswPqIndexBuilder::default(), cfg);
             if cfg.num_sub_vectors > 0 {
                 builder = builder.num_sub_vectors(cfg.num_sub_vectors as u32);
             }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
             Index::IvfHnswPq(builder)
         }
         LanceDBIndexType::IvfHnswSq => {
-            let mut builder = IvfHnswSqIndexBuilder::default();
-            if cfg.num_partitions > 0 {
-                builder = builder.num_partitions(cfg.num_partitions as u32);
-            }
-            if cfg.max_iterations > 0 {
-                builder = builder.max_iterations(cfg.max_iterations as u32);
-            }
-            if cfg.sample_rate > 0.0 {
-                builder = builder.sample_rate(cfg.sample_rate as u32);
-            }
-            builder = builder.distance_type(cfg.distance_type.into());
-
-            Index::IvfHnswSq(builder)
+            Index::IvfHnswSq(apply_ivf_config!(IvfHnswSqIndexBuilder::default(), cfg))
+        }
+        LanceDBIndexType::IvfHnswFlat => {
+            Index::IvfHnswFlat(apply_ivf_config!(IvfHnswFlatIndexBuilder::default(), cfg))
         }
         _ => {
             set_invalid_argument_message(error_message);
@@ -280,24 +571,10 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let col_str = match CStr::from_ptr(col_ptr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-        column_names.push(col_str);
-    }
+    let Some(column_names) = c_str_array_to_vec(columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -316,6 +593,7 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
         }
         LanceDBIndexType::Bitmap => Index::Bitmap(BitmapIndexBuilder::default()),
         LanceDBIndexType::LabelList => Index::LabelList(LabelListIndexBuilder::default()),
+        LanceDBIndexType::Fm => Index::Fm(FmIndexBuilder::default()),
         _ => {
             set_invalid_argument_message(error_message);
             return LanceDBError::InvalidArgument;
@@ -358,24 +636,10 @@ pub unsafe extern "C" fn lancedb_table_create_fts_index(
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let col_str = match CStr::from_ptr(col_ptr).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-        column_names.push(col_str);
-    }
+    let Some(column_names) = c_str_array_to_vec(columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -562,8 +826,6 @@ pub unsafe extern "C" fn lancedb_table_optimize(
     let tbl = &(*table).inner;
     let runtime = get_runtime();
 
-    use lancedb::table::{OptimizeAction, OptimizeOptions};
-
     let action = match optimize_type {
         LanceDBOptimizeType::All => OptimizeAction::All,
         LanceDBOptimizeType::Compat => OptimizeAction::Compact {
@@ -575,7 +837,12 @@ pub unsafe extern "C" fn lancedb_table_optimize(
             delete_unverified: None,
             error_if_tagged_old_versions: None,
         },
-        LanceDBOptimizeType::Index => OptimizeAction::Index(OptimizeOptions::default()),
+        LanceDBOptimizeType::Index => {
+            match build_optimize_options(&LanceDBOptimizeIndexOptions::default(), error_message) {
+                Ok(options) => OptimizeAction::Index(options),
+                Err(e) => return e,
+            }
+        }
     };
 
     match runtime.block_on(tbl.optimize(action)) {
@@ -609,6 +876,85 @@ pub struct LanceDBIndexStats {
     pub num_indexed_rows: usize,
     pub num_unindexed_rows: usize,
     pub num_indices: u32,
+    pub num_indexed_fragments: usize,
+    pub num_unindexed_fragments: usize,
+    pub num_deleted_indexed_rows: usize,
+    pub index_type: LanceDBIndexType,
+    pub num_partitions: u32,
+    pub dataset_version: u64,
+}
+
+/// The part of the index statistics that LanceDB does not compute, read from the
+/// manifest of a native table
+#[derive(Debug, Default)]
+struct ManifestIndexStats {
+    num_indexed_fragments: usize,
+    num_unindexed_fragments: usize,
+    num_deleted_indexed_rows: usize,
+    num_partitions: u32,
+    dataset_version: u64,
+}
+
+/// Read the manifest-level statistics of a named index
+///
+/// The fragment coverage, the deleted rows and the dataset version are taken from the
+/// index metadata in the manifest, with no data reads. The number of partitions is only
+/// known to the vector index itself, so for a vector index the index statistics of lance
+/// are consulted as well
+async fn manifest_index_stats(
+    dataset: &lance::Dataset,
+    index_name: &str,
+    is_vector: bool,
+) -> lancedb::Result<ManifestIndexStats> {
+    let segments = dataset.load_indices_by_name(index_name).await?;
+    let covered = |fragment_id: u64| {
+        segments.iter().any(|segment| {
+            segment
+                .fragment_bitmap
+                .as_ref()
+                .is_some_and(|bitmap| bitmap.contains(fragment_id as u32))
+        })
+    };
+
+    let mut stats = ManifestIndexStats {
+        dataset_version: segments
+            .iter()
+            .map(|segment| segment.dataset_version)
+            .max()
+            .unwrap_or(0),
+        ..Default::default()
+    };
+    for fragment in dataset.fragments().iter() {
+        if covered(fragment.id) {
+            stats.num_indexed_fragments += 1;
+            stats.num_deleted_indexed_rows += fragment
+                .deletion_file
+                .as_ref()
+                .and_then(|deletion_file| deletion_file.num_deleted_rows)
+                .unwrap_or(0);
+        } else {
+            stats.num_unindexed_fragments += 1;
+        }
+    }
+
+    if is_vector {
+        // the statistics of a vector index list its segments, each with its own
+        // partition count
+        let json = dataset.index_statistics(index_name).await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| lancedb::Error::Runtime {
+                message: format!("Failed to parse index statistics: {e}"),
+            })?;
+        stats.num_partitions = value["indices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|segment| segment["num_partitions"].as_u64())
+            .max()
+            .unwrap_or(0) as u32;
+    }
+
+    Ok(stats)
 }
 
 /// Get statistics for a named index on the table
@@ -643,17 +989,37 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
     let tbl = &(*table).inner;
     let runtime = get_runtime();
 
-    match runtime.block_on(tbl.index_stats(name_str)) {
-        Ok(Some(stats)) => {
-            (*stats_out).num_indexed_rows = stats.num_indexed_rows;
-            (*stats_out).num_unindexed_rows = stats.num_unindexed_rows;
-            (*stats_out).num_indices = stats.num_indices.unwrap_or(0);
-            LanceDBError::Success
-        }
+    let stats = match runtime.block_on(tbl.index_stats(name_str)) {
+        Ok(Some(stats)) => stats,
         Ok(None) => {
-            // Index not found
-            LanceDBError::IndexNotFound
+            set_custom_error_message(error_message, &format!("Index not found: {name_str}"));
+            return LanceDBError::IndexNotFound;
         }
-        Err(e) => handle_error(&e, error_message),
-    }
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    // the manifest is only reachable on a native table; a remote table reports zeros
+    let manifest_stats = match tbl.dataset() {
+        Some(ds) => match runtime.block_on(async {
+            let dataset = ds.get().await?;
+            manifest_index_stats(&dataset, name_str, stats.distance_type.is_some()).await
+        }) {
+            Ok(manifest_stats) => manifest_stats,
+            Err(e) => return handle_error(&e, error_message),
+        },
+        None => ManifestIndexStats::default(),
+    };
+
+    *stats_out = LanceDBIndexStats {
+        num_indexed_rows: stats.num_indexed_rows,
+        num_unindexed_rows: stats.num_unindexed_rows,
+        num_indices: stats.num_indices.unwrap_or(0),
+        num_indexed_fragments: manifest_stats.num_indexed_fragments,
+        num_unindexed_fragments: manifest_stats.num_unindexed_fragments,
+        num_deleted_indexed_rows: manifest_stats.num_deleted_indexed_rows,
+        index_type: stats.index_type.into(),
+        num_partitions: manifest_stats.num_partitions,
+        dataset_version: manifest_stats.dataset_version,
+    };
+    LanceDBError::Success
 }

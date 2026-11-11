@@ -194,7 +194,13 @@ typedef enum {
     LANCEDB_INDEX_IVF_FLAT = 5,
     LANCEDB_INDEX_IVF_PQ = 6,
     LANCEDB_INDEX_IVF_HNSW_PQ = 7,
-    LANCEDB_INDEX_IVF_HNSW_SQ = 8
+    LANCEDB_INDEX_IVF_HNSW_SQ = 8,
+    LANCEDB_INDEX_IVF_SQ = 9,
+    LANCEDB_INDEX_IVF_RQ = 10,
+    LANCEDB_INDEX_IVF_HNSW_FLAT = 11,
+    LANCEDB_INDEX_FM = 12,
+    LANCEDB_INDEX_UNKNOWN = 99   // An index type unknown to this version of the library. Only
+                                 // reported by lancedb_table_index_stats(); cannot be created
 } LanceDBIndexType;
 
 /**
@@ -206,6 +212,93 @@ typedef enum {
     LANCEDB_OPTIMIZE_PRUNE = 2,   // Only prune old versions
     LANCEDB_OPTIMIZE_INDEX = 3    // Only rebuild indices
 } LanceDBOptimizeType;
+
+/**
+ * How unindexed rows are folded into existing indices by lancedb_table_optimize_indices()
+ */
+typedef enum {
+    // Lance decides, depending on the index type:
+    // - vector index: add a new delta segment like APPEND, unless a partition has grown
+    //   too large or is too small. In that case the partition is split, or joined into
+    //   its neighbours, and all segments are merged into one
+    // - scalar or full-text index: merge the new rows into the newest segment, so the
+    //   number of segments does not grow
+    LANCEDB_REINDEX_DEFAULT = 0,
+    // Add a new delta segment over the new rows; never touch existing segments
+    LANCEDB_REINDEX_APPEND  = 1,
+    // Merge the new rows and the newest num_indices_to_merge segments into one segment
+    LANCEDB_REINDEX_MERGE   = 2,
+    // Retrain a vector index on the current data and collapse it to one segment. Other
+    // indices have nothing to train; for them it behaves like DEFAULT
+    LANCEDB_REINDEX_RETRAIN = 3
+} LanceDBReindexMode;
+
+/**
+ * Kind of event reported to a LanceDBIndexProgressCallback
+ */
+typedef enum {
+    LANCEDB_INDEX_PROGRESS_STAGE_START = 0,    // A stage started
+    LANCEDB_INDEX_PROGRESS_STAGE_PROGRESS = 1, // Progress within a stage
+    LANCEDB_INDEX_PROGRESS_STAGE_COMPLETE = 2  // A stage completed
+} LanceDBIndexProgressEvent;
+
+/**
+ * Callback reporting the progress of building indices
+ *
+ * @param event - kind of the event
+ * @param stage - name of the stage, for example "shuffle" or "merge_partitions". The
+ *        stages depend on the index type and on the version of Lance, so the names are
+ *        meant for display. Valid for the duration of the call only
+ * @param value - STAGE_START: total number of work units in the stage, 0 if unknown.
+ *        STAGE_PROGRESS: number of work units completed so far. STAGE_COMPLETE: 0
+ * @param unit - STAGE_START: what the work units are, for example "rows" or
+ *        "partitions"; an empty string for the other events. Valid for the duration of
+ *        the call only
+ * @param user_data - the progress_user_data of the options
+ *
+ * The callback is called from the worker threads of the library, possibly from several
+ * threads at the same time, while the index is being built. It must be thread-safe,
+ * return quickly, and must not call any LanceDB function.
+ */
+typedef void (*LanceDBIndexProgressCallback)(
+    LanceDBIndexProgressEvent event,
+    const char* stage,
+    uint64_t value,
+    const char* unit,
+    void* user_data
+);
+
+/**
+ * Options for lancedb_table_optimize_indices()
+ *
+ * Use lancedb_optimize_index_options_default() to get the same behaviour as
+ * lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX). All strings are borrowed for the
+ * duration of the call only.
+ *
+ * The transaction properties are stored in the same commit as the index changes, so
+ * either both are stored or neither. When the indices are already up to date there is
+ * nothing to commit: the call succeeds, no table version is added and the properties
+ * are not stored. Compare lancedb_table_version() before and after the call to find out
+ * whether a commit was made.
+ *
+ * The progress callback is called at the stages of building an index. Progress is
+ * reported for vector indices and for merging the segments of a full-text index; other
+ * scalar indices are optimized without any report. How often progress is reported
+ * within a stage depends on the stage, some only report their start and completion.
+ */
+typedef struct {
+    LanceDBReindexMode mode;
+    int num_indices_to_merge;                       // MERGE only: newest segments to merge with the new rows. A count above
+                                                    // the number of segments merges them all; -1 behaves like DEFAULT
+    const char* const* index_names;                 // Indices to optimize (NULL = all indices)
+    size_t num_index_names;
+    const char* const* transaction_property_keys;   // Optional key-value pairs stored in the commit, see
+                                                    // lancedb_table_get_transaction_properties()
+    const char* const* transaction_property_values; // Parallel to transaction_property_keys
+    size_t num_transaction_properties;
+    LanceDBIndexProgressCallback progress_callback; // Optional progress reports (NULL = none)
+    void* progress_user_data;                       // Passed as is to progress_callback
+} LanceDBOptimizeIndexOptions;
 
 /**
  * Binary operator enum for DataFusion expressions
@@ -1525,7 +1618,8 @@ void lancedb_free_arrow_schema(FFI_ArrowSchema* schema);
  * @param table - pointer to LanceDBTable
  * @param columns - array of null-terminated C strings containing column names
  * @param num_columns - number of columns in the array
- * @param index_type - type of vector index to create
+ * @param index_type - type of vector index to create: LANCEDB_INDEX_AUTO or one of the
+ *        LANCEDB_INDEX_IVF_* types
  * @param config - pointer to LanceDBVectorIndexConfig or NULL for defaults
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -1548,7 +1642,8 @@ LanceDBError lancedb_table_create_vector_index(
  * @param table - pointer to LanceDBTable
  * @param columns - array of null-terminated C strings containing column names
  * @param num_columns - number of columns in the array
- * @param index_type - type of scalar index to create
+ * @param index_type - type of scalar index to create: LANCEDB_INDEX_BTREE,
+ *        LANCEDB_INDEX_BITMAP, LANCEDB_INDEX_LABELLIST or LANCEDB_INDEX_FM
  * @param config - pointer to LanceDBScalarIndexConfig or NULL for defaults
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -1631,12 +1726,46 @@ LanceDBError lancedb_table_drop_index(
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
+ * Using LANCEDB_OPTIMIZE_INDEX type is equivalent to
+ * lancedb_table_optimize_indices(table, NULL, ...).
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_optimize(
     const LanceDBTable* table,
     LanceDBOptimizeType optimize_type,
+    char** error_message
+);
+
+/**
+ * Get the default options for lancedb_table_optimize_indices()
+ *
+ * @return options equivalent to lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX):
+ *         LANCEDB_REINDEX_DEFAULT, all indices, no transaction properties, no progress
+ *         callback
+ */
+LanceDBOptimizeIndexOptions lancedb_optimize_index_options_default(void);
+
+/**
+ * Optimize (reindex) the table's indices with explicit options
+ *
+ * Full rebuilds stay on lancedb_table_create_*_index() with replace = 1.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param options - reindex options; NULL behaves like lancedb_optimize_index_options_default()
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS on success,
+ *         LANCEDB_INVALID_ARGUMENT for a bad mode, count or array combination,
+ *         LANCEDB_INDEX_NOT_FOUND if a named index does not exist,
+ *         LANCEDB_NOT_SUPPORTED on a remote table, or if the mode is not supported for the
+ *         index type by the underlying Lance version
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_optimize_indices(
+    const LanceDBTable* table,
+    const LanceDBOptimizeIndexOptions* options,
     char** error_message
 );
 
@@ -1650,11 +1779,21 @@ void lancedb_free_index_list(char** indices, size_t count);
 
 /**
  * Index statistics structure
+ *
+ * The fragment, deleted-row and version fields are read from the table manifest and are
+ * only available on local tables; on a remote table they are reported as 0.
+ * num_partitions is only available for vector indices.
  */
 typedef struct {
-    size_t num_indexed_rows;     // Rows covered by the index
-    size_t num_unindexed_rows;   // Rows not yet indexed
-    unsigned int num_indices;    // Number of index parts (0 if unknown)
+    size_t num_indexed_rows;            // Rows covered by the index
+    size_t num_unindexed_rows;          // Rows not yet indexed
+    unsigned int num_indices;           // Number of index parts (segments/delta indices, 0 if unknown)
+    size_t num_indexed_fragments;       // Fragments covered by the index
+    size_t num_unindexed_fragments;     // Fragments with no coverage
+    size_t num_deleted_indexed_rows;    // Rows deleted from indexed fragments since the build
+    LanceDBIndexType index_type;        // IVF_PQ, BTREE, FTS, ...
+    unsigned int num_partitions;        // Vector indices only; 0 otherwise
+    unsigned long long dataset_version; // Table version the newest segment was built against
 } LanceDBIndexStats;
 
 /**
@@ -1789,6 +1928,39 @@ LanceDBError lancedb_table_delete_metadata(
 );
 
 /**
+ * Get the transaction properties stored with the commit of a table version
+ *
+ * @param table - pointer to LanceDBTable
+ * @param version - table version to read the properties of, 0 for the current version
+ * @param keys_out - pointer to receive array of property key strings
+ * @param values_out - pointer to receive array of property value strings
+ * @param count_out - pointer to receive number of properties
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS on success,
+ *         LANCEDB_NOT_SUPPORTED on a remote table,
+ *         other error codes on failure, for example when the version does not exist
+ *
+ * Transaction properties are key-value pairs that the writer of a commit attached to it,
+ * for example with LanceDBOptimizeIndexOptions, to identify the job that made the commit.
+ * A version that was committed with no transaction properties has a count of zero, and
+ * NULL arrays. The properties belong to that one version only: they are not carried
+ * over to later versions, and are removed together with the version when old versions
+ * are pruned.
+ * On success, keys_out and values_out will point to parallel arrays of strings, in no
+ * particular order. The caller must free the returned arrays using lancedb_free_metadata().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_get_transaction_properties(
+    const LanceDBTable* table,
+    uint64_t version,
+    char*** keys_out,
+    char*** values_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
  * Free versions array returned by lancedb_table_list_versions
  *
  * @param versions - array of LanceDBVersion structs returned by lancedb_table_list_versions
@@ -1807,10 +1979,11 @@ void lancedb_free_versions(LanceDBVersion* versions, size_t count);
 void lancedb_free_version_metadata(LanceDBVersionMetadata* metadata, size_t count);
 
 /**
- * Free metadata arrays returned by lancedb_table_get_metadata
+ * Free metadata arrays returned by lancedb_table_get_metadata or
+ * lancedb_table_get_transaction_properties
  *
- * @param keys - array of key strings returned by lancedb_table_get_metadata
- * @param values - array of value strings returned by lancedb_table_get_metadata
+ * @param keys - array of key strings returned by one of these functions
+ * @param values - array of value strings returned by one of these functions
  * @param count - number of entries in the arrays
  *
  * Safe to call with NULL pointers.
