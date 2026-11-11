@@ -692,6 +692,39 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices Options", "[vector_in
     REQUIRE(options.transaction_property_keys == nullptr);
     REQUIRE(options.transaction_property_values == nullptr);
     REQUIRE(options.num_transaction_properties == 0);
+    REQUIRE(options.progress_callback == nullptr);
+    REQUIRE(options.progress_user_data == nullptr);
+  }
+
+  SECTION("Progress of building a vector index is reported") {
+    LanceDBTable* table = create_table_with_data(table_name, 256, 0);
+    REQUIRE(table != nullptr);
+    create_vector_index(table);
+    const std::string index_name = single_index_name(table);
+    add_rows(table, 50, 256);
+
+    IndexProgressRecorder recorder;
+    LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+    options.progress_callback = IndexProgressRecorder::callback;
+    options.progress_user_data = &recorder;
+
+    // The names of the stages are up to Lance, so only their pairing is verified
+    for (const LanceDBReindexMode mode : {LANCEDB_REINDEX_APPEND, LANCEDB_REINDEX_RETRAIN}) {
+      CAPTURE(mode);
+      recorder.started.clear();
+      recorder.completed.clear();
+      recorder.num_progress = 0;
+      options.mode = mode;
+      optimize_indices(table, &options);
+
+      REQUIRE(recorder.valid);
+      REQUIRE(!recorder.started.empty());
+      REQUIRE(recorder.all_completed());
+      REQUIRE(recorder.num_progress > 0);
+    }
+    REQUIRE(index_stats(table, index_name).num_unindexed_rows == 0);
+
+    lancedb_table_free(table);
   }
 
   SECTION("Only the named indices are optimized") {

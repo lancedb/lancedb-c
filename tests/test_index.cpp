@@ -814,6 +814,40 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Scalar Indices", "[index]") {
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Optimize Indices Progress", "[index]") {
+  const std::string table_name = "optimize_indices_progress_test";
+  LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+  REQUIRE(table != nullptr);
+
+  // Merging the segments of a full-text index reports its progress
+  const char* columns[] = {"key"};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_fts_index(table, columns, 1, nullptr, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  auto reader = create_reader_from_batch(create_test_record_batch(20, 20));
+  REQUIRE(reader != nullptr);
+  REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  IndexProgressRecorder recorder;
+  LanceDBOptimizeIndexOptions options = lancedb_optimize_index_options_default();
+  options.mode = LANCEDB_REINDEX_MERGE;
+  options.num_indices_to_merge = 1;
+  options.progress_callback = IndexProgressRecorder::callback;
+  options.progress_user_data = &recorder;
+  REQUIRE(lancedb_table_optimize_indices(table, &options, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  // The names of the stages are up to Lance, so only their pairing is verified
+  REQUIRE(recorder.valid);
+  REQUIRE(!recorder.started.empty());
+  REQUIRE(recorder.all_completed());
+  REQUIRE(recorder.num_progress > 0);
+
+  lancedb_table_free(table);
+}
+
 // A string that is not valid UTF-8, to exercise the string conversion failures
 static const char* const INVALID_UTF8 = "\xff\xfe";
 

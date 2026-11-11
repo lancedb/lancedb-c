@@ -234,6 +234,41 @@ typedef enum {
 } LanceDBReindexMode;
 
 /**
+ * Kind of event reported to a LanceDBIndexProgressCallback
+ */
+typedef enum {
+    LANCEDB_INDEX_PROGRESS_STAGE_START = 0,    // A stage started
+    LANCEDB_INDEX_PROGRESS_STAGE_PROGRESS = 1, // Progress within a stage
+    LANCEDB_INDEX_PROGRESS_STAGE_COMPLETE = 2  // A stage completed
+} LanceDBIndexProgressEvent;
+
+/**
+ * Callback reporting the progress of building indices
+ *
+ * @param event - kind of the event
+ * @param stage - name of the stage, for example "shuffle" or "merge_partitions". The
+ *        stages depend on the index type and on the version of Lance, so the names are
+ *        meant for display. Valid for the duration of the call only
+ * @param value - STAGE_START: total number of work units in the stage, 0 if unknown.
+ *        STAGE_PROGRESS: number of work units completed so far. STAGE_COMPLETE: 0
+ * @param unit - STAGE_START: what the work units are, for example "rows" or
+ *        "partitions"; an empty string for the other events. Valid for the duration of
+ *        the call only
+ * @param user_data - the progress_user_data of the options
+ *
+ * The callback is called from the worker threads of the library, possibly from several
+ * threads at the same time, while the index is being built. It must be thread-safe,
+ * return quickly, and must not call any LanceDB function.
+ */
+typedef void (*LanceDBIndexProgressCallback)(
+    LanceDBIndexProgressEvent event,
+    const char* stage,
+    uint64_t value,
+    const char* unit,
+    void* user_data
+);
+
+/**
  * Options for lancedb_table_optimize_indices()
  *
  * Use lancedb_optimize_index_options_default() to get the same behaviour as
@@ -245,6 +280,11 @@ typedef enum {
  * nothing to commit: the call succeeds, no table version is added and the properties
  * are not stored. Compare lancedb_table_version() before and after the call to find out
  * whether a commit was made.
+ *
+ * The progress callback is called at the stages of building an index. Progress is
+ * reported for vector indices and for merging the segments of a full-text index; other
+ * scalar indices are optimized without any report. How often progress is reported
+ * within a stage depends on the stage, some only report their start and completion.
  */
 typedef struct {
     LanceDBReindexMode mode;
@@ -256,6 +296,8 @@ typedef struct {
                                                     // lancedb_table_get_transaction_properties()
     const char* const* transaction_property_values; // Parallel to transaction_property_keys
     size_t num_transaction_properties;
+    LanceDBIndexProgressCallback progress_callback; // Optional progress reports (NULL = none)
+    void* progress_user_data;                       // Passed as is to progress_callback
 } LanceDBOptimizeIndexOptions;
 
 /**
@@ -1699,7 +1741,8 @@ LanceDBError lancedb_table_optimize(
  * Get the default options for lancedb_table_optimize_indices()
  *
  * @return options equivalent to lancedb_table_optimize(LANCEDB_OPTIMIZE_INDEX):
- *         LANCEDB_REINDEX_DEFAULT, all indices, no transaction properties
+ *         LANCEDB_REINDEX_DEFAULT, all indices, no transaction properties, no progress
+ *         callback
  */
 LanceDBOptimizeIndexOptions lancedb_optimize_index_options_default(void);
 
