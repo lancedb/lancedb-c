@@ -193,6 +193,27 @@ the call succeeds, no table version is added and the properties are not stored. 
 ``lancedb_table_version()`` before and after the call to find out whether a commit was
 made.
 
+A reindex of a large table can take a long time. Setting ``progress_callback`` in the
+options reports the stages of building the index as they start, advance and complete:
+
+.. code-block:: c
+
+   static void on_progress(LanceDBIndexProgressEvent event, const char* stage,
+                           uint64_t value, const char* unit, void* user_data) {
+       if (event == LANCEDB_INDEX_PROGRESS_STAGE_START) {
+           printf("%s: started, %llu %s\n", stage, (unsigned long long)value, unit);
+       } else if (event == LANCEDB_INDEX_PROGRESS_STAGE_COMPLETE) {
+           printf("%s: completed\n", stage);
+       }
+   }
+
+   options.progress_callback = on_progress;
+
+The callback is called from the worker threads of the library, so it must be thread-safe,
+return quickly, and must not call any LanceDB function. Progress is reported for vector
+indices and for merging the segments of a full-text index. The names of the stages come
+from Lance and may change between versions.
+
 ``lancedb_table_index_stats()`` provides the inputs for that decision:
 
 - ``num_unindexed_rows`` and ``num_unindexed_fragments`` above zero: run ``APPEND``.

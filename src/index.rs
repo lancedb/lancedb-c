@@ -7,10 +7,12 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_float, c_int};
+use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::ptr;
+use std::sync::Arc;
 
-use lance::index::DatasetIndexExt;
+use async_trait::async_trait;
+use lance::index::{DatasetIndexExt, IndexBuildProgress};
 use lancedb::index::scalar::{
     BTreeIndexBuilder, BitmapIndexBuilder, FmIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
 };
@@ -202,6 +204,78 @@ pub enum LanceDBReindexMode {
     Retrain = 3,
 }
 
+/// Kind of event reported to a `LanceDBIndexProgressCallback`
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBIndexProgressEvent {
+    /// A stage started, `value` is its total number of work units (0 if unknown)
+    StageStart = 0,
+    /// Progress within a stage, `value` is the number of work units completed so far
+    StageProgress = 1,
+    /// A stage completed, `value` is 0
+    StageComplete = 2,
+}
+
+/// Callback reporting the progress of building indices
+pub type LanceDBIndexProgressCallback = unsafe extern "C" fn(
+    event: LanceDBIndexProgressEvent,
+    stage: *const c_char,
+    value: u64,
+    unit: *const c_char,
+    user_data: *mut c_void,
+);
+
+/// Reports the progress of an index build to a C callback
+#[derive(Debug)]
+struct CallbackIndexProgress {
+    callback: LanceDBIndexProgressCallback,
+    user_data: *mut c_void,
+}
+
+// SAFETY: the user data is only passed back to the callback, which the caller of
+// lancedb_table_optimize_indices guarantees to be thread-safe
+unsafe impl Send for CallbackIndexProgress {}
+unsafe impl Sync for CallbackIndexProgress {}
+
+impl CallbackIndexProgress {
+    fn report(&self, event: LanceDBIndexProgressEvent, stage: &str, value: u64, unit: &str) {
+        let stage = CString::new(stage).unwrap_or_default();
+        let unit = CString::new(unit).unwrap_or_default();
+        // SAFETY: the strings are valid for the duration of the call
+        unsafe {
+            (self.callback)(event, stage.as_ptr(), value, unit.as_ptr(), self.user_data);
+        }
+    }
+}
+
+#[async_trait]
+impl IndexBuildProgress for CallbackIndexProgress {
+    async fn stage_start(&self, stage: &str, total: Option<u64>, unit: &str) -> lance::Result<()> {
+        self.report(
+            LanceDBIndexProgressEvent::StageStart,
+            stage,
+            total.unwrap_or(0),
+            unit,
+        );
+        Ok(())
+    }
+
+    async fn stage_progress(&self, stage: &str, completed: u64) -> lance::Result<()> {
+        self.report(
+            LanceDBIndexProgressEvent::StageProgress,
+            stage,
+            completed,
+            "",
+        );
+        Ok(())
+    }
+
+    async fn stage_complete(&self, stage: &str) -> lance::Result<()> {
+        self.report(LanceDBIndexProgressEvent::StageComplete, stage, 0, "");
+        Ok(())
+    }
+}
+
 /// Options for lancedb_table_optimize_indices
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -218,6 +292,10 @@ pub struct LanceDBOptimizeIndexOptions {
     /// Parallel to `transaction_property_keys`
     pub transaction_property_values: *const *const c_char,
     pub num_transaction_properties: usize,
+    /// Optional callback reporting the progress of the index build (NULL = no reports)
+    pub progress_callback: Option<LanceDBIndexProgressCallback>,
+    /// Passed as is to `progress_callback`
+    pub progress_user_data: *mut c_void,
 }
 
 impl Default for LanceDBOptimizeIndexOptions {
@@ -230,6 +308,8 @@ impl Default for LanceDBOptimizeIndexOptions {
             transaction_property_keys: ptr::null(),
             transaction_property_values: ptr::null(),
             num_transaction_properties: 0,
+            progress_callback: None,
+            progress_user_data: ptr::null_mut(),
         }
     }
 }
@@ -305,6 +385,13 @@ unsafe fn build_optimize_options(
         options = options.transaction_properties(properties);
     }
 
+    if let Some(callback) = opts.progress_callback {
+        options = options.progress(Arc::new(CallbackIndexProgress {
+            callback,
+            user_data: opts.progress_user_data,
+        }));
+    }
+
     Ok(options)
 }
 
@@ -313,7 +400,7 @@ unsafe fn build_optimize_options(
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
 /// - `options` can be NULL for the defaults; its arrays must point to as many valid C
-///   strings as their counts say
+///   strings as their counts say, and its progress callback must be thread-safe
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
 /// # Returns

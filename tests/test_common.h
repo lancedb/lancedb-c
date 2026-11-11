@@ -12,6 +12,10 @@
 #include <random>
 #include <sstream>
 #include <chrono>
+#include <algorithm>
+#include <mutex>
+#include <string>
+#include <vector>
 
 // Helper function to check if directory exists
 int directory_exists(const char* path);
@@ -78,6 +82,47 @@ public:
   LanceDBTable* open_table(const std::string& table_name);
   // Require that a table cannot be opened because it does not exist
   void require_table_not_found(const std::string& table_name);
+};
+
+// Records the events reported by the progress callback of an index optimization
+struct IndexProgressRecorder {
+  std::mutex mutex;
+  std::vector<std::string> started;    // the stages that were started
+  std::vector<std::string> completed;  // the stages that were completed
+  size_t num_progress = 0;             // the progress reports within the stages
+  bool valid = true;                   // no report had a missing stage name or unit
+
+  // The progress callback, expecting the recorder as its user data. The callback may be
+  // called from several threads at the same time
+  static void callback(LanceDBIndexProgressEvent event, const char* stage, uint64_t, const char* unit, void* user_data) {
+    auto* recorder = static_cast<IndexProgressRecorder*>(user_data);
+    const std::lock_guard<std::mutex> lock(recorder->mutex);
+    if (stage == nullptr || unit == nullptr || std::string(stage).empty()) {
+      recorder->valid = false;
+      return;
+    }
+    switch (event) {
+      case LANCEDB_INDEX_PROGRESS_STAGE_START:
+        recorder->started.emplace_back(stage);
+        break;
+      case LANCEDB_INDEX_PROGRESS_STAGE_PROGRESS:
+        ++recorder->num_progress;
+        break;
+      case LANCEDB_INDEX_PROGRESS_STAGE_COMPLETE:
+        recorder->completed.emplace_back(stage);
+        break;
+    }
+  }
+
+  // Every stage that was started was also completed
+  bool all_completed() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    std::vector<std::string> sorted_started = started;
+    std::vector<std::string> sorted_completed = completed;
+    std::sort(sorted_started.begin(), sorted_started.end());
+    std::sort(sorted_completed.begin(), sorted_completed.end());
+    return sorted_started == sorted_completed;
+  }
 };
 
 class LanceDBSessionFixture : public LanceDBFixture {
