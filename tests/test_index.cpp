@@ -517,32 +517,89 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB FTS Index", "[index]") {
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
   const std::string table_name = "optimize_test";
 
-  SECTION("Optimize with all the optimization types") {
+  SECTION("Optimize a table with fragments of unindexed rows") {
     LanceDBTable* table = create_table_with_data(table_name, 20, 0);
     REQUIRE(table != nullptr);
 
-    // Add more data, so that there is something to compact
-    auto reader = create_reader_from_batch(create_test_record_batch(20, 20));
-    REQUIRE(reader != nullptr);
+    const char* columns[] = {"key"};
+    LanceDBScalarIndexConfig config = {.replace = 0};
     char* error_message = nullptr;
-    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    const LanceDBOptimizeType types[] = {
-      LANCEDB_OPTIMIZE_COMPACT,
-      LANCEDB_OPTIMIZE_INDEX,
-      LANCEDB_OPTIMIZE_PRUNE,
-      LANCEDB_OPTIMIZE_ALL
-    };
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(count == 1);
+    const std::string index_name = indices[0];
+    lancedb_free_index_list(indices, count);
 
-    for (const auto type : types) {
-      error_message = nullptr;
-      REQUIRE(lancedb_table_optimize(table, type, &error_message) == LANCEDB_SUCCESS);
+    // Add more rows in two batches. Each batch is written to a fragment of its own, that
+    // is not covered by the index, so that there is something to compact and to index.
+    // Lance does not compact an indexed fragment with an unindexed one, so that two
+    // unindexed fragments are needed for a compaction
+    for (const int start_index : {20, 40}) {
+      auto reader = create_reader_from_batch(create_test_record_batch(20, start_index));
+      REQUIRE(reader != nullptr);
+      REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
       REQUIRE(error_message == nullptr);
     }
 
-    // No rows were lost by the optimizations
-    REQUIRE(lancedb_table_count_rows(table) == 40);
+    const auto num_fragments = [&] {
+      LanceDBTableStats stats = {};
+      REQUIRE(lancedb_table_stats(table, &stats, nullptr) == LANCEDB_SUCCESS);
+      return stats.fragment_stats.num_fragments;
+    };
+    const auto num_unindexed_rows = [&] {
+      LanceDBIndexStats stats = {};
+      REQUIRE(lancedb_table_index_stats(table, index_name.c_str(), &stats, nullptr) == LANCEDB_SUCCESS);
+      return stats.num_unindexed_rows;
+    };
+    const auto num_versions = [&] {
+      LanceDBVersion* versions = nullptr;
+      size_t num_versions = 0;
+      REQUIRE(lancedb_table_list_versions(table, &versions, nullptr, &num_versions, nullptr) == LANCEDB_SUCCESS);
+      lancedb_free_versions(versions, num_versions);
+      return num_versions;
+    };
+    const auto optimize = [&](LanceDBOptimizeType type) {
+      REQUIRE(lancedb_table_optimize(table, type, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    };
+
+    REQUIRE(num_fragments() == 3);
+    REQUIRE(num_unindexed_rows() == 40);
+
+    SECTION("COMPACT merges the unindexed fragments and leaves the index alone") {
+      optimize(LANCEDB_OPTIMIZE_COMPACT);
+      REQUIRE(num_fragments() == 2);
+      REQUIRE(num_unindexed_rows() == 40);
+    }
+
+    SECTION("INDEX covers the new rows and leaves the fragments alone") {
+      optimize(LANCEDB_OPTIMIZE_INDEX);
+      REQUIRE(num_unindexed_rows() == 0);
+      REQUIRE(num_fragments() == 3);
+    }
+
+    SECTION("PRUNE keeps the recent versions") {
+      // Only the versions older than a week are removed, and the table has none
+      const size_t versions_before = num_versions();
+      optimize(LANCEDB_OPTIMIZE_PRUNE);
+      REQUIRE(num_versions() == versions_before);
+      REQUIRE(num_fragments() == 3);
+      REQUIRE(num_unindexed_rows() == 40);
+    }
+
+    SECTION("ALL compacts the unindexed fragments and covers the new rows") {
+      optimize(LANCEDB_OPTIMIZE_ALL);
+      REQUIRE(num_fragments() == 2);
+      REQUIRE(num_unindexed_rows() == 0);
+    }
+
+    // No rows were lost by the optimization
+    REQUIRE(lancedb_table_count_rows(table) == 60);
 
     lancedb_table_free(table);
   }
