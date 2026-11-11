@@ -369,6 +369,21 @@ int main() {
   }
   print_index_stats(tbl, "data_idx");
 
+  // read back the properties that were stored with the reindex commit,
+  // which is the current version of the table
+  char** stored_keys;
+  char** stored_values;
+  size_t stored_count;
+  if (const LanceDBError result = lancedb_table_get_transaction_properties(
+        tbl, 0, &stored_keys, &stored_values, &stored_count, nullptr); result != LANCEDB_SUCCESS) {
+    std::cerr << "failed to get the transaction properties, error: " << lancedb_error_to_message(result) << std::endl;
+  } else {
+    for (size_t i = 0; i < stored_count; i++) {
+      std::cout << "transaction property: " << stored_keys[i] << " = " << stored_values[i] << std::endl;
+    }
+    lancedb_free_metadata(stored_keys, stored_values, stored_count);
+  }
+
   // the scalar index on the "key" column was left out, so it still has unindexed rows
   print_index_stats(tbl, "key_idx");
 
