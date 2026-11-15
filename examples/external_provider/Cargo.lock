@@ -4509,6 +4509,7 @@ dependencies = [
  "arrow-array",
  "arrow-data",
  "arrow-schema",
+ "async-trait",
  "chrono",
  "datafusion-common",
  "datafusion-expr",
@@ -4522,6 +4523,7 @@ dependencies = [
  "lance-namespace",
  "lancedb",
  "libc",
+ "serde_json",
  "stacker",
  "tokio",
 ]

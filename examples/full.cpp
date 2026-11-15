@@ -84,6 +84,90 @@ void print_query_result(
   }
 }
 
+// write sample rows to the table, with keys starting at the given index
+void write_rows(
+    const LanceDBTable* tbl,
+    const std::shared_ptr<arrow::Schema>& schema,
+    size_t dimensions,
+    int start_index,
+    int num_rows) {
+  // create sample data using arrow builders
+  arrow::StringBuilder key_builder;
+  arrow::FixedSizeListBuilder data_builder(arrow::default_memory_pool(),
+      std::make_unique<arrow::FloatBuilder>(),
+      dimensions);
+  arrow::StringBuilder tag1_builder, tag2_builder, tag3_builder;
+  for (int i = start_index; i < start_index + num_rows; i++) {
+    // key column
+    key_builder.Append("key_" + std::to_string(i)).ok();
+    // vector data column
+    auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
+    for (size_t j = 0; j < dimensions; j++) {
+      list_builder->Append(static_cast<float>(rand()%100)).ok();
+    }
+    data_builder.Append().ok();
+    // tag columns
+    tag1_builder.Append("category_" + std::to_string(i % 3)).ok();
+    tag2_builder.Append("type_" + std::to_string(i % 2)).ok();
+    tag3_builder.Append("label_" + std::to_string(i % 5)).ok();
+  }
+  // build arrays
+  std::shared_ptr<arrow::Array> key_array, data_array, tag1_array, tag2_array, tag3_array;
+  key_builder.Finish(&key_array).ok();
+  data_builder.Finish(&data_array).ok();
+  tag1_builder.Finish(&tag1_array).ok();
+  tag2_builder.Finish(&tag2_array).ok();
+  tag3_builder.Finish(&tag3_array).ok();
+
+  auto record_batch = arrow::RecordBatch::Make(
+      schema, num_rows, {key_array, data_array, tag1_array, tag2_array, tag3_array});
+  struct ArrowArray c_array;
+  struct ArrowSchema c_batch_schema;
+  if (const auto status = arrow::ExportRecordBatch(*record_batch, &c_array, &c_batch_schema); !status.ok()) {
+    std::cerr << "failed to export record batch to C ABI: " << status.ToString() << std::endl;
+    return;
+  }
+  LanceDBRecordBatchReader* batch_reader;
+  if (const LanceDBError error = lancedb_record_batch_reader_from_arrow(
+        reinterpret_cast<FFI_ArrowArray*>(&c_array),
+        reinterpret_cast<FFI_ArrowSchema*>(&c_batch_schema),
+        &batch_reader, nullptr); error == LANCEDB_SUCCESS) {
+    // add data to table
+    if (const LanceDBError result = lancedb_table_add(tbl, batch_reader, nullptr); result != LANCEDB_SUCCESS) {
+      std::cerr << "failed to write record batch to table, error: " << lancedb_error_to_message(result) << std::endl;
+    } else {
+      std::cout << "wrote " << num_rows << " rows to table" << std::endl;
+    }
+  } else {
+    std::cerr << "failed to create record batch reader from arrow arrays" << std::endl;
+    if (c_array.release) {
+      c_array.release(&c_array);
+    }
+  }
+  // the schema is only read by the reader, so it must be released here
+  if (c_batch_schema.release) {
+    c_batch_schema.release(&c_batch_schema);
+  }
+}
+
+// print the statistics of an index
+void print_index_stats(const LanceDBTable* tbl, const char* index_name) {
+  LanceDBIndexStats stats;
+  if (const LanceDBError result = lancedb_table_index_stats(tbl, index_name, &stats, nullptr); result != LANCEDB_SUCCESS) {
+    std::cerr << "failed to get stats of index: " << index_name << ", error: " << lancedb_error_to_message(result) << std::endl;
+    return;
+  }
+  std::cout << "index: " << index_name << " type: " << stats.index_type <<
+    ", segments: " << stats.num_indices <<
+    ", partitions: " << stats.num_partitions <<
+    ", indexed rows: " << stats.num_indexed_rows <<
+    ", unindexed rows: " << stats.num_unindexed_rows <<
+    ", indexed fragments: " << stats.num_indexed_fragments <<
+    ", unindexed fragments: " << stats.num_unindexed_fragments <<
+    ", deleted indexed rows: " << stats.num_deleted_indexed_rows <<
+    ", built at version: " << stats.dataset_version << std::endl;
+}
+
 int main() {
   // initial cleanup
   const std::string data_dir = "data";
@@ -226,65 +310,8 @@ int main() {
     std::cerr << "created scalar index on 'key' column - should have failed" << std::endl;
   }
 
-  // create sample data using arrow builders
-  arrow::StringBuilder key_builder;
-  arrow::FloatBuilder float_builder;
-  arrow::FixedSizeListBuilder data_builder(arrow::default_memory_pool(),
-      std::make_unique<arrow::FloatBuilder>(),
-      dimensions);
-  arrow::StringBuilder tag1_builder, tag2_builder, tag3_builder;
-  // add sample rows
   const int num_rows = 100;
-  for (int i = 0; i < num_rows; i++) {
-    // key column
-    key_builder.Append("key_" + std::to_string(i)).ok();
-    // vector data column
-    auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
-    for (size_t j = 0; j < dimensions; j++) {
-      list_builder->Append(static_cast<float>(rand()%100)).ok();
-    }
-    data_builder.Append().ok();
-    // tag columns
-    tag1_builder.Append("category_" + std::to_string(i % 3)).ok();
-    tag2_builder.Append("type_" + std::to_string(i % 2)).ok();
-    tag3_builder.Append("label_" + std::to_string(i % 5)).ok();
-  }
-  // build arrays
-  std::shared_ptr<arrow::Array> key_array, data_array, tag1_array, tag2_array, tag3_array;
-  key_builder.Finish(&key_array).ok();
-  data_builder.Finish(&data_array).ok();
-  tag1_builder.Finish(&tag1_array).ok();
-  tag2_builder.Finish(&tag2_array).ok();
-  tag3_builder.Finish(&tag3_array).ok();
-
-  auto record_batch = arrow::RecordBatch::Make(
-      schema, num_rows, {key_array, data_array, tag1_array, tag2_array, tag3_array});
-  struct ArrowArray c_array;
-  if (const auto status = arrow::ExportRecordBatch(*record_batch, &c_array, &c_schema); !status.ok()) {
-    std::cerr << "failed to export record batch to C ABI: " << status.ToString() << std::endl;
-  } else {
-    LanceDBRecordBatchReader* batch_reader;
-    if (const LanceDBError error = lancedb_record_batch_reader_from_arrow(
-          reinterpret_cast<FFI_ArrowArray*>(&c_array),
-          reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
-          &batch_reader, nullptr); error == LANCEDB_SUCCESS) {
-      // add data to table
-      if (const LanceDBError result = lancedb_table_add(tbl, batch_reader, nullptr); result != LANCEDB_SUCCESS) {
-        std::cerr << "failed to write record batch to table, error: " << lancedb_error_to_message(result) << std::endl;
-      } else {
-        std::cout << "wrote " << num_rows << " rows to table" << std::endl;
-      }
-    } else {
-      std::cerr << "failed to create record batch reader from arrow arrays" << std::endl;
-      if (c_array.release) {
-        c_array.release(&c_array);
-      }
-    }
-  }
-
-  if (c_schema.release) {
-    c_schema.release(&c_schema);
-  }
+  write_rows(tbl, schema, dimensions, 0, num_rows);
 
   // define a vector index on the "data" column
   const char* data_columns[] = {"data"};
@@ -316,6 +343,49 @@ int main() {
       std::cout << "created bitmap index on '" << tag_columns[i] << "' column" << std::endl;
     }
   }
+
+  // write more rows, that are not covered by the indices
+  write_rows(tbl, schema, dimensions, num_rows, 50);
+  print_index_stats(tbl, "data_idx");
+
+  // append a delta to the vector index only, covering the new rows,
+  // and tag the commit with the id of the job that ran it
+  const char* reindex_names[] = {"data_idx"};
+  const char* property_keys[] = {"job_id"};
+  const char* property_values[] = {"example"};
+  LanceDBOptimizeIndexOptions reindex_options = lancedb_optimize_index_options_default();
+  reindex_options.mode = LANCEDB_REINDEX_APPEND;
+  reindex_options.index_names = reindex_names;
+  reindex_options.num_index_names = 1;
+  reindex_options.transaction_property_keys = property_keys;
+  reindex_options.transaction_property_values = property_values;
+  reindex_options.num_transaction_properties = 1;
+  if (const LanceDBError result = lancedb_table_optimize_indices(tbl, &reindex_options, &error_message); result != LANCEDB_SUCCESS) {
+    std::cerr << "failed to append to the vector index, error: '" << lancedb_error_to_message(result) <<
+      "' message: " << std::endl << error_message << std::endl;
+    lancedb_free_string(error_message);
+  } else {
+    std::cout << "appended a delta to the vector index" << std::endl;
+  }
+  print_index_stats(tbl, "data_idx");
+
+  // read back the properties that were stored with the reindex commit,
+  // which is the current version of the table
+  char** stored_keys;
+  char** stored_values;
+  size_t stored_count;
+  if (const LanceDBError result = lancedb_table_get_transaction_properties(
+        tbl, 0, &stored_keys, &stored_values, &stored_count, nullptr); result != LANCEDB_SUCCESS) {
+    std::cerr << "failed to get the transaction properties, error: " << lancedb_error_to_message(result) << std::endl;
+  } else {
+    for (size_t i = 0; i < stored_count; i++) {
+      std::cout << "transaction property: " << stored_keys[i] << " = " << stored_values[i] << std::endl;
+    }
+    lancedb_free_metadata(stored_keys, stored_values, stored_count);
+  }
+
+  // the scalar index on the "key" column was left out, so it still has unindexed rows
+  print_index_stats(tbl, "key_idx");
 
   // query the table using the nearest_to function
   const size_t k = 20;
