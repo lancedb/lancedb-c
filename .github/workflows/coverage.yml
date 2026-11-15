@@ -48,12 +48,10 @@ jobs:
       - name: Extract coverage percentage
         id: coverage
         run: |
-          # Extract line coverage % from the TOTAL row (3rd percentage field = Lines Cover)
-          LLVM_COV=$(find "$(rustc --print sysroot)" -name llvm-cov -type f | head -1)
-          COVERAGE=$("$LLVM_COV" report build/target/debug/liblancedb.so \
-            --instr-profile=build/coverage.profdata \
-            src/ \
-            | grep "^TOTAL" | awk '{for(i=1;i<=NF;i++) if($i ~ /%$/ && count++==2) {gsub(/%/,"",$i); print $i; exit}}')
+          # Line coverage % from the TOTAL row of the summary the coverage target wrote
+          # (3rd percentage field = Lines Cover)
+          COVERAGE=$(grep "^TOTAL" build/coverage-summary.txt \
+            | awk '{for(i=1;i<=NF;i++) if($i ~ /%$/ && count++==2) {gsub(/%/,"",$i); print $i; exit}}')
           echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
           echo "Line coverage: $COVERAGE%"
 
