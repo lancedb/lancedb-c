@@ -632,6 +632,34 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index - create index options", 
     lancedb_table_free(table);
   }
 
+  SECTION("Dot distance is forwarded to the vector index") {
+    LanceDBTable* table = create_table_with_data(table_name, 100, 0);
+    REQUIRE(table != nullptr);
+
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.name = "data_dot";
+    options.replace = 0;
+    options.num_partitions = 1;
+    options.sample_rate = 32;
+    options.max_iterations = 2;
+    options.distance_type = LANCEDB_DISTANCE_DOT;
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(indices[0]) == "data_dot");
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
   SECTION("IVF_PQ tuning options are forwarded") {
     LanceDBTable* table = create_table_with_data(table_name, 300, 0);
     REQUIRE(table != nullptr);

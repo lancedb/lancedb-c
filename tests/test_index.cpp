@@ -612,6 +612,80 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Create Index Options", "[index]") {
     lancedb_table_free(table);
   }
 
+  SECTION("NULL options use the SDK defaults") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Auto index type uses the SDK Auto index") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_AUTO, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Bitmap index type creates a bitmap index") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.name = "key_bitmap";
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BITMAP, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(indices[0]) == "key_bitmap");
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("FTS rejects an unknown language through the generic path") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.fts_language = "Klingon";
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_FTS, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+
   SECTION("Invalid options are rejected before the SDK call") {
     LanceDBTable* table = create_table_with_data(table_name, 20, 0);
     REQUIRE(table != nullptr);
