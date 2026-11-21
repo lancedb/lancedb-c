@@ -168,3 +168,13 @@
    fun:alloc_buffer_allocate
    fun:__resolv_conf_allocate
 }
+
+# Lance blob v2 global schema fields — one-time static init via LazyLock
+{
+   lance_blob_v2_global_schema_fields
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:*
+   ...
+   fun:*BLOB_V2_DESC*
+}
