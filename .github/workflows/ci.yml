@@ -73,7 +73,7 @@ jobs:
         if: matrix.lib_type == 'shared'
         run: ninja -C build check
 
-      - name: Check C ABI declarations
+      - name: Check C ABI declarations (host and MSVC LLP64)
         if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
         run: ninja -C build check-abi
 

@@ -34,6 +34,29 @@ class Function:
     param_names: Tuple[str, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class Clang:
+    executable: str
+    target: Optional[str] = None
+    stub_dir: Optional[Path] = None
+
+    def args(self) -> List[str]:
+        if self.target is None:
+            return []
+        resource_dir = run_checked([self.executable, "-print-resource-dir"]).stdout.strip()
+        result = [
+            "-target",
+            self.target,
+            "-ffreestanding",
+            "-nostdinc",
+            "-isystem",
+            str(Path(resource_dir) / "include"),
+        ]
+        if self.stub_dir is not None:
+            result.extend(["-I", str(self.stub_dir)])
+        return result
+
+
 def parse_type(text: str) -> CType:
     text = re.sub(r"\s+", " ", text.strip())
     text = re.sub(r"\b(?:struct|enum|union)\s+", "", text)
@@ -180,7 +203,7 @@ def normalize_base(text: str, const: bool) -> CType:
 class Declarations:
     functions: Dict[str, Function]
     structs: Dict[str, List[Tuple[str, CType]]]
-    enums: Dict[str, List[int]]
+    enums: Dict[str, Dict[str, int]]
     struct_locations: Dict[str, int]
 
 
@@ -234,7 +257,7 @@ def collect_declarations(ast_path: Path) -> Declarations:
     walk(ast)
 
     structs: Dict[str, List[Tuple[str, CType]]] = {}
-    enums: Dict[str, List[int]] = {}
+    enums: Dict[str, Dict[str, int]] = {}
     struct_locations: Dict[str, int] = {}
     for name, tag_id in typedefs.items():
         if not tag_id:
@@ -253,7 +276,13 @@ def collect_declarations(ast_path: Path) -> Declarations:
             if node.get("kind") == "EnumDecl":
                 constants = [c for c in node.get("inner", []) if c.get("kind") == "EnumConstantDecl"]
                 if constants:
-                    enums[name] = [v for v in (_constant_value(c) for c in constants) if v is not None]
+                    members: Dict[str, int] = {}
+                    for constant in constants:
+                        value = _constant_value(constant)
+                        if value is None:
+                            raise RuntimeError(f"enum {name} member {constant.get('name')} has no value")
+                        members[constant["name"]] = value
+                    enums[name] = members
                     break
     return Declarations(functions, structs, enums, struct_locations)
 
@@ -261,7 +290,36 @@ def collect_declarations(ast_path: Path) -> Declarations:
 @dataclasses.dataclass(frozen=True)
 class Allow:
     allow_const: bool = False
-    allow_enum_int: bool = False
+    enum_int: Optional[str] = None
+
+
+# The C header spells enumerators as LANCEDB_<ENUM>_<MEMBER>, while cbindgen
+# emits the Rust variant name. Both names are part of the public contract, so
+# compare the header name with the canonical name derived from the Rust variant.
+ENUM_PREFIXES = {
+    "LanceDBError": "LANCEDB_",
+    "LanceDBDistanceType": "LANCEDB_DISTANCE_",
+    "LanceDBIndexType": "LANCEDB_INDEX_",
+    "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
+    "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
+}
+ENUM_MEMBER_RENAMES = {
+    ("LanceDBIndexType", "BTree"): "BTREE",
+    ("LanceDBIndexType", "FTS"): "FTS",
+    ("LanceDBIndexType", "LabelList"): "LABELLIST",
+    ("LanceDBOptimizeType", "Compat"): "COMPACT",
+}
+
+
+def canonical_enum_members(name: str, members: Dict[str, int]) -> Dict[str, int]:
+    prefix = ENUM_PREFIXES[name]
+    canonical: Dict[str, int] = {}
+    for member, value in members.items():
+        suffix = ENUM_MEMBER_RENAMES.get((name, member))
+        if suffix is None:
+            suffix = re.sub(r"(?<!^)(?=[A-Z])", "_", member).upper()
+        canonical[prefix + suffix] = value
+    return canonical
 
 
 # Deliberate differences between the C declaration and the Rust FFI signature.
@@ -269,11 +327,12 @@ class Allow:
 FUNCTION_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     # The C enum documents the accepted values, while Rust takes a checked
     # c_int and rejects values outside the enumerators at the FFI boundary.
-    ("lancedb_expr_binary", "op"): Allow(allow_enum_int=True),
-    ("lancedb_table_create_vector_index", "index_type"): Allow(allow_enum_int=True),
-    ("lancedb_table_create_scalar_index", "index_type"): Allow(allow_enum_int=True),
-    ("lancedb_table_optimize", "optimize_type"): Allow(allow_enum_int=True),
-    ("lancedb_vector_query_distance_type", "distance_type"): Allow(allow_enum_int=True),
+    ("lancedb_expr_binary", "op"): Allow(enum_int="LanceDBBinaryOp"),
+    ("lancedb_table_create_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
+    ("lancedb_table_create_vector_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
+    ("lancedb_table_create_scalar_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
+    ("lancedb_table_optimize", "optimize_type"): Allow(enum_int="LanceDBOptimizeType"),
+    ("lancedb_vector_query_distance_type", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
     # Rust reads the Arrow C structures without mutating them; the public
     # header leaves the caller's pointers mutable.
     ("lancedb_json_matches", "arrays"): Allow(allow_const=True),
@@ -290,11 +349,11 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     ("LanceDBIndexStatistics", "distance_type"): Allow(allow_const=True),
     # Rust stores the raw integer and validates it before converting to an
     # enum, avoiding undefined behavior for an out-of-range C value.
-    ("LanceDBVectorIndexConfig", "distance_type"): Allow(allow_enum_int=True),
+    ("LanceDBVectorIndexConfig", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
 }
 
 
-def compare_type(path: str, header: CType, generated: CType, enum_names: Set[str], allow: Allow = Allow()) -> List[str]:
+def compare_type(path: str, header: CType, generated: CType, allow: Allow = Allow()) -> List[str]:
     errors: List[str] = []
     if allow.allow_const:
         header = strip_const(header)
@@ -304,10 +363,7 @@ def compare_type(path: str, header: CType, generated: CType, enum_names: Set[str
     if header.kind == "base":
         if header.name != generated.name:
             c_int = "int:{}".format(TARGET_SIZES.get("int", 4) * 8)
-            if allow.allow_enum_int and (
-                (header.name in enum_names and generated.name in ("int", "int32", c_int))
-                or (generated.name in enum_names and header.name in ("int", "int32", c_int))
-            ):
+            if allow.enum_int is not None and header.name == allow.enum_int and generated.name == c_int:
                 return []
             return [f"{path}: base type differs: {header.name!r} vs {generated.name!r}"]
         if header.const != generated.const:
@@ -316,14 +372,14 @@ def compare_type(path: str, header: CType, generated: CType, enum_names: Set[str
     if header.kind == "pointer":
         if header.const != generated.const:
             errors.append(f"{path}: pointer const differs: {header.const} vs {generated.const}")
-        errors.extend(compare_type(path, header.inner, generated.inner, enum_names, allow))
+        errors.extend(compare_type(path, header.inner, generated.inner, allow))
         return errors
     # function
-    errors.extend(compare_type(path + " return", header.ret, generated.ret, enum_names, allow))
+    errors.extend(compare_type(path + " return", header.ret, generated.ret, allow))
     if len(header.params) != len(generated.params):
         return [f"{path}: parameter count differs: {len(header.params)} vs {len(generated.params)}"]
     for index, (left, right) in enumerate(zip(header.params, generated.params)):
-        errors.extend(compare_type(f"{path} argument {index + 1}", left, right, enum_names, allow))
+        errors.extend(compare_type(f"{path} argument {index + 1}", left, right, allow))
     if header.variadic != generated.variadic:
         errors.append(f"{path}: variadic differs")
     return errors
@@ -352,9 +408,9 @@ def rust_exports(repo: Path) -> Set[str]:
     return names
 
 
-def target_sizes(clang: str) -> Dict[str, int]:
+def target_sizes(clang: Clang) -> Dict[str, int]:
     output = subprocess.run(
-        [clang, "-dM", "-E", "-x", "c", os.devnull],
+        [clang.executable] + clang.args() + ["-dM", "-E", "-x", "c", os.devnull],
         check=True,
         capture_output=True,
         text=True,
@@ -377,10 +433,23 @@ def target_sizes(clang: str) -> Dict[str, int]:
     return {names[key]: value for key, value in macros.items() if key in names}
 
 
-def record_layouts(clang: str, header: Path, include_dir: Optional[Path]) -> Dict[int, Tuple[int, int, Dict[str, int]]]:
-    command = [clang, "-std=c17", "-Xclang", "-fdump-record-layouts-complete", "-c", str(header), "-o", os.devnull]
+def record_layouts(
+    clang: Clang, header: Path, include_dir: Optional[Path]
+) -> Dict[int, Tuple[int, int, Dict[str, int]]]:
+    command = [clang.executable] + clang.args()
     if include_dir is not None:
-        command[2:2] = ["-I", str(include_dir)]
+        command.extend(["-I", str(include_dir)])
+    command.extend(
+        [
+            "-std=c17",
+            "-Xclang",
+            "-fdump-record-layouts-complete",
+            "-c",
+            str(header),
+            "-o",
+            os.devnull,
+        ]
+    )
     output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
     layouts: Dict[int, Tuple[int, int, Dict[str, int]]] = {}
     current_line: Optional[int] = None
@@ -425,8 +494,6 @@ def compare_declarations(
     generated_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
 ) -> List[str]:
     errors: List[str] = []
-    enum_names = set(header.enums)
-
     header_functions = set(header.functions)
     generated_functions = set(generated.functions)
     for name in sorted(header_functions - generated_functions):
@@ -449,7 +516,6 @@ def compare_declarations(
                 f"function {name} return",
                 left_function.type.ret,
                 right_function.type.ret,
-                enum_names,
             )
         )
         left_params = left_function.type.params
@@ -466,7 +532,6 @@ def compare_declarations(
                     f"function {name} argument {index + 1}",
                     left,
                     right,
-                    enum_names,
                     FUNCTION_EXCEPTIONS.get((name, parameter_name), Allow()),
                 )
             )
@@ -492,7 +557,6 @@ def compare_declarations(
                     f"struct {name} field {field_name}",
                     left_type,
                     right_type,
-                    enum_names,
                     FIELD_EXCEPTIONS.get((name, field_name), Allow()),
                 )
             )
@@ -518,17 +582,37 @@ def compare_declarations(
                 )
 
     for name in sorted(header.enums):
-        left_values = header.enums[name]
-        right_values = generated.enums.get(name)
-        if right_values is None:
+        left_members = header.enums[name]
+        right_members = generated.enums.get(name)
+        if right_members is None:
             # These are header-only bit masks, not Rust enums. Their values are
             # covered by the C++ optimize option tests rather than cbindgen.
             if name in ("LanceDBCompactionField", "LanceDBPruneField"):
                 continue
             errors.append(f"enum {name}: defined in the public header but not generated from Rust")
             continue
-        if sorted(left_values) != sorted(right_values):
-            errors.append(f"enum {name}: values differ: {sorted(left_values)} vs {sorted(right_values)}")
+        if name not in ENUM_PREFIXES:
+            errors.append(f"enum {name}: no C enumerator naming rule for its Rust variants")
+            continue
+        right_members = canonical_enum_members(name, right_members)
+        if left_members != right_members:
+            missing = sorted(set(left_members) - set(right_members))
+            extra = sorted(set(right_members) - set(left_members))
+            changed = {
+                member: (left_members[member], right_members[member])
+                for member in sorted(set(left_members) & set(right_members))
+                if left_members[member] != right_members[member]
+            }
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if extra:
+                details.append("extra " + ", ".join(extra))
+            if changed:
+                details.append(
+                    "values " + ", ".join(f"{member}={old} vs {new}" for member, (old, new) in changed.items())
+                )
+            errors.append(f"enum {name}: members differ: " + "; ".join(details))
     for name in sorted(set(generated.enums) - set(header.enums)):
         errors.append(f"enum {name}: generated from Rust but not defined in the public header")
 
@@ -546,10 +630,19 @@ def run_checked(command: Sequence[str], **kwargs) -> subprocess.CompletedProcess
     return result
 
 
-def clang_ast(clang: str, header: Path, include_dir: Optional[Path], output: Path) -> None:
-    command = [clang, "-std=c17", "-Xclang", "-ast-dump=json", "-fsyntax-only", str(header)]
+def clang_ast(clang: Clang, header: Path, include_dir: Optional[Path], output: Path) -> None:
+    command = [clang.executable] + clang.args()
     if include_dir is not None:
-        command[2:2] = ["-I", str(include_dir)]
+        command.extend(["-I", str(include_dir)])
+    command.extend(
+        [
+            "-std=c17",
+            "-Xclang",
+            "-ast-dump=json",
+            "-fsyntax-only",
+            str(header),
+        ]
+    )
     output.write_text(run_checked(command).stdout)
 
 
@@ -601,7 +694,7 @@ include = [{include}]
 def check_header(
     header_path: Path,
     include_dir: Path,
-    clang: str,
+    clang: Clang,
     generated: Declarations,
     rust_export_names: Set[str],
     generated_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
@@ -618,7 +711,7 @@ def check_header(
 
 
 def prepare_generated(
-    repo: Path, cbindgen: str, clang: str, work: Path
+    repo: Path, cbindgen: str, clang: Clang, work: Path
 ) -> Tuple[Declarations, Dict[int, Tuple[int, int, Dict[str, int]]]]:
     header_path = repo / "include" / "lancedb.h"
     generated_path = work / "generated.h"
@@ -640,25 +733,86 @@ def mutate_signature(text: str) -> str:
 
 
 def mutate_layout(text: str) -> str:
-    return re.sub(r"(\n\s*)size_t\s+(p25|p50)\s*;", r"\1uint32_t \2;", text, count=2)
+    # Keep the field type unchanged and move only the following offsets.
+    return text.replace("    size_t p25;", "    _Alignas(16) size_t p25;", 1)
+
+
+def mutate_enum_name(text: str) -> str:
+    return text.replace("LANCEDB_DISTANCE_L2 = 0,", "LANCEDB_DISTANCE_L2_RENAMED = 0,", 1)
+
+
+def mutate_wrong_enum(text: str) -> str:
+    return text.replace(
+        "    LanceDBDistanceType distance_type; // Distance metric",
+        "    LanceDBError distance_type; // Distance metric",
+        1,
+    )
+
+
+def mutate_create_index_enum(text: str) -> str:
+    return text.replace(
+        """    size_t num_columns,
+    LanceDBIndexType index_type,
+    const LanceDBIndexOptions* options,""",
+        """    size_t num_columns,
+    LanceDBError index_type,
+    const LanceDBIndexOptions* options,""",
+        1,
+    )
+
+
+def mutate_long_return(text: str) -> str:
+    pattern = re.compile(
+        r"\bunsigned long long(?=\s+lancedb_table_(?:count_rows|version)\s*\()"
+    )
+    mutated, count = pattern.subn("unsigned long", text)
+    return mutated if count == 2 else text
 
 
 def run_self_test(
     repo: Path,
     header_path: Path,
-    clang: str,
+    clang: Clang,
     generated: Declarations,
     rust_export_names: Set[str],
     generated_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
     work: Path,
 ) -> List[str]:
     original = header_path.read_text()
+    long_return_changes_abi = TARGET_SIZES.get("long") != TARGET_SIZES.get("long long")
     fixtures = [
-        ("signature", mutate_signature, "function lancedb_connect argument 1"),
-        ("layout", mutate_layout, "struct LanceDBFragmentSummaryStats"),
+        ("signature", mutate_signature, "function lancedb_connect argument 1", True),
+        (
+            "layout",
+            mutate_layout,
+            "struct LanceDBFragmentSummaryStats field p50: offset differs",
+            True,
+        ),
+        ("enum_name", mutate_enum_name, "enum LanceDBDistanceType", True),
+        (
+            "wrong_enum",
+            mutate_wrong_enum,
+            "struct LanceDBVectorIndexConfig field distance_type",
+            True,
+        ),
+        (
+            "long_return",
+            mutate_long_return,
+            "function lancedb_table_count_rows return",
+            long_return_changes_abi,
+        ),
     ]
+    if "lancedb_table_create_index(" in original:
+        fixtures.append(
+            (
+                "wrong_create_index_enum",
+                mutate_create_index_enum,
+                "function lancedb_table_create_index argument 4",
+                True,
+            )
+        )
     failures: List[str] = []
-    for name, mutate, expected in fixtures:
+    for name, mutate, expected, should_detect in fixtures:
         mutated = mutate(original)
         if mutated == original:
             failures.append("self-test {} fixture did not match the current header".format(name))
@@ -675,11 +829,32 @@ def run_self_test(
             work,
             name,
         )
-        if not any(expected in error for error in errors):
+        detected = bool(errors)
+        if detected != should_detect:
             failures.append(
-                "self-test {} fixture was not detected as expected; errors: {}".format(name, errors)
+                "self-test {} fixture detection was {}; expected {}; errors: {}".format(
+                    name, detected, should_detect, errors
+                )
+            )
+            continue
+        if should_detect and not any(expected in error for error in errors):
+            failures.append(
+                "self-test {} fixture was not reported as {}; errors: {}".format(
+                    name, expected, errors
+                )
             )
     return failures
+
+
+def target_stub_dir(work: Path) -> Path:
+    path = work / "target-include"
+    path.mkdir()
+    # cbindgen's include block asks for stdlib.h, but the generated
+    # declarations do not use it. Keep the target check free of host headers.
+    (path / "stdlib.h").write_text(
+        "/* cbindgen includes this header but the declarations do not use it. */\n"
+    )
+    return path
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -698,9 +873,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--cbindgen", default=shutil.which("cbindgen"))
     parser.add_argument("--clang", default=shutil.which("clang"))
     parser.add_argument(
+        "--target",
+        help="Clang target triple; the default checks the host data model",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
-        help="also check that temporary signature and layout drift fixtures are detected",
+        help="also check that temporary signature, layout and enum drift fixtures are detected",
     )
     args = parser.parse_args(argv)
 
@@ -729,16 +908,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("error: clang not found; the declaration check uses clang's AST", file=sys.stderr)
         return 2
 
-    global TARGET_SIZES
-    TARGET_SIZES = target_sizes(args.clang)
     with tempfile.TemporaryDirectory(prefix="lancedb-c-abi-") as directory:
         work = Path(directory)
-        generated, generated_layouts = prepare_generated(repo, args.cbindgen, args.clang, work)
+        stub = target_stub_dir(work) if args.target else None
+        clang = Clang(args.clang, args.target, stub)
+        global TARGET_SIZES
+        TARGET_SIZES = target_sizes(clang)
+        generated, generated_layouts = prepare_generated(repo, args.cbindgen, clang, work)
         rust_export_names = rust_exports(repo)
         errors = check_header(
             header_path,
             repo / "include",
-            args.clang,
+            clang,
             generated,
             rust_export_names,
             generated_layouts,
@@ -754,7 +935,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             failures = run_self_test(
                 repo,
                 header_path,
-                args.clang,
+                clang,
                 generated,
                 rust_export_names,
                 generated_layouts,
@@ -765,11 +946,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for failure in failures:
                     print("  " + failure, file=sys.stderr)
                 return 1
-            print("C ABI drift fixtures detected: signature and layout")
+            print("C ABI drift fixtures detected for {}".format(clang.target or "host"))
 
     print(
-        "C ABI declarations match: {} extern functions, {} public structs, {} shared enums".format(
-            len(generated.functions), len(generated.structs), len(generated.enums)
+        "C ABI declarations match for {}: {} extern functions, {} public structs, {} shared enums".format(
+            clang.target or "host",
+            len(generated.functions),
+            len(generated.structs),
+            len(generated.enums),
         )
     )
     return 0

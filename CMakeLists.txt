@@ -851,6 +851,11 @@ add_custom_target(check-abi
     ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/check_abi.py
     --repo ${CMAKE_CURRENT_SOURCE_DIR}
     --self-test
+  COMMAND ${PYTHON3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/check_abi.py
+    --repo ${CMAKE_CURRENT_SOURCE_DIR}
+    --target x86_64-pc-windows-msvc
+    --self-test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Checking public C declarations against the Rust FFI..."
   VERBATIM

@@ -146,8 +146,12 @@ cargo install cbindgen --version =0.29.4 --locked
 ninja -C build check-abi
 ```
 
-The check also runs temporary signature and layout drift fixtures to show that
-a mismatch is reported with the affected function, argument or struct field.
+The check compares the host data model and the Windows MSVC LLP64 model using
+Clang target headers; it does not build a Windows Rust library. It also runs
+temporary signature, layout and enum drift fixtures to show that a mismatch is
+reported with the affected function, argument, struct field or enumerator.
+Native C17 consumers remain platform runtime smoke tests rather than full
+declaration coverage, and MSVC C17 CI is owned by #107.
 
 ### Code Coverage
 
