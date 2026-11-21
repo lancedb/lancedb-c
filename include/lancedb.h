@@ -1339,6 +1339,33 @@ LanceDBError lancedb_query_where_filter(
 );
 
 /**
+ * Set full-text search for query
+ *
+ * LanceDB applies the filter and projection in the same query and adds its
+ * score column. If no limit is set, LanceDB's default top-K applies.
+ *
+ * If `column` is NULL or empty, LanceDB discovers the text columns itself and
+ * searches every column that has a full-text index. An explicit column selects
+ * that text column; embedded LanceDB can also scan it without an index, while
+ * an index is recommended for larger tables.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param text - full-text query string
+ * @param column - text column name, or NULL/empty for automatic discovery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_full_text_search(
+    LanceDBQuery* query,
+    const char* text,
+    const char* column,
+    char** error_message
+);
+
+/**
  * Set DataFusion Expr filter for query
  *
  * If both a DataFusion and a SQL WHERE clause filters are set, the DataFusion expression
@@ -1442,6 +1469,38 @@ LanceDBError lancedb_vector_query_select(
 LanceDBError lancedb_vector_query_where_filter(
     LanceDBVectorQuery* query,
     const char* filter,
+    char** error_message
+);
+
+/**
+ * Set full-text search for vector query
+ *
+ * This turns the vector query into a hybrid nearest-neighbour plus full-text
+ * search. Embedded LanceDB executes it as two searches and fuses the result
+ * sets. LanceDB applies the vector, filter, projection and limit settings to
+ * both searches and adds its relevance score column.
+ *
+ * If `column` is NULL or empty, LanceDB discovers the text columns itself and
+ * searches every column that has a full-text index. An explicit column selects
+ * that text column; embedded LanceDB can also scan it without an index, while
+ * an index is recommended for larger tables.
+ *
+ * Embedded LanceDB does not support lancedb_vector_query_explain_plan() for a
+ * query with both nearest and full-text search. Execute the query instead.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param text - full-text query string
+ * @param column - text column name, or NULL/empty for automatic discovery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_full_text_search(
+    LanceDBVectorQuery* query,
+    const char* text,
+    const char* column,
     char** error_message
 );
 
@@ -1654,6 +1713,10 @@ LanceDBError lancedb_query_explain_plan(
  * Returns a human-readable string describing what steps will be taken
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
+ *
+ * Embedded LanceDB rejects a plan for a query that has both nearest and
+ * full-text search because one scanner cannot combine them. Execution of the
+ * same hybrid query is supported.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
  * @param verbose - if true, include additional detail in the plan
@@ -2256,6 +2319,71 @@ LanceDBError lancedb_table_index_stats(
     LanceDBIndexStats* stats_out,
     char** error_message
 );
+
+/**
+ * Statistics of a single index, as reported by the Rust SDK
+ *
+ * The strings are borrowed from the result and are read-only: do not modify them,
+ * write through them or free them individually. They stay valid until the result is
+ * released with lancedb_free_index_statistics(), and the whole result must be treated
+ * as read-only.
+ *
+ * The values the SDK reports as optional keep their presence: distance_type is NULL
+ * when the SDK reports no distance metric, and has_num_indices tells whether
+ * num_indices was reported. index_type is the SDK type name, for example "IVF_PQ",
+ * "BTREE" or "FTS".
+ */
+typedef struct {
+    size_t num_indexed_rows;    // Rows covered by the index
+    size_t num_unindexed_rows;  // Rows not covered by the index yet
+    const char* index_type;     // SDK index type name, borrowed from the result
+    const char* distance_type;  // SDK distance metric name, borrowed from the result (NULL if none)
+    unsigned int num_indices;   // Number of parts; valid only when has_num_indices is true
+    bool has_num_indices;       // Whether the SDK reported the number of parts
+} LanceDBIndexStatistics;
+
+/**
+ * Get the statistics the Rust SDK reports for a named index
+ *
+ * Unlike lancedb_table_index_stats(), which returns only the row counts, this entry
+ * point returns the complete SDK result with its optional values.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param index_name - null-terminated C string containing the index name
+ * @param stats_out - pointer to receive the read-only statistics, or NULL when the
+ *                    index does not exist
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS when the statistics were read, including when the index
+ *         does not exist, other error codes on failure
+ *
+ * On success, *stats_out is NULL when the index does not exist and points to the
+ * read-only result otherwise, so a missing index is not an error. On failure, *stats_out
+ * is NULL as well, and error_message carries the reason when requested.
+ *
+ * The result and the strings it borrows are owned by the library. Do not modify the
+ * result, write through the strings or free them individually; release the whole result
+ * with lancedb_free_index_statistics() once it is no longer used, and release it only
+ * once.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_index_statistics(
+    const LanceDBTable* table,
+    const char* index_name,
+    const LanceDBIndexStatistics** stats_out,
+    char** error_message
+);
+
+/**
+ * Release the statistics returned by lancedb_table_index_statistics
+ *
+ * @param stats - statistics returned by lancedb_table_index_statistics
+ *
+ * The result and the strings it borrows become invalid. Do not free the strings
+ * individually and do not release the same result twice.
+ * Safe to call with a NULL pointer.
+ */
+void lancedb_free_index_statistics(const LanceDBIndexStatistics* stats);
 
 /**
  * Free Arrow arrays returned by vector search functions
