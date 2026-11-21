@@ -625,6 +625,7 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
     }
 
     let query_ref = &*query;
+    let postfilter = query_ref.postfilter;
     let runtime = get_runtime();
 
     match runtime.block_on(async {
@@ -664,7 +665,7 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         if let Some(ef) = query_ref.ef {
             rust_query = rust_query.ef(ef);
         }
-        if query_ref.postfilter {
+        if postfilter {
             rust_query = rust_query.postfilter();
         }
 

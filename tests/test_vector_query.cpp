@@ -897,7 +897,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - post-filter after vecto
 
     char* error_message = nullptr;
     REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
-    REQUIRE(lancedb_vector_query_where_filter(query, "key = \"key_99\"", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_99'", &error_message) == LANCEDB_SUCCESS);
     REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -911,7 +911,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - post-filter after vecto
 
     char* error_message = nullptr;
     REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
-    REQUIRE(lancedb_vector_query_where_filter(query, "key = \"key_99\"", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_99'", &error_message) == LANCEDB_SUCCESS);
     REQUIRE(lancedb_vector_query_postfilter(query, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
