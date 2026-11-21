@@ -8,6 +8,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
+use std::time::Duration;
 
 use lancedb::index::scalar::{
     BTreeIndexBuilder, BitmapIndexBuilder, FtsIndexBuilder, LabelListIndexBuilder,
@@ -19,7 +20,8 @@ use lancedb::index::Index;
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+    handle_error, set_custom_error_message, set_invalid_argument_message,
+    set_unknown_error_message, LanceDBError,
 };
 use crate::types::LanceDBDistanceType;
 
@@ -102,6 +104,387 @@ impl Default for LanceDBFtsIndexConfig {
             ascii_folding: 0,
             replace: 1,
         }
+    }
+}
+
+/// Options for creating any supported index through `lancedb_table_create_index`
+///
+/// The SDK defaults are left in place for every field set to -1 (or a null
+/// string). A value of 0 is an explicit zero, not an omitted parameter. Boolean
+/// fields use -1 for unset, 0 for false and 1 for true.
+#[repr(C)]
+#[derive(Clone)]
+pub struct LanceDBIndexOptions {
+    pub name: *const c_char,
+    pub replace: c_int,
+    pub wait_timeout_ms: u64,
+
+    // IVF tuning
+    pub num_partitions: i64,
+    pub sample_rate: i64,
+    pub max_iterations: i64,
+    pub target_partition_size: i64,
+
+    // PQ tuning
+    pub num_sub_vectors: i64,
+    pub num_bits: i64,
+
+    // HNSW tuning
+    pub m: i64,
+    pub ef_construction: i64,
+
+    // Vector distance metric
+    pub distance_type: c_int,
+
+    // FTS tuning
+    pub fts_base_tokenizer: *const c_char,
+    pub fts_language: *const c_char,
+    pub fts_max_token_length: i64,
+    pub fts_lower_case: c_int,
+    pub fts_stem: c_int,
+    pub fts_remove_stop_words: c_int,
+    pub fts_ascii_folding: c_int,
+    pub fts_with_position: c_int,
+    pub fts_ngram_min_length: i64,
+    pub fts_ngram_max_length: i64,
+    pub fts_ngram_prefix_only: c_int,
+}
+
+impl Default for LanceDBIndexOptions {
+    fn default() -> Self {
+        Self {
+            name: ptr::null(),
+            replace: -1,
+            wait_timeout_ms: 0,
+            num_partitions: -1,
+            sample_rate: -1,
+            max_iterations: -1,
+            target_partition_size: -1,
+            num_sub_vectors: -1,
+            num_bits: -1,
+            m: -1,
+            ef_construction: -1,
+            distance_type: -1,
+            fts_base_tokenizer: ptr::null(),
+            fts_language: ptr::null(),
+            fts_max_token_length: -1,
+            fts_lower_case: -1,
+            fts_stem: -1,
+            fts_remove_stop_words: -1,
+            fts_ascii_folding: -1,
+            fts_with_position: -1,
+            fts_ngram_min_length: -1,
+            fts_ngram_max_length: -1,
+            fts_ngram_prefix_only: -1,
+        }
+    }
+}
+
+/// Return the default index creation options
+///
+/// Every optional field is unset and the SDK defaults apply.
+#[no_mangle]
+pub extern "C" fn lancedb_index_options_default() -> LanceDBIndexOptions {
+    LanceDBIndexOptions::default()
+}
+
+/// Convert a raw C index type value, rejecting anything outside the public header
+fn index_type_from_c_int(value: c_int) -> Option<LanceDBIndexType> {
+    match value {
+        0 => Some(LanceDBIndexType::Auto),
+        1 => Some(LanceDBIndexType::BTree),
+        2 => Some(LanceDBIndexType::Bitmap),
+        3 => Some(LanceDBIndexType::LabelList),
+        4 => Some(LanceDBIndexType::FTS),
+        5 => Some(LanceDBIndexType::IvfFlat),
+        6 => Some(LanceDBIndexType::IvfPq),
+        7 => Some(LanceDBIndexType::IvfHnswPq),
+        8 => Some(LanceDBIndexType::IvfHnswSq),
+        _ => None,
+    }
+}
+
+/// Convert a raw C distance type value, rejecting anything outside the public header
+fn distance_type_from_c_int(value: c_int) -> Result<Option<LanceDBDistanceType>, String> {
+    match value {
+        -1 => Ok(None),
+        0 => Ok(Some(LanceDBDistanceType::L2)),
+        1 => Ok(Some(LanceDBDistanceType::Cosine)),
+        2 => Ok(Some(LanceDBDistanceType::Dot)),
+        3 => Ok(Some(LanceDBDistanceType::Hamming)),
+        _ => Err(format!(
+            "distance_type must be -1 to leave it unset or a LanceDBDistanceType value, got {value}"
+        )),
+    }
+}
+
+fn optional_u32(value: i64, field: &str) -> Result<Option<u32>, String> {
+    if value == -1 {
+        return Ok(None);
+    }
+    if value < 0 || value > u32::MAX as i64 {
+        return Err(format!(
+            "{field} must be -1 to leave it unset or between 0 and {}, got {value}",
+            u32::MAX
+        ));
+    }
+    Ok(Some(value as u32))
+}
+
+fn optional_bool(value: c_int, field: &str) -> Result<Option<bool>, String> {
+    match value {
+        -1 => Ok(None),
+        0 => Ok(Some(false)),
+        1 => Ok(Some(true)),
+        _ => Err(format!(
+            "{field} must be -1 to leave it unset, 0 for false or 1 for true, got {value}"
+        )),
+    }
+}
+
+/// Read a borrowed C string, leaving a null pointer unset
+///
+/// # Safety
+/// `value` must be null or point to a valid null-terminated C string
+unsafe fn optional_string(value: *const c_char, field: &str) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    match CStr::from_ptr(value).to_str() {
+        Ok(value) => Ok(Some(value.to_string())),
+        Err(_) => Err(format!("{field} must be valid UTF-8")),
+    }
+}
+
+/// Build the SDK index represented by the options
+///
+/// Fields that do not apply to `index_type` are ignored, matching the SDK
+/// builders that do not have those setters.
+///
+/// # Safety
+/// The string fields in `options` must be null or valid C strings
+unsafe fn build_index_from_options(
+    index_type: LanceDBIndexType,
+    options: &LanceDBIndexOptions,
+) -> Result<Index, String> {
+    macro_rules! apply_ivf_options {
+        ($builder:expr) => {{
+            let mut builder = $builder;
+            if let Some(value) = optional_u32(options.num_partitions, "num_partitions")? {
+                builder = builder.num_partitions(value);
+            }
+            if let Some(value) = optional_u32(options.sample_rate, "sample_rate")? {
+                builder = builder.sample_rate(value);
+            }
+            if let Some(value) = optional_u32(options.max_iterations, "max_iterations")? {
+                builder = builder.max_iterations(value);
+            }
+            if let Some(value) =
+                optional_u32(options.target_partition_size, "target_partition_size")?
+            {
+                builder = builder.target_partition_size(value);
+            }
+            if let Some(distance_type) = distance_type_from_c_int(options.distance_type)? {
+                builder = builder.distance_type(distance_type.into());
+            }
+            builder
+        }};
+    }
+
+    match index_type {
+        LanceDBIndexType::Auto => Ok(Index::Auto),
+        LanceDBIndexType::IvfFlat => Ok(Index::IvfFlat(apply_ivf_options!(
+            IvfFlatIndexBuilder::default()
+        ))),
+        LanceDBIndexType::IvfPq => {
+            let mut builder = apply_ivf_options!(IvfPqIndexBuilder::default());
+            if let Some(value) = optional_u32(options.num_sub_vectors, "num_sub_vectors")? {
+                builder = builder.num_sub_vectors(value);
+            }
+            if let Some(value) = optional_u32(options.num_bits, "num_bits")? {
+                builder = builder.num_bits(value);
+            }
+            Ok(Index::IvfPq(builder))
+        }
+        LanceDBIndexType::IvfHnswPq => {
+            let mut builder = apply_ivf_options!(IvfHnswPqIndexBuilder::default());
+            if let Some(value) = optional_u32(options.m, "m")? {
+                builder = builder.num_edges(value);
+            }
+            if let Some(value) = optional_u32(options.ef_construction, "ef_construction")? {
+                builder = builder.ef_construction(value);
+            }
+            if let Some(value) = optional_u32(options.num_sub_vectors, "num_sub_vectors")? {
+                builder = builder.num_sub_vectors(value);
+            }
+            if let Some(value) = optional_u32(options.num_bits, "num_bits")? {
+                builder = builder.num_bits(value);
+            }
+            Ok(Index::IvfHnswPq(builder))
+        }
+        LanceDBIndexType::IvfHnswSq => {
+            let mut builder = apply_ivf_options!(IvfHnswSqIndexBuilder::default());
+            if let Some(value) = optional_u32(options.m, "m")? {
+                builder = builder.num_edges(value);
+            }
+            if let Some(value) = optional_u32(options.ef_construction, "ef_construction")? {
+                builder = builder.ef_construction(value);
+            }
+            Ok(Index::IvfHnswSq(builder))
+        }
+        LanceDBIndexType::BTree => Ok(Index::BTree(BTreeIndexBuilder::default())),
+        LanceDBIndexType::Bitmap => Ok(Index::Bitmap(BitmapIndexBuilder::default())),
+        LanceDBIndexType::LabelList => Ok(Index::LabelList(LabelListIndexBuilder::default())),
+        LanceDBIndexType::FTS => {
+            let mut builder = FtsIndexBuilder::default();
+            if let Some(value) = optional_string(options.fts_base_tokenizer, "fts_base_tokenizer")?
+            {
+                builder = builder.base_tokenizer(value);
+            }
+            if let Some(value) = optional_string(options.fts_language, "fts_language")? {
+                builder = builder
+                    .language(&value)
+                    .map_err(|error| format!("Invalid FTS language: {error}"))?;
+            }
+            if let Some(value) = optional_u32(options.fts_max_token_length, "fts_max_token_length")?
+            {
+                builder = builder.max_token_length(Some(value as usize));
+            }
+            if let Some(value) = optional_bool(options.fts_lower_case, "fts_lower_case")? {
+                builder = builder.lower_case(value);
+            }
+            if let Some(value) = optional_bool(options.fts_stem, "fts_stem")? {
+                builder = builder.stem(value);
+            }
+            if let Some(value) =
+                optional_bool(options.fts_remove_stop_words, "fts_remove_stop_words")?
+            {
+                builder = builder.remove_stop_words(value);
+            }
+            if let Some(value) = optional_bool(options.fts_ascii_folding, "fts_ascii_folding")? {
+                builder = builder.ascii_folding(value);
+            }
+            if let Some(value) = optional_bool(options.fts_with_position, "fts_with_position")? {
+                builder = builder.with_position(value);
+            }
+            if let Some(value) = optional_u32(options.fts_ngram_min_length, "fts_ngram_min_length")?
+            {
+                builder = builder.ngram_min_length(value);
+            }
+            if let Some(value) = optional_u32(options.fts_ngram_max_length, "fts_ngram_max_length")?
+            {
+                builder = builder.ngram_max_length(value);
+            }
+            if let Some(value) =
+                optional_bool(options.fts_ngram_prefix_only, "fts_ngram_prefix_only")?
+            {
+                builder = builder.ngram_prefix_only(value);
+            }
+            Ok(Index::FTS(builder))
+        }
+        _ => Err(format!(
+            "Index type {index_type:?} cannot be created through lancedb_table_create_index"
+        )),
+    }
+}
+
+/// Create an index with a custom name, replace choice, creation wait and
+/// per-type tuning parameters
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` must be an array of valid null-terminated C strings
+/// - `num_columns` must match the actual number of columns in the array
+/// - `options` can be NULL for the SDK defaults
+/// - String fields in `options` are borrowed for the duration of the call
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_create_index(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    num_columns: usize,
+    index_type: c_int,
+    options: *const LanceDBIndexOptions,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || columns.is_null() || num_columns == 0 {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(index_type) = index_type_from_c_int(index_type) else {
+        set_custom_error_message(error_message, "index_type is not a LanceDBIndexType value");
+        return LanceDBError::InvalidArgument;
+    };
+
+    let mut column_names = Vec::with_capacity(num_columns);
+    for i in 0..num_columns {
+        let column_ptr = *columns.add(i);
+        if column_ptr.is_null() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+        match CStr::from_ptr(column_ptr).to_str() {
+            Ok(column) => column_names.push(column.to_string()),
+            Err(_) => {
+                set_custom_error_message(error_message, "columns must be valid UTF-8");
+                return LanceDBError::InvalidArgument;
+            }
+        }
+    }
+
+    let options = if options.is_null() {
+        LanceDBIndexOptions::default()
+    } else {
+        (*options).clone()
+    };
+
+    let name = match optional_string(options.name, "name") {
+        Ok(Some(name)) if !name.is_empty() => Some(name),
+        Ok(_) => None,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+    let replace = match optional_bool(options.replace, "replace") {
+        Ok(replace) => replace,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+    let index = match build_index_from_options(index_type, &options) {
+        Ok(index) => index,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    let outcome = runtime.block_on(async {
+        let mut builder = tbl.create_index(&column_names, index);
+        if let Some(name) = name {
+            builder = builder.name(name);
+        }
+        if let Some(replace) = replace {
+            builder = builder.replace(replace);
+        }
+        if options.wait_timeout_ms > 0 {
+            builder = builder.wait_timeout(Duration::from_millis(options.wait_timeout_ms));
+        }
+        builder.execute().await
+    });
+
+    match outcome {
+        Ok(()) => LanceDBError::Success,
+        Err(error) => handle_error(&error, error_message),
     }
 }
 

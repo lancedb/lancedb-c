@@ -261,6 +261,54 @@ typedef struct {
 } LanceDBFtsIndexConfig;
 
 /**
+ * Options for lancedb_table_create_index()
+ *
+ * Initialize with lancedb_index_options_default() so every optional field stays
+ * unset instead of becoming an explicit zero or false. Numeric tuning fields use
+ * -1 for unset; 0 and positive values are forwarded to the SDK. Boolean tuning
+ * fields use -1 for unset, 0 for false and 1 for true. distance_type uses -1 for
+ * unset and otherwise takes a LanceDBDistanceType value.
+ *
+ * Fields that do not apply to the selected index type are ignored. Strings are
+ * borrowed for the duration of the call.
+ */
+typedef struct {
+    const char* name;              // NULL or "" uses the SDK-chosen index name
+    int replace;                   // -1 = SDK default (true); 0 = false; 1 = true
+    uint64_t wait_timeout_ms;      // 0 = do not wait; positive = SDK polling budget
+
+    // IVF tuning
+    int64_t num_partitions;        // -1 = SDK default
+    int64_t sample_rate;           // -1 = SDK default
+    int64_t max_iterations;        // -1 = SDK default
+    int64_t target_partition_size; // -1 = SDK default
+
+    // PQ tuning
+    int64_t num_sub_vectors;       // -1 = SDK default
+    int64_t num_bits;              // -1 = SDK default
+
+    // HNSW tuning
+    int64_t m;                     // -1 = SDK default
+    int64_t ef_construction;       // -1 = SDK default
+
+    // Vector distance metric
+    int distance_type;             // -1 = SDK default; otherwise LanceDBDistanceType
+
+    // FTS tuning
+    const char* fts_base_tokenizer;
+    const char* fts_language;
+    int64_t fts_max_token_length;  // -1 = SDK default
+    int fts_lower_case;            // -1 = SDK default; 0 = false; 1 = true
+    int fts_stem;                  // -1 = SDK default; 0 = false; 1 = true
+    int fts_remove_stop_words;     // -1 = SDK default; 0 = false; 1 = true
+    int fts_ascii_folding;         // -1 = SDK default; 0 = false; 1 = true
+    int fts_with_position;         // -1 = SDK default; 0 = false; 1 = true
+    int64_t fts_ngram_min_length;  // -1 = SDK default
+    int64_t fts_ngram_max_length;  // -1 = SDK default
+    int fts_ngram_prefix_only;     // -1 = SDK default; 0 = false; 1 = true
+} LanceDBIndexOptions;
+
+/**
  * Merge insert configuration
  *
  * The conditions restricting which matched records are updated are only used when
@@ -1644,6 +1692,52 @@ LanceDBError lancedb_table_create_fts_index(
     const char* const* columns,
     size_t num_columns,
     const LanceDBFtsIndexConfig* config,
+    char** error_message
+);
+
+/**
+ * Return the default index creation options
+ *
+ * Every optional field is unset, so the SDK defaults apply.
+ */
+LanceDBIndexOptions lancedb_index_options_default(void);
+
+/**
+ * Create any supported index with a custom name, replace choice, creation wait
+ * and per-type tuning parameters
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns - array of null-terminated C strings containing column names
+ * @param num_columns - number of columns in the array
+ * @param index_type - LanceDBIndexType value selecting the index kind
+ * @param options - pointer to LanceDBIndexOptions or NULL for the SDK defaults
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The index type selects which tuning fields are used: IVF types use the IVF
+ * fields, PQ and HNSW types use their additional fields, FTS uses the fts_*
+ * fields, and scalar types use only name, replace and wait_timeout_ms. A NULL
+ * options pointer behaves like lancedb_index_options_default().
+ * LANCEDB_INDEX_AUTO passes the SDK's Auto index through; it is not remapped to
+ * a concrete index type.
+ *
+ * wait_timeout_ms is forwarded to the SDK's IndexBuilder::wait_timeout and is a
+ * polling budget, not a wall-clock guarantee. Native tables build synchronously
+ * and ignore it; remote backends use it. It does not wait for rows added after
+ * the index was created.
+ *
+ * Values outside the documented ranges, invalid UTF-8, unsupported index types
+ * and SDK errors are returned through error_message when provided.
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_create_index(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    LanceDBIndexType index_type,
+    const LanceDBIndexOptions* options,
     char** error_message
 );
 
