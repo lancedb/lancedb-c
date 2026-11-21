@@ -1038,6 +1038,411 @@ pub unsafe extern "C" fn lancedb_free_version_metadata(
     }
 }
 
+/* ========== TABLE HISTORY OPERATIONS ========== */
+
+/// C-compatible tag information struct
+///
+/// The array and its strings are read-only to C callers and owned by the
+/// library. Free them with `lancedb_free_tags`.
+#[repr(C)]
+pub struct LanceDBTag {
+    pub name: *const c_char,
+    pub version: u64,
+    pub manifest_size: u64,
+    pub branch: *const c_char,
+}
+
+/// Check out a specific version of the table
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_checkout(
+    table: *const LanceDBTable,
+    version: u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move { tbl.checkout(version).await }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Check out the version referenced by a tag
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `tag` must be a valid null-terminated C string
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_checkout_tag(
+    table: *const LanceDBTable,
+    tag: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || tag.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(tag_str) = CStr::from_ptr(tag).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let tag = tag_str.to_string();
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move { tbl.checkout_tag(&tag).await }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Return the table to the latest version
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_checkout_latest(
+    table: *const LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move { tbl.checkout_latest().await }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Restore the table to the currently checked out version
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_restore(
+    table: *const LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move { tbl.restore().await }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// List all tags of the table
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `tags_out` must be a valid pointer to receive the read-only array of LanceDBTag structs
+/// - `count_out` must be a valid pointer to receive the count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_list_tags(
+    table: *const LanceDBTable,
+    tags_out: *mut *const LanceDBTag,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || tags_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    let tags = match runtime.block_on(async move {
+        let tags = tbl.tags().await?;
+        tags.list().await
+    }) {
+        Ok(tags) => tags,
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    // Convert everything before allocating so that a string conversion failure
+    // cannot leave a partially initialized array behind.
+    let mut entries: Vec<(CString, u64, u64, Option<CString>)> = Vec::with_capacity(tags.len());
+    for (name, contents) in tags {
+        let Ok(name) = CString::new(name) else {
+            set_unknown_error_message(error_message);
+            return LanceDBError::Unknown;
+        };
+        let branch = match contents.branch {
+            Some(branch) => match CString::new(branch) {
+                Ok(branch) => Some(branch),
+                Err(_) => {
+                    set_unknown_error_message(error_message);
+                    return LanceDBError::Unknown;
+                }
+            },
+            None => None,
+        };
+        entries.push((
+            name,
+            contents.version,
+            contents.manifest_size as u64,
+            branch,
+        ));
+    }
+
+    let count = entries.len();
+    if count == 0 {
+        *tags_out = ptr::null();
+        *count_out = 0;
+        return LanceDBError::Success;
+    }
+
+    let tags_array = libc::malloc(count * std::mem::size_of::<LanceDBTag>()) as *mut LanceDBTag;
+    if tags_array.is_null() {
+        set_unknown_error_message(error_message);
+        return LanceDBError::Unknown;
+    }
+
+    for (i, (name, version, manifest_size, branch)) in entries.into_iter().enumerate() {
+        let dest = &mut *tags_array.add(i);
+        dest.name = name.into_raw() as *const c_char;
+        dest.version = version;
+        dest.manifest_size = manifest_size;
+        dest.branch = match branch {
+            Some(branch) => branch.into_raw() as *const c_char,
+            None => ptr::null(),
+        };
+    }
+
+    *tags_out = tags_array as *const LanceDBTag;
+    *count_out = count;
+    LanceDBError::Success
+}
+
+/// Get the version referenced by a tag
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `tag` must be a valid null-terminated C string
+/// - `version_out` must be a valid pointer to receive the tag's version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_get_tag_version(
+    table: *const LanceDBTable,
+    tag: *const c_char,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || tag.is_null() || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(tag_str) = CStr::from_ptr(tag).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let tag = tag_str.to_string();
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move {
+        let tags = tbl.tags().await?;
+        tags.get_version(&tag).await
+    }) {
+        Ok(version) => {
+            *version_out = version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Create a tag for a table version
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `tag` must be a valid null-terminated C string
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_create_tag(
+    table: *const LanceDBTable,
+    tag: *const c_char,
+    version: u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || tag.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(tag_str) = CStr::from_ptr(tag).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let tag = tag_str.to_string();
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move {
+        let mut tags = tbl.tags().await?;
+        tags.create(&tag, version).await
+    }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Delete a tag from the table
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `tag` must be a valid null-terminated C string
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_delete_tag(
+    table: *const LanceDBTable,
+    tag: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || tag.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(tag_str) = CStr::from_ptr(tag).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let tag = tag_str.to_string();
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move {
+        let mut tags = tbl.tags().await?;
+        tags.delete(&tag).await
+    }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Update an existing tag to reference another table version
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `tag` must be a valid null-terminated C string
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_update_tag(
+    table: *const LanceDBTable,
+    tag: *const c_char,
+    version: u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || tag.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(tag_str) = CStr::from_ptr(tag).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let tag = tag_str.to_string();
+
+    let tbl = (*table).inner.clone();
+    let runtime = get_runtime();
+
+    match runtime.block_on(async move {
+        let mut tags = tbl.tags().await?;
+        tags.update(&tag, version).await
+    }) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Reclaim a tag string allocated by lancedb_table_list_tags
+unsafe fn free_tag_string(value: *const c_char) {
+    if !value.is_null() {
+        let _ = CString::from_raw(value as *mut c_char);
+    }
+}
+
+/// Free tag array returned by lancedb_table_list_tags
+///
+/// # Safety
+/// - `tags` must be a read-only pointer returned by `lancedb_table_list_tags`
+/// - `count` must match the count returned by `lancedb_table_list_tags`
+/// - Safe to call with NULL pointer
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_tags(tags: *const LanceDBTag, count: usize) {
+    if tags.is_null() {
+        return;
+    }
+
+    for i in 0..count {
+        let tag = &*tags.add(i);
+        free_tag_string(tag.name);
+        free_tag_string(tag.branch);
+    }
+    libc::free(tags as *mut libc::c_void);
+}
+
 /* ========== TABLE METADATA OPERATIONS ========== */
 
 /// Get table metadata as key-value pairs

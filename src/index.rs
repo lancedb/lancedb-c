@@ -642,6 +642,136 @@ pub unsafe extern "C" fn lancedb_free_index_list(indices: *mut *mut c_char, coun
     }
 }
 
+/// Information about one index on a table
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBIndexInfo {
+    name: *mut c_char,
+    columns: *mut *mut c_char,
+    num_columns: usize,
+    index_type: *mut c_char,
+}
+
+impl Drop for LanceDBIndexInfo {
+    fn drop(&mut self) {
+        unsafe {
+            drop(CString::from_raw(self.name));
+            for i in 0..self.num_columns {
+                drop(CString::from_raw(*self.columns.add(i)));
+            }
+            libc::free(self.columns as *mut libc::c_void);
+            drop(CString::from_raw(self.index_type));
+        }
+    }
+}
+
+/// Build one C index description from the SDK's index configuration
+///
+/// Temporary values stay owned by Rust until the complete C result can be
+/// constructed, so a conversion failure releases them automatically.
+unsafe fn index_info_from_sdk(index: lancedb::index::IndexConfig) -> Result<LanceDBIndexInfo, ()> {
+    let name = CString::new(index.name).map_err(|_| ())?;
+    let index_type = CString::new(index.index_type.to_string()).map_err(|_| ())?;
+    let columns = index
+        .columns
+        .into_iter()
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+
+    let num_columns = columns.len();
+    // Allocate at least one slot so a returned entry always has a freeable
+    // column array, even if the SDK reports no column names.
+    let column_ptrs =
+        libc::calloc(num_columns.max(1), std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+    if column_ptrs.is_null() {
+        return Err(());
+    }
+
+    for (i, column) in columns.into_iter().enumerate() {
+        *column_ptrs.add(i) = column.into_raw();
+    }
+
+    Ok(LanceDBIndexInfo {
+        name: name.into_raw(),
+        columns: column_ptrs,
+        num_columns,
+        index_type: index_type.into_raw(),
+    })
+}
+
+/// List every index on the table with its name, columns and SDK index type
+///
+/// The names-only lancedb_table_list_indices remains available for callers that
+/// only need the names.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `indices_out` must be a valid pointer to receive the array of index information
+/// - `count_out` must be a valid pointer to receive the count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_list_indices_info(
+    table: *const LanceDBTable,
+    indices_out: *mut *const LanceDBIndexInfo,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || indices_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    *indices_out = ptr::null();
+    *count_out = 0;
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.list_indices()) {
+        Ok(indices) => {
+            if indices.is_empty() {
+                return LanceDBError::Success;
+            }
+
+            let mut infos = Vec::with_capacity(indices.len());
+            for index in indices {
+                match index_info_from_sdk(index) {
+                    Ok(info) => infos.push(info),
+                    Err(_) => {
+                        set_unknown_error_message(error_message);
+                        return LanceDBError::Unknown;
+                    }
+                }
+            }
+
+            *count_out = infos.len();
+            *indices_out = Box::into_raw(infos.into_boxed_slice()) as *const LanceDBIndexInfo;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Free index information array returned by lancedb_table_list_indices_info
+///
+/// # Safety
+/// - `indices` must be a pointer returned by `lancedb_table_list_indices_info`
+/// - `count` must match the count returned by `lancedb_table_list_indices_info`
+/// - Safe to call with a NULL pointer
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_index_info(indices: *const LanceDBIndexInfo, count: usize) {
+    if indices.is_null() {
+        return;
+    }
+
+    let slice = std::ptr::slice_from_raw_parts_mut(indices as *mut LanceDBIndexInfo, count);
+    drop(Box::from_raw(slice));
+}
+
 /// Index statistics returned by lancedb_table_index_stats
 #[repr(C)]
 #[derive(Debug)]

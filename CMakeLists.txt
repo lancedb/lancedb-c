@@ -424,6 +424,7 @@ if(BUILD_TESTS)
     tests/test_main.cpp
     tests/test_common.cpp
     tests/test_index.cpp
+    tests/test_index_info.cpp
     tests/test_index_stats.cpp
   )
   target_link_libraries(lancedb_index_tests
