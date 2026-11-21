@@ -845,16 +845,60 @@ LanceDBError lancedb_table_arrow_schema(
  *
  * @param table - pointer to LanceDBTable
  * @return Table version number on success, 0 on failure
+ *
+ * A version is never 0 for a valid table, so 0 is a safe failure sentinel. Use
+ * lancedb_table_version_with_status() when the failure details are needed.
  */
 unsigned long long lancedb_table_version(const LanceDBTable* table);
+
+/**
+ * Get table version, preserving failures
+ *
+ * @param table - pointer to LanceDBTable
+ * @param version_out - pointer to receive the table version
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, version_out is set to the table version. On failure, version_out
+ * is left unchanged, so a caller can keep its own sentinel there.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_version_with_status(
+    const LanceDBTable* table,
+    uint64_t* version_out,
+    char** error_message
+);
 
 /**
  * Count rows in table
  *
  * @param table - pointer to LanceDBTable
  * @return Number of rows in table on success, 0 on failure (or empty table)
+ *
+ * Use lancedb_table_count_rows_with_status() when an empty table must be told
+ * apart from a failed call.
  */
 unsigned long long lancedb_table_count_rows(const LanceDBTable* table);
+
+/**
+ * Count rows in table, preserving failures
+ *
+ * @param table - pointer to LanceDBTable
+ * @param count_out - pointer to receive the row count
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, count_out is set to the number of rows, which is 0 for an empty
+ * table. On failure, count_out is left unchanged.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_count_rows_with_status(
+    const LanceDBTable* table,
+    size_t* count_out,
+    char** error_message
+);
 
 /**
  * Statistics on the number of rows in table fragments
@@ -1604,6 +1648,27 @@ LanceDBError lancedb_table_list_indices(
     const LanceDBTable* table,
     char*** indices_out,
     size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Prewarm a named index
+ *
+ * Loads the index into memory and caches it, so the first query does not pay
+ * for the load.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param index_name - null-terminated C string containing the index name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS if the index was prewarmed, LANCEDB_INDEX_NOT_FOUND if the
+ *         index does not exist, other error codes on failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_prewarm_index(
+    const LanceDBTable* table,
+    const char* index_name,
     char** error_message
 );
 

@@ -1369,6 +1369,48 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - explain plan", "[vector
     lancedb_vector_query_free(query);
   }
 
+  SECTION("Explain plan reflects a SQL filter") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_select(query, columns, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_42'", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_vector_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    // The filter literal only appears in the plan when the SQL predicate is applied.
+    REQUIRE(std::string(plan).find("key_42") != std::string::npos);
+    lancedb_free_string(plan);
+
+    lancedb_vector_query_free(query);
+  }
+
+  SECTION("Explain plan rejects a SQL filter on a missing column") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_where_filter(query, "unknown = 'value'", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_vector_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result != LANCEDB_SUCCESS);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_vector_query_free(query);
+  }
+
   SECTION("Explain plan rejects null arguments") {
     char* plan = nullptr;
     REQUIRE(lancedb_vector_query_explain_plan(nullptr, true, &plan, nullptr) == LANCEDB_INVALID_ARGUMENT);

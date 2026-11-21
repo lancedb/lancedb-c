@@ -76,6 +76,20 @@ If you prefer to build manually:
    ./examples/simple
    ```
 
+## Prebuilt Shared-Library Packages
+
+The `Shared Library Packages` workflow builds and tests six native targets:
+`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`,
+`windows-amd64` and `windows-arm64`. Each package is named
+`lancedb-c-<commit>-<target>.tar.gz` and contains the shared library, the
+public header, the license, the Windows import library when the platform needs
+one, and a `manifest.json` describing the paths. A `SHA256SUMS` file covers the
+package contents; the archive has a sibling `.sha256` file.
+
+These archives are currently CI artifacts, not published releases. The
+`target` names match Go's `GOOS-GOARCH` spelling and the manifest is the
+contract the future pure-Go loader will consume.
+
 ## Tests
 
 ### Prerequisites

@@ -507,6 +507,45 @@ pub unsafe extern "C" fn lancedb_table_list_indices(
     }
 }
 
+/// Prewarm a named index
+///
+/// Loads the index into memory and caches it, so the first query does not pay
+/// for the load.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `index_name` must be a valid null-terminated C string
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` if the index was prewarmed
+/// - `LANCEDB_INDEX_NOT_FOUND` if the index does not exist
+/// - Other error codes on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_prewarm_index(
+    table: *const LanceDBTable,
+    index_name: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || index_name.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(index_name_str) = CStr::from_ptr(index_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.prewarm_index(index_name_str)) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Drop an index
 ///
 /// # Safety

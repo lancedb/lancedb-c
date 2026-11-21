@@ -4,3 +4,7 @@ target
 
 # clang cache
 .cache
+
+# Python cache
+__pycache__/
+*.py[cod]
