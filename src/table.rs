@@ -927,12 +927,15 @@ pub unsafe extern "C" fn lancedb_free_version_metadata(
 /* ========== TABLE HISTORY OPERATIONS ========== */
 
 /// C-compatible tag information struct
+///
+/// The array and its strings are read-only to C callers and owned by the
+/// library. Free them with `lancedb_free_tags`.
 #[repr(C)]
 pub struct LanceDBTag {
-    pub name: *mut c_char,
+    pub name: *const c_char,
     pub version: u64,
     pub manifest_size: u64,
-    pub branch: *mut c_char,
+    pub branch: *const c_char,
 }
 
 /// Check out a specific version of the table
@@ -1056,7 +1059,7 @@ pub unsafe extern "C" fn lancedb_table_restore(
 ///
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
-/// - `tags_out` must be a valid pointer to receive the array of LanceDBTag structs
+/// - `tags_out` must be a valid pointer to receive the read-only array of LanceDBTag structs
 /// - `count_out` must be a valid pointer to receive the count
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
@@ -1065,7 +1068,7 @@ pub unsafe extern "C" fn lancedb_table_restore(
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_list_tags(
     table: *const LanceDBTable,
-    tags_out: *mut *mut LanceDBTag,
+    tags_out: *mut *const LanceDBTag,
     count_out: *mut usize,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
@@ -1113,7 +1116,7 @@ pub unsafe extern "C" fn lancedb_table_list_tags(
 
     let count = entries.len();
     if count == 0 {
-        *tags_out = ptr::null_mut();
+        *tags_out = ptr::null();
         *count_out = 0;
         return LanceDBError::Success;
     }
@@ -1126,16 +1129,16 @@ pub unsafe extern "C" fn lancedb_table_list_tags(
 
     for (i, (name, version, manifest_size, branch)) in entries.into_iter().enumerate() {
         let dest = &mut *tags_array.add(i);
-        dest.name = name.into_raw();
+        dest.name = name.into_raw() as *const c_char;
         dest.version = version;
         dest.manifest_size = manifest_size;
         dest.branch = match branch {
-            Some(branch) => branch.into_raw(),
-            None => ptr::null_mut(),
+            Some(branch) => branch.into_raw() as *const c_char,
+            None => ptr::null(),
         };
     }
 
-    *tags_out = tags_array;
+    *tags_out = tags_array as *const LanceDBTag;
     *count_out = count;
     LanceDBError::Success
 }
@@ -1299,26 +1302,29 @@ pub unsafe extern "C" fn lancedb_table_update_tag(
     }
 }
 
+/// Reclaim a tag string allocated by lancedb_table_list_tags
+unsafe fn free_tag_string(value: *const c_char) {
+    if !value.is_null() {
+        let _ = CString::from_raw(value as *mut c_char);
+    }
+}
+
 /// Free tag array returned by lancedb_table_list_tags
 ///
 /// # Safety
-/// - `tags` must be a pointer returned by `lancedb_table_list_tags`
+/// - `tags` must be a read-only pointer returned by `lancedb_table_list_tags`
 /// - `count` must match the count returned by `lancedb_table_list_tags`
 /// - Safe to call with NULL pointer
 #[no_mangle]
-pub unsafe extern "C" fn lancedb_free_tags(tags: *mut LanceDBTag, count: usize) {
+pub unsafe extern "C" fn lancedb_free_tags(tags: *const LanceDBTag, count: usize) {
     if tags.is_null() {
         return;
     }
 
     for i in 0..count {
-        let tag = &mut *tags.add(i);
-        if !tag.name.is_null() {
-            let _ = CString::from_raw(tag.name);
-        }
-        if !tag.branch.is_null() {
-            let _ = CString::from_raw(tag.branch);
-        }
+        let tag = &*tags.add(i);
+        free_tag_string(tag.name);
+        free_tag_string(tag.branch);
     }
     libc::free(tags as *mut libc::c_void);
 }

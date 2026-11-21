@@ -144,7 +144,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table History", "[table]") {
     REQUIRE(error_message == nullptr);
   };
 
-  auto find_tag = [](LanceDBTag* tags, size_t count, const std::string& name) -> const LanceDBTag* {
+  auto find_tag = [](const LanceDBTag* tags, size_t count, const std::string& name) -> const LanceDBTag* {
     for (size_t i = 0; i < count; i++) {
       if (tags[i].name != nullptr && name == tags[i].name) {
         return &tags[i];
@@ -256,7 +256,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table History", "[table]") {
     REQUIRE(table != nullptr);
     add_rows(table, 5, 10);
 
-    LanceDBTag* tags = nullptr;
+    const LanceDBTag* tags = nullptr;
     size_t count = 123;
     char* error_message = nullptr;
 
@@ -352,7 +352,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table History", "[table]") {
     REQUIRE(table != nullptr);
 
     const char invalid_utf8[] = {'\xff', '\0'};
-    LanceDBTag* tags = nullptr;
+    const LanceDBTag* tags = nullptr;
     size_t count = 7;
     uint64_t resolved_version = 42;
 

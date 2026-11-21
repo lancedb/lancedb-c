@@ -316,14 +316,15 @@ typedef struct {
 /**
  * Tag information for a table
  *
- * The tag name and branch strings are owned by the struct. Free the whole
- * array with lancedb_free_tags().
+ * The array and its strings are read-only and owned by the library. Callers
+ * must not modify or free them individually. The strings remain valid until
+ * lancedb_free_tags() is called with the same array and count.
  */
 typedef struct {
-    char* name;                  // Tag name
+    const char* name;            // Read-only tag name
     uint64_t version;            // Version referenced by the tag
     uint64_t manifest_size;      // Manifest size in bytes at the referenced version
-    char* branch;                // Optional branch name (NULL when the tag has no branch)
+    const char* branch;          // Read-only optional branch name (NULL when the tag has no branch)
 } LanceDBTag;
 
 /**
@@ -1888,20 +1889,22 @@ LanceDBError lancedb_table_restore(
  * List all tags of the table
  *
  * @param table - pointer to LanceDBTable
- * @param tags_out - pointer to receive the array of LanceDBTag structs
+ * @param tags_out - pointer to receive the read-only array of LanceDBTag structs
  * @param count_out - pointer to receive the number of tags
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * On success, tags_out points to an array of LanceDBTag structs and count_out
- * receives its length. An empty result sets tags_out to NULL and count_out to
- * zero. The caller must free the array with lancedb_free_tags().
+ * On success, tags_out points to a read-only array of LanceDBTag structs and
+ * count_out receives its length. An empty result sets tags_out to NULL and
+ * count_out to zero. The array and its strings are owned by the library and
+ * must not be modified or freed individually. Free the whole array with
+ * lancedb_free_tags() using the returned count.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_list_tags(
     const LanceDBTable* table,
-    LanceDBTag** tags_out,
+    const LanceDBTag** tags_out,
     size_t* count_out,
     char** error_message
 );
@@ -2083,12 +2086,14 @@ void lancedb_free_version_metadata(LanceDBVersionMetadata* metadata, size_t coun
 /**
  * Free tag array returned by lancedb_table_list_tags
  *
- * @param tags - array of LanceDBTag structs returned by lancedb_table_list_tags
- * @param count - number of entries in the array
+ * @param tags - read-only array of LanceDBTag structs returned by lancedb_table_list_tags
+ * @param count - number of entries, exactly as returned by lancedb_table_list_tags
  *
- * Safe to call with NULL pointer.
+ * The library owns the array and every string in it. Callers must not modify
+ * entries or free them individually, and must pass the count returned with the
+ * array. Safe to call with NULL pointer.
  */
-void lancedb_free_tags(LanceDBTag* tags, size_t count);
+void lancedb_free_tags(const LanceDBTag* tags, size_t count);
 
 /**
  * Free metadata arrays returned by lancedb_table_get_metadata
