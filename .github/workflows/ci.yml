@@ -135,10 +135,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 4
 
-      - name: Test C and C++ consumers
-        run: |
-          ctest --test-dir build -R "^lancedb_c17_consumer$" --output-on-failure --no-tests=error
-          ctest --test-dir build -R "^package_consumer$" --output-on-failure --no-tests=error
+      - name: Test C17 consumer
+        run: ctest --test-dir build -R "^lancedb_c17_consumer$" --output-on-failure --no-tests=error
+
+      - name: Test C++ consumer
+        run: ctest --test-dir build -R "^package_consumer$" --output-on-failure --no-tests=error
 
   build_almalinux:
     name: Build on AlmaLinux 10
