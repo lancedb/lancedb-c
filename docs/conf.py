@@ -7,13 +7,14 @@ from pathlib import Path
 _repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_repo_root / ".github" / "scripts"))
 
-from version import resolve_version
+from version import parse_resolved, resolve_version
 
 # -- Project information -----------------------------------------------------
 project = 'LanceDB C API'
 copyright = '2025, The LanceDB Authors'
 author = 'The LanceDB Authors'
-release = resolve_version(_repo_root)
+_resolved = os.environ.get('LANCEDB_RESOLVED_VERSION', '')
+release = parse_resolved(_resolved) if _resolved else resolve_version(_repo_root)
 
 # -- General configuration ---------------------------------------------------
 extensions = [

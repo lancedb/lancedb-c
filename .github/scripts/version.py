@@ -92,14 +92,7 @@ def _head_commit(repo_root: Path) -> str | None:
 
 
 def resolve_version(repo_root: Path) -> str:
-    # CMake passes its configure-time result to the docs target through this
-    # private variable. It takes precedence so a later build-time public
-    # override cannot change the already-configured version.
-    resolved = os.environ.get("LANCEDB_RESOLVED_VERSION", "").strip()
-    if resolved:
-        return parse_resolved(resolved)
-
-    override = os.environ.get("LANCEDB_VERSION", "").strip()
+    override = os.environ.get("LANCEDB_VERSION", "")
     if override:
         return parse_override(override)
 
