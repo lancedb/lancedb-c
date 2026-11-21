@@ -379,6 +379,11 @@ LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuil
  *
  * The builder is consumed by this function and must not be used after calling.
  * Passing NULL session is a no-op.
+ *
+ * A custom session is only supported for embedded connections. LanceDB Enterprise
+ * connections (db:// URIs) reject it when the builder is executed:
+ * lancedb_connect_builder_execute() returns LANCEDB_NOT_SUPPORTED with an error message
+ * stating that session is not supported for LanceDB Enterprise connections.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_session(LanceDBConnectBuilder* builder, const LanceDBSession* session);
 
@@ -664,7 +669,9 @@ void lancedb_connection_free(LanceDBConnection* connection);
  * @param options - pointer to LanceDBSessionOptions, or NULL for defaults
  * @return Non-null pointer to LanceDBSession on success, NULL on failure
  *
- * The returned session must be freed with lancedb_session_free().
+ * The returned session must be freed with lancedb_session_free(). A session can be
+ * attached to an embedded connection with lancedb_connect_builder_session(); Enterprise
+ * (db://) connections reject custom sessions when the builder is executed.
  */
 LanceDBSession* lancedb_session_new(const LanceDBSessionOptions* options);
 
@@ -858,16 +865,60 @@ LanceDBError lancedb_table_arrow_schema(
  *
  * @param table - pointer to LanceDBTable
  * @return Table version number on success, 0 on failure
+ *
+ * A version is never 0 for a valid table, so 0 is a safe failure sentinel. Use
+ * lancedb_table_version_with_status() when the failure details are needed.
  */
 unsigned long long lancedb_table_version(const LanceDBTable* table);
+
+/**
+ * Get table version, preserving failures
+ *
+ * @param table - pointer to LanceDBTable
+ * @param version_out - pointer to receive the table version
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, version_out is set to the table version. On failure, version_out
+ * is left unchanged, so a caller can keep its own sentinel there.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_version_with_status(
+    const LanceDBTable* table,
+    uint64_t* version_out,
+    char** error_message
+);
 
 /**
  * Count rows in table
  *
  * @param table - pointer to LanceDBTable
  * @return Number of rows in table on success, 0 on failure (or empty table)
+ *
+ * Use lancedb_table_count_rows_with_status() when an empty table must be told
+ * apart from a failed call.
  */
 unsigned long long lancedb_table_count_rows(const LanceDBTable* table);
+
+/**
+ * Count rows in table, preserving failures
+ *
+ * @param table - pointer to LanceDBTable
+ * @param count_out - pointer to receive the row count
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, count_out is set to the number of rows, which is 0 for an empty
+ * table. On failure, count_out is left unchanged.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_count_rows_with_status(
+    const LanceDBTable* table,
+    size_t* count_out,
+    char** error_message
+);
 
 /**
  * Statistics on the number of rows in table fragments
@@ -1256,11 +1307,20 @@ LanceDBError lancedb_vector_query_distance_type(
  * results) at the cost of slower queries. Lower values make queries faster but may miss
  * relevant results that are in non-searched partitions.
  *
+ * When this setter is not called, LanceDB leaves the probe bounds unset and uses Lance's
+ * adaptive IVF probe defaults. This replaces the fixed minimum/maximum of 20 used by
+ * LanceDB 0.33 and earlier. Call this setter with 20 to request the previous fixed behavior.
+ *
  * Typical values:
- * - Default is usually 20
  * - Range: 1 to num_partitions (specified during index creation)
  * - Higher nprobes (e.g., num_partitions/2) → better recall, slower queries
  * - Lower nprobes (e.g., 1-10) → faster queries, lower recall
+ *
+ * This setter returns LANCEDB_SUCCESS even for 0. The value is validated when the query is
+ * executed: lancedb_vector_query_execute() returns NULL for nprobes 0, and
+ * lancedb_vector_query_explain_plan() returns LANCEDB_INVALID_INPUT with the message
+ * "nprobes must be greater than 0". Callers that accept untrusted values should validate
+ * them before executing.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param nprobes - number of IVF partitions to search (must be <= num_partitions)
@@ -1617,6 +1677,27 @@ LanceDBError lancedb_table_list_indices(
     const LanceDBTable* table,
     char*** indices_out,
     size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Prewarm a named index
+ *
+ * Loads the index into memory and caches it, so the first query does not pay
+ * for the load.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param index_name - null-terminated C string containing the index name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS if the index was prewarmed, LANCEDB_INDEX_NOT_FOUND if the
+ *         index does not exist, other error codes on failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_prewarm_index(
+    const LanceDBTable* table,
+    const char* index_name,
     char** error_message
 );
 

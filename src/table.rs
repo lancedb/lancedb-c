@@ -330,6 +330,9 @@ pub unsafe extern "C" fn lancedb_free_arrow_schema(
 ///
 /// # Returns
 /// - Table version number on success, 0 on failure
+///
+/// A version is never 0 for a valid table, so 0 is a safe failure sentinel. Use
+/// `lancedb_table_version_with_status` when the failure details are needed.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_version(table: *const LanceDBTable) -> u64 {
     if table.is_null() {
@@ -342,6 +345,41 @@ pub unsafe extern "C" fn lancedb_table_version(table: *const LanceDBTable) -> u6
     runtime.block_on(tbl.version()).unwrap_or(0)
 }
 
+/// Get table version, preserving failures
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `version_out` must be a valid pointer to receive the table version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+///
+/// On success, `version_out` is set to the table version. On failure,
+/// `version_out` is left unchanged, so a caller can keep its own sentinel there.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_version_with_status(
+    table: *const LanceDBTable,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.version()) {
+        Ok(version) => {
+            *version_out = version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Count rows in table
 ///
 /// # Safety
@@ -349,6 +387,9 @@ pub unsafe extern "C" fn lancedb_table_version(table: *const LanceDBTable) -> u6
 ///
 /// # Returns
 /// - Number of rows in table on success, 0 on failure (or empty table)
+///
+/// Use `lancedb_table_count_rows_with_status` when an empty table must be told
+/// apart from a failed call.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_count_rows(table: *const LanceDBTable) -> u64 {
     if table.is_null() {
@@ -361,6 +402,41 @@ pub unsafe extern "C" fn lancedb_table_count_rows(table: *const LanceDBTable) ->
     match runtime.block_on(tbl.count_rows(None)) {
         Ok(count) => count as u64,
         Err(_) => 0,
+    }
+}
+
+/// Count rows in table, preserving failures
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `count_out` must be a valid pointer to receive the row count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+///
+/// On success, `count_out` is set to the number of rows, which is 0 for an empty
+/// table. On failure, `count_out` is left unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_count_rows_with_status(
+    table: *const LanceDBTable,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.count_rows(None)) {
+        Ok(count) => {
+            *count_out = count;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
     }
 }
 
