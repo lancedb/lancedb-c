@@ -104,14 +104,14 @@ jobs:
           search_artifacts: true
           if_no_artifact_found: warn
 
-      # A merge base created before the toolchain pin has a baseline artifact
-      # measured with the runner default. Rebuild it with this pull request's
-      # toolchain so the line counts are comparable.
+      # Rebuild only when rust-toolchain.toml differs from the merge base. If
+      # the configuration matches, a missing artifact stays on the normal
+      # comparison path so an upload race does not trigger a second build.
       - name: Check baseline toolchain
         id: baseline_toolchain
         if: github.event_name == 'pull_request'
         run: |
-          if [ -f coverage-baseline.txt ] && git diff --quiet "${{ steps.merge_base.outputs.sha }}" HEAD -- rust-toolchain.toml; then
+          if git diff --quiet "${{ steps.merge_base.outputs.sha }}" HEAD -- rust-toolchain.toml; then
             echo "matches=true" >> "$GITHUB_OUTPUT"
           else
             echo "matches=false" >> "$GITHUB_OUTPUT"
@@ -149,7 +149,12 @@ jobs:
         run: |
           HEAD_COVERAGE=${{ steps.coverage.outputs.percentage }}
           if [ ! -f coverage-baseline.txt ]; then
-            echo "::error::No coverage baseline found for merge base ${{ steps.merge_base.outputs.sha }}"
+            if [ "${{ steps.baseline_toolchain.outputs.matches }}" = "true" ]; then
+              echo "No baseline coverage found (first run on main?). Skipping comparison."
+              echo "Current coverage: $HEAD_COVERAGE%"
+              exit 0
+            fi
+            echo "::error::No matching coverage baseline produced for merge base ${{ steps.merge_base.outputs.sha }}"
             exit 1
           fi
           BASE_COVERAGE=$(cat coverage-baseline.txt)
