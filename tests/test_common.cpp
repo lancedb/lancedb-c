@@ -228,6 +228,20 @@ std::vector<uint8_t> write_ipc_file_with_corrupt_second_batch(
   return both;
 }
 
+std::vector<uint8_t> write_ipc_file_with_unrepresentable_field_name() {
+  // The name is valid Arrow but cannot become a C string
+  const std::string name("bad\0name", 8);
+  auto schema = arrow::schema({arrow::field(name, arrow::int32())});
+
+  arrow::Int32Builder builder;
+  REQUIRE(builder.Append(1).ok());
+  std::shared_ptr<arrow::Array> array;
+  REQUIRE(builder.Finish(&array).ok());
+  auto batch = arrow::RecordBatch::Make(schema, 1, {array});
+
+  return write_ipc_file(schema, {batch});
+}
+
 IpcFileContents read_ipc_file(const uint8_t* data, size_t len) {
   auto buffer = arrow::Buffer::FromString(
       std::string(reinterpret_cast<const char*>(data), len));

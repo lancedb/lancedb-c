@@ -1944,6 +1944,21 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
     REQUIRE(std::string(error_message).find("too large") != std::string::npos);
     lancedb_free_string(error_message);
 
+    // A schema the Arrow C ABI cannot carry is a normal invalid-input error, and
+    // neither requested output is handed over
+    const auto unrepresentable = write_ipc_file_with_unrepresentable_field_name();
+    reader = nullptr;
+    c_schema = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        unrepresentable.data(), unrepresentable.size(), &reader, &c_schema, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(c_schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("Invalid input") != std::string::npos);
+    lancedb_free_string(error_message);
+
     // A valid file still decodes
     reader = nullptr;
     error_message = nullptr;

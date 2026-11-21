@@ -310,7 +310,7 @@ pub unsafe extern "C" fn lancedb_record_batch_reader_from_ipc_file(
         Ok(Err(error)) => {
             set_custom_error_message(
                 error_message,
-                &format!("Invalid input: failed to read the Arrow IPC file: {error}"),
+                &format!("Invalid input: unusable Arrow IPC file: {error}"),
             );
             return LanceDBError::InvalidInput;
         }
@@ -488,6 +488,51 @@ mod tests {
 
         let error = read_ipc_file(&bytes).expect_err("the footer cannot fit the input");
         assert!(error.to_string().contains("does not fit"));
+    }
+
+    #[test]
+    fn a_schema_that_cannot_be_exported_to_c_fails_without_outputs() {
+        // A field name with a NUL byte is an ordinary Arrow name, but it cannot
+        // be carried by the C data interface, which needs C strings
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "bad\0name",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+            .expect("a valid test batch");
+        let bytes = write_test_file(schema, vec![batch]);
+
+        // The file itself decodes, only the C schema conversion rejects it
+        assert!(read_ipc_file(&bytes).is_ok());
+        let error = match prepare_decode(&bytes, true, true) {
+            Ok(_) => panic!("the C ABI cannot carry a field name with a NUL byte"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("Null byte"),
+            "unexpected error: {error}"
+        );
+
+        // Through the entry point, the input is a normal error and neither
+        // output is handed over
+        let mut reader: *mut LanceDBRecordBatchReader = ptr::null_mut();
+        let mut c_schema: *mut arrow_schema::ffi::FFI_ArrowSchema = ptr::null_mut();
+        let mut message: *mut c_char = ptr::null_mut();
+        let status = unsafe {
+            lancedb_record_batch_reader_from_ipc_file(
+                bytes.as_ptr(),
+                bytes.len(),
+                &mut reader,
+                &mut c_schema,
+                &mut message,
+            )
+        };
+        assert_eq!(status, LanceDBError::InvalidInput);
+        assert!(reader.is_null());
+        assert!(c_schema.is_null());
+        assert!(!message.is_null());
+        unsafe { crate::error::lancedb_free_string(message) };
     }
 
     #[test]

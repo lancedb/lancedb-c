@@ -146,6 +146,10 @@ std::vector<uint8_t> write_ipc_file_with_corrupt_second_batch(
     const std::shared_ptr<arrow::RecordBatch>& first,
     const std::shared_ptr<arrow::RecordBatch>& second);
 
+// Helper function to write an Arrow IPC file whose field name cannot be carried
+// by the Arrow C data interface, because it contains a NUL byte
+std::vector<uint8_t> write_ipc_file_with_unrepresentable_field_name();
+
 // Helper function to read an Arrow IPC file with the Arrow C++ reader
 IpcFileContents read_ipc_file(const uint8_t* data, size_t len);
 
