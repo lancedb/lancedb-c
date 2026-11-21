@@ -815,6 +815,19 @@ add_custom_target(check
   COMMENT "Running Rust formatting and linting checks..."
 )
 
+# The public header is hand-written. Generate declarations from the Rust FFI
+# with the pinned cbindgen and compare them with clang's view of both headers.
+find_program(PYTHON3_EXECUTABLE NAMES python3 python)
+add_custom_target(check-abi
+  COMMAND ${PYTHON3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/check_abi.py
+    --repo ${CMAKE_CURRENT_SOURCE_DIR}
+    --self-test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMENT "Checking public C declarations against the Rust FFI..."
+  VERBATIM
+)
+
 # Install
 if(BUILD_SHARED_LIBS)
   if(WIN32)

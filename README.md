@@ -135,6 +135,20 @@ published archive.
    ctest -j 6
    ```
 
+### C ABI Declarations
+
+The public header is hand-written and must match the Rust FFI. Generate
+declarations from the Rust source with the pinned `cbindgen` and compare them
+with the header using `clang`:
+
+```bash
+cargo install cbindgen --version =0.29.4 --locked
+ninja -C build check-abi
+```
+
+The check also runs temporary signature and layout drift fixtures to show that
+a mismatch is reported with the affected function, argument or struct field.
+
 ### Code Coverage
 
 Generate a Rust code coverage report showing which `src/*.rs` lines are exercised by the C++ tests.

@@ -37,11 +37,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install pinned cbindgen
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: cargo install cbindgen --version =0.29.4 --locked
+
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y lsb-release valgrind
+          sudo apt-get install -y lsb-release valgrind clang
           wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt-get install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt-get update
@@ -68,6 +72,10 @@ jobs:
       - name: Check
         if: matrix.lib_type == 'shared'
         run: ninja -C build check
+
+      - name: Check C ABI declarations
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: ninja -C build check-abi
 
       - name: Test
         run: ctest --test-dir build -j
