@@ -184,6 +184,16 @@ pub(crate) unsafe fn handle_error(
     error_to_error_code(error)
 }
 
+/// Clear an optional error message slot before an entry point reports a status
+///
+/// Entry points that return a status instead of a handle clear the slot on
+/// entry, so a caller never frees a stale error string left from an earlier call.
+pub(crate) unsafe fn clear_error_message(error_message_out: *mut *mut c_char) {
+    if !error_message_out.is_null() {
+        *error_message_out = ptr::null_mut();
+    }
+}
+
 /// Set simple error message for invalid argument cases
 pub(crate) unsafe fn set_invalid_argument_message(error_message_out: *mut *mut c_char) {
     if error_message_out.is_null() {

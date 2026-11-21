@@ -8,10 +8,18 @@
 #include <catch2/catch.hpp>
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
+#include <arrow/io/api.h>
+#include <arrow/ipc/api.h>
 #include "lancedb.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <chrono>
+#include <string>
+#include <vector>
 
 // Helper function to check if directory exists
 int directory_exists(const char* path);
@@ -114,4 +122,38 @@ std::shared_ptr<arrow::RecordBatch> create_test_record_batch(int num_rows, int s
 
 // Helper function to create RecordBatchReader from RecordBatch
 LanceDBRecordBatchReader* create_reader_from_batch(const std::shared_ptr<arrow::RecordBatch>& batch);
+
+// Contents of an Arrow IPC file read back with the Arrow C++ reader
+struct IpcFileContents {
+  std::shared_ptr<arrow::Schema> schema;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+};
+
+// Helper function to write an Arrow IPC file with the given batches
+std::vector<uint8_t> write_ipc_file(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+
+// Helper function to write an Arrow IPC stream, which is not an IPC file
+std::vector<uint8_t> write_ipc_stream(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+
+// Helper function to write a two-batch IPC file whose second batch metadata is
+// corrupt: the footer and the first batch stay readable, the second batch does not
+std::vector<uint8_t> write_ipc_file_with_corrupt_second_batch(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<arrow::RecordBatch>& first,
+    const std::shared_ptr<arrow::RecordBatch>& second);
+
+// Helper function to read an Arrow IPC file with the Arrow C++ reader
+IpcFileContents read_ipc_file(const uint8_t* data, size_t len);
+
+// Helper function to read every value of a string column, sorted, so that a
+// check does not depend on the order the query returned the batches in
+std::vector<std::string> read_ipc_file_strings(const IpcFileContents& file, int column_index);
+
+// Helper function to join strings with a comma, so that a test can compare them
+// in a single assertion
+std::string join_strings(const std::vector<std::string>& values);
 

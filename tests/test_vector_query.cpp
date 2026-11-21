@@ -1382,3 +1382,73 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - explain plan", "[vector
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Arrow IPC output", "[vector_query][ipc]") {
+  const std::string table_name = "vector_query_ipc_test";
+  constexpr size_t total_rows = 50;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("A started vector query exports its projected batches") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const char* columns[] = {"key"};
+    REQUIRE(lancedb_vector_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_vector_query_execute_with_status(query, &result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(result != nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.batches.size() >= 1);
+    REQUIRE(read_ipc_file_strings(contents, 0).size() == 5);
+
+    lancedb_ipc_buffer_free(&buffer);
+  }
+
+  SECTION("A vector query that cannot start reports the SDK error") {
+    std::vector<float> query_vector = generate_random_query_vector(TEST_SCHEMA_DIMENSIONS);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    // The column is only resolved once the query runs
+    REQUIRE(lancedb_vector_query_column(query, "no_such_column", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(1);
+    REQUIRE(lancedb_vector_query_execute_with_status(query, &result, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(result == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // The legacy entry point keeps its null-pointer return convention
+    query = lancedb_vector_query_new(table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_vector_query_column(query, "no_such_column", nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_execute(query) == nullptr);
+  }
+
+  lancedb_table_free(table);
+}

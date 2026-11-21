@@ -16,14 +16,17 @@ use arrow_data::ArrayData;
 use futures::TryStreamExt;
 
 use datafusion_expr::Expr;
+use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
 use lancedb::{DistanceType, Table};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+    clear_error_message, handle_error, set_invalid_argument_message, set_unknown_error_message,
+    LanceDBError,
 };
 use crate::expr::LanceDBExpr;
+use crate::ipc::{self, LanceDBIpcBuffer};
 use crate::types::LanceDBDistanceType;
 
 /// Opaque handle to a LanceDB Query
@@ -57,8 +60,10 @@ pub struct LanceDBVectorQuery {
 /// Query result handle for streaming results
 #[repr(C)]
 pub struct LanceDBQueryResult {
-    inner:
-        Box<dyn futures::Stream<Item = Result<RecordBatch, lancedb::error::Error>> + Send + Unpin>,
+    /// The SDK stream, kept whole so that the schema of a projected result and
+    /// the error text of a stream that fails after its first batch both survive
+    /// until the result is consumed
+    inner: SendableRecordBatchStream,
 }
 
 /// Create a new query for the given table
@@ -655,6 +660,81 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
     }
 }
 
+/// Run the plain query held by `query` and return the stream the SDK started
+fn run_plain_query(
+    query: Box<LanceDBQuery>,
+) -> Result<SendableRecordBatchStream, lancedb::error::Error> {
+    get_runtime().block_on(async move {
+        let mut rust_query = query.table.query();
+
+        if let Some(limit) = query.limit {
+            rust_query = rust_query.limit(limit);
+        }
+        if let Some(offset) = query.offset {
+            rust_query = rust_query.offset(offset);
+        }
+        if let Some(ref select) = query.select {
+            rust_query = rust_query.select(select.clone());
+        }
+        if let Some(df_filter) = query.df_filter {
+            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
+        } else if let Some(ref filter) = query.filter {
+            rust_query = rust_query.only_if(filter);
+        }
+
+        rust_query.execute().await
+    })
+}
+
+/// Run the vector query held by `query` and return the stream the SDK started
+fn run_vector_query(
+    query: Box<LanceDBVectorQuery>,
+) -> Result<SendableRecordBatchStream, lancedb::error::Error> {
+    get_runtime().block_on(async move {
+        let mut rust_query = match query.table.query().nearest_to(query.query_vector.clone()) {
+            Ok(q) => q,
+            Err(e) => return Err(e),
+        };
+
+        if let Some(ref column) = query.column {
+            rust_query = rust_query.column(column);
+        }
+        if let Some(limit) = query.limit {
+            rust_query = rust_query.limit(limit);
+        }
+        if let Some(offset) = query.offset {
+            rust_query = rust_query.offset(offset);
+        }
+        if let Some(ref select) = query.select {
+            rust_query = rust_query.select(select.clone());
+        }
+        if let Some(df_filter) = query.df_filter {
+            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
+        } else if let Some(ref filter) = query.filter {
+            rust_query = rust_query.only_if(filter);
+        }
+        if let Some(distance_type) = query.distance_type {
+            rust_query = rust_query.distance_type(distance_type);
+        }
+        if let Some(nprobes) = query.nprobes {
+            rust_query = rust_query.nprobes(nprobes);
+        }
+        if let Some(refine_factor) = query.refine_factor {
+            rust_query = rust_query.refine_factor(refine_factor);
+        }
+        if let Some(ef) = query.ef {
+            rust_query = rust_query.ef(ef);
+        }
+
+        rust_query.execute().await
+    })
+}
+
+/// Wrap a stream the SDK started in the result handle exposed to C
+fn query_result_from_stream(stream: SendableRecordBatchStream) -> *mut LanceDBQueryResult {
+    Box::into_raw(Box::new(LanceDBQueryResult { inner: stream }))
+}
+
 /// Execute query and return streaming result
 ///
 /// # Safety
@@ -668,36 +748,55 @@ pub unsafe extern "C" fn lancedb_query_execute(
         return ptr::null_mut();
     }
 
-    let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
-
-    match runtime.block_on(async {
-        let mut rust_query = query_box.table.query();
-
-        if let Some(limit) = query_box.limit {
-            rust_query = rust_query.limit(limit);
-        }
-        if let Some(offset) = query_box.offset {
-            rust_query = rust_query.offset(offset);
-        }
-        if let Some(ref select) = query_box.select {
-            rust_query = rust_query.select(select.clone());
-        }
-        if let Some(df_filter) = query_box.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
-        } else if let Some(ref filter) = query_box.filter {
-            rust_query = rust_query.only_if(filter);
-        }
-
-        rust_query.execute().await
-    }) {
-        Ok(stream) => {
-            let result = Box::new(LanceDBQueryResult {
-                inner: Box::new(stream),
-            });
-            Box::into_raw(result)
-        }
+    match run_plain_query(Box::from_raw(query)) {
+        Ok(stream) => query_result_from_stream(stream),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Execute query and report why the SDK could not start it
+///
+/// # Safety
+/// - `query` must be NULL or a valid pointer returned from `lancedb_query_new`.
+///   A non-NULL pointer is consumed, also when the call fails.
+/// - `result_out` must be a valid pointer to receive the result handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*result_out` holding the result, or the SDK error
+///   code with the SDK error text in `*error_message`
+///
+/// On entry, `*result_out` and `*error_message` are cleared. Free a returned
+/// result with `lancedb_query_result_free()` and a returned error message with
+/// `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_execute_with_status(
+    query: *mut LanceDBQuery,
+    result_out: *mut *mut LanceDBQueryResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !result_out.is_null() {
+        *result_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    // The builder is consumed on every path, like in lancedb_table_merge_insert
+    let query = Box::from_raw(query);
+    if result_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match run_plain_query(query) {
+        Ok(stream) => {
+            *result_out = query_result_from_stream(stream);
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
@@ -714,58 +813,55 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
         return ptr::null_mut();
     }
 
-    let query_box = Box::from_raw(query);
-    let runtime = get_runtime();
-
-    match runtime.block_on(async {
-        let mut rust_query = match query_box
-            .table
-            .query()
-            .nearest_to(query_box.query_vector.clone())
-        {
-            Ok(q) => q,
-            Err(e) => return Err(e),
-        };
-
-        if let Some(ref column) = query_box.column {
-            rust_query = rust_query.column(column);
-        }
-        if let Some(limit) = query_box.limit {
-            rust_query = rust_query.limit(limit);
-        }
-        if let Some(offset) = query_box.offset {
-            rust_query = rust_query.offset(offset);
-        }
-        if let Some(ref select) = query_box.select {
-            rust_query = rust_query.select(select.clone());
-        }
-        if let Some(df_filter) = query_box.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
-        } else if let Some(ref filter) = query_box.filter {
-            rust_query = rust_query.only_if(filter);
-        }
-        if let Some(distance_type) = query_box.distance_type {
-            rust_query = rust_query.distance_type(distance_type);
-        }
-        if let Some(nprobes) = query_box.nprobes {
-            rust_query = rust_query.nprobes(nprobes);
-        }
-        if let Some(refine_factor) = query_box.refine_factor {
-            rust_query = rust_query.refine_factor(refine_factor);
-        }
-        if let Some(ef) = query_box.ef {
-            rust_query = rust_query.ef(ef);
-        }
-
-        rust_query.execute().await
-    }) {
-        Ok(stream) => {
-            let result = Box::new(LanceDBQueryResult {
-                inner: Box::new(stream),
-            });
-            Box::into_raw(result)
-        }
+    match run_vector_query(Box::from_raw(query)) {
+        Ok(stream) => query_result_from_stream(stream),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Execute vector query and report why the SDK could not start it
+///
+/// # Safety
+/// - `query` must be NULL or a valid pointer returned from `lancedb_vector_query_new`.
+///   A non-NULL pointer is consumed, also when the call fails.
+/// - `result_out` must be a valid pointer to receive the result handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*result_out` holding the result, or the SDK error
+///   code with the SDK error text in `*error_message`
+///
+/// On entry, `*result_out` and `*error_message` are cleared. Free a returned
+/// result with `lancedb_query_result_free()` and a returned error message with
+/// `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_execute_with_status(
+    query: *mut LanceDBVectorQuery,
+    result_out: *mut *mut LanceDBQueryResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !result_out.is_null() {
+        *result_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    // The builder is consumed on every path, like in lancedb_table_merge_insert
+    let query = Box::from_raw(query);
+    if result_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match run_vector_query(query) {
+        Ok(stream) => {
+            *result_out = query_result_from_stream(stream);
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
@@ -850,6 +946,61 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
             set_unknown_error_message(error_message);
             LanceDBError::Unknown
         }
+    }
+}
+
+/// Convert a query result into an Arrow IPC file
+///
+/// # Safety
+/// - `result` must be NULL or a valid pointer returned by query execution
+///   (`lancedb_query_execute()`, `lancedb_query_execute_with_status()` or a
+///   vector variant). A non-NULL pointer is consumed, also when the call fails.
+/// - `buffer_out` must be a valid pointer to receive the file bytes
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*buffer_out` holding one complete IPC file. The file
+///   carries the projected schema and one batch per batch the stream yielded, in
+///   order, including zero-row batches; an empty result keeps the schema and
+///   holds no batch.
+/// - The error code of the SDK error that ended the stream, or `LANCEDB_ARROW`
+///   when the file could not be encoded
+///
+/// The bytes are handed over only after the file footer is written, so any
+/// failure leaves `*buffer_out` empty. On entry, `*buffer_out` and
+/// `*error_message` are cleared. Free the bytes with `lancedb_ipc_buffer_free()`
+/// and a returned error message with `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_result_to_ipc_file(
+    result: *mut LanceDBQueryResult,
+    buffer_out: *mut LanceDBIpcBuffer,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !buffer_out.is_null() {
+        *buffer_out = LanceDBIpcBuffer::EMPTY;
+    }
+    clear_error_message(error_message);
+
+    if result.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    // A non-NULL result is consumed on every path, so a caller never keeps it
+    // alive for a call that cannot write its output
+    let stream = Box::from_raw(result).inner;
+    if buffer_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let schema = stream.schema();
+
+    match get_runtime().block_on(ipc::write_ipc_file_from_stream(schema, stream)) {
+        Ok(bytes) => {
+            *buffer_out = LanceDBIpcBuffer::from_file_bytes(bytes);
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
     }
 }
 

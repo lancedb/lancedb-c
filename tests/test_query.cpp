@@ -519,3 +519,170 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - explain plan", "[query][explai
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Arrow IPC output", "[query][ipc]") {
+  const std::string table_name = "query_ipc_test";
+  constexpr size_t total_rows = 100;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("A started query exports every projected batch as an IPC file") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, 25, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(result != nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.batches.size() >= 1);
+    REQUIRE(read_ipc_file_strings(contents, 0).size() == 25);
+
+    // The file does not depend on the table handle that produced it
+    lancedb_table_free(table);
+    table = nullptr;
+
+    auto reread = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(reread.schema->num_fields() == 1);
+    REQUIRE(read_ipc_file_strings(reread, 0).size() == 25);
+
+    lancedb_ipc_buffer_free(&buffer);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    // Freeing an already freed buffer is a no-op
+    lancedb_ipc_buffer_free(&buffer);
+  }
+
+  SECTION("An empty result keeps the projected schema and no batch") {
+    const std::string empty_name = "query_ipc_empty_table";
+    create_empty_table(empty_name);
+    LanceDBTable* empty_table = open_table(empty_name);
+
+    LanceDBQuery* query = lancedb_query_new(empty_table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.batches.empty());
+
+    lancedb_ipc_buffer_free(&buffer);
+    lancedb_table_free(empty_table);
+  }
+
+  SECTION("A filter that matches nothing keeps the schema and invents no row") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_where_filter(query, "key = 'no_such_key'", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(read_ipc_file_strings(contents, 0).empty());
+    for (const auto& batch : contents.batches) {
+      // A batch the stream did keep stays a zero-row batch
+      REQUIRE(batch->num_rows() == 0);
+    }
+
+    lancedb_ipc_buffer_free(&buffer);
+  }
+
+  SECTION("A query that cannot start reports the SDK error instead of a null result") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    // The filter is only resolved once the query runs
+    REQUIRE(lancedb_query_where_filter(query, "no_such_column = 'x'", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(1);
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(result == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // A null builder is rejected without a query
+    error_message = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(nullptr, &result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // The legacy entry point keeps its null-pointer return convention
+    query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_query_where_filter(query, "no_such_column = 'x'", nullptr)
+        == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_query_execute(query) == nullptr);
+  }
+
+  SECTION("Converting without a result or without a buffer is rejected") {
+    LanceDBIpcBuffer buffer = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_result_to_ipc_file(nullptr, &buffer, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+    LanceDBQueryResult* result = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The result is consumed even when the call cannot write its output
+    error_message = nullptr;
+    REQUIRE(lancedb_query_result_to_ipc_file(result, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  lancedb_table_free(table);
+}

@@ -18,10 +18,11 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_not_supported_message,
+    clear_error_message, handle_error, set_invalid_argument_message, set_not_supported_message,
     set_unknown_error_message, LanceDBError,
 };
 use crate::expr::LanceDBExpr;
+use crate::ipc::{self, LanceDBIpcBuffer};
 use crate::types::{LanceDBMergeInsertConfig, LanceDBRecordBatchReader};
 
 /// Get table schema as Arrow C ABI
@@ -57,6 +58,55 @@ pub unsafe extern "C" fn lancedb_table_arrow_schema(
             LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Write the table schema as an Arrow IPC file that holds no batch
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+///   or `lancedb_table_create`; it is only borrowed
+/// - `buffer_out` must be a valid pointer to receive the file bytes
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*buffer_out` holding a readable IPC file that carries
+///   the full table schema and no record batch
+/// - The SDK error code and text when the schema cannot be read, or
+///   `LANCEDB_ARROW` when the schema cannot be encoded
+///
+/// On entry, `*buffer_out` and `*error_message` are cleared. Free the bytes with
+/// `lancedb_ipc_buffer_free()` and a returned error message with
+/// `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_schema_ipc_file(
+    table: *const LanceDBTable,
+    buffer_out: *mut LanceDBIpcBuffer,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !buffer_out.is_null() {
+        *buffer_out = LanceDBIpcBuffer::EMPTY;
+    }
+    clear_error_message(error_message);
+
+    if table.is_null() || buffer_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    match get_runtime().block_on(tbl.schema()) {
+        Ok(schema) => match ipc::write_ipc_file_from_schema(&schema) {
+            Ok(bytes) => {
+                *buffer_out = LanceDBIpcBuffer::from_file_bytes(bytes);
+                LanceDBError::Success
+            }
+            Err(error) => handle_error(
+                &lancedb::error::Error::Arrow { source: error },
+                error_message,
+            ),
+        },
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
