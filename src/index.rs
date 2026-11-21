@@ -662,9 +662,10 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
 /// Wait until the named indices are fully indexed
 ///
 /// Polls the index statistics of the table until every named index reports no unindexed
-/// rows, or until `timeout_ms` runs out. Waiting does not build or extend an index: an
-/// index that does not cover all the rows of the table never becomes fully indexed by
-/// waiting.
+/// rows, or until the budget no longer allows another polling round. `timeout_ms` gates
+/// the start of a round, so the requests of a round can outlast it. Waiting does not
+/// build or extend an index: an index that does not cover all the rows of the table never
+/// becomes fully indexed by waiting.
 ///
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
@@ -673,7 +674,7 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
 ///
 /// # Returns
 /// - `LANCEDB_SUCCESS` once every named index is fully indexed
-/// - `LANCEDB_TIMEOUT` when the budget runs out first
+/// - `LANCEDB_TIMEOUT` when the budget runs out before that
 /// - `LANCEDB_INVALID_ARGUMENT` for a missing table or names array, an empty names
 ///   array, a NULL or non-UTF-8 name, or a zero `timeout_ms`
 /// - Any other error code the SDK reports, including `LANCEDB_INVALID_INPUT` for a

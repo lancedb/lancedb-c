@@ -1694,16 +1694,19 @@ LanceDBError lancedb_table_index_stats(
  * @param table - pointer to LanceDBTable
  * @param index_names - array of null-terminated C strings containing index names
  * @param num_index_names - number of names in the array, at least 1
- * @param timeout_ms - budget in milliseconds, greater than 0. The SDK polls once per
- *   second and caps the budget at two hours; a larger budget is rejected with the
+ * @param timeout_ms - polling budget in milliseconds, greater than 0. The SDK starts a
+ *   polling round while less than this much time has elapsed, sleeps one second between
+ *   rounds, and caps the budget at two hours; a larger budget is rejected with the
  *   maximum the SDK reports
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return LANCEDB_SUCCESS once every named index is fully indexed, LANCEDB_TIMEOUT when
- *   the budget runs out, LANCEDB_INVALID_ARGUMENT for invalid arguments, or the error
- *   code of the SDK failure
+ *   the budget runs out before that, LANCEDB_INVALID_ARGUMENT for invalid arguments, or
+ *   the error code of the SDK failure
  *
- * The budget is checked between polls, so the call can return up to one poll interval
- * after it runs out.
+ * The budget decides whether another polling round starts; it is not a wall-clock
+ * bound. The listing and statistics requests of a round, and the diagnostics the SDK
+ * reads after the last one, finish after the budget has run out, and the call does not
+ * interrupt them.
  *
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().

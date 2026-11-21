@@ -173,11 +173,13 @@ build takes:
        lancedb_free_string(error_message);
    }
 
-The budget is a limit on how long the call waits, in milliseconds, and must be greater
-than zero. The SDK checks the statistics once per second and caps the budget at two
-hours, rejecting a longer one with the maximum it accepts. Only the named indices are
-waited for, and ``lancedb_table_list_indices()`` returns the names of all of them.
-Waiting does not build or extend an index: an index built before new rows were added
-never becomes fully indexed by waiting, so reindex it first with the index creation or
-optimization functions. The call has no cancellation, and its budget is checked between
-polls, so it can return up to one poll interval after the budget runs out.
+The budget is a polling budget in milliseconds and must be greater than zero: the SDK
+starts a polling round while less than that much time has elapsed, sleeping one second
+between rounds, and caps the budget at two hours, rejecting a longer one with the maximum
+it accepts. It is not a wall-clock bound: the listing and statistics requests of a round,
+and the diagnostics of the last round, finish after the budget has run out, and the call
+does not interrupt them. Only the named indices are waited for, and
+``lancedb_table_list_indices()`` returns the names of all of them. Waiting does not build
+or extend an index: an index built before new rows were added never becomes fully
+indexed by waiting, so reindex it first with the index creation or optimization functions.
+There is no cancellation.
