@@ -20,7 +20,8 @@ use lancedb::index::Index;
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+    handle_error, set_custom_error_message, set_invalid_argument_message,
+    set_unknown_error_message, LanceDBError,
 };
 use crate::types::LanceDBDistanceType;
 
@@ -875,6 +876,117 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
             LanceDBError::IndexNotFound
         }
         Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Statistics of a single index, as reported by the Rust SDK
+///
+/// The values the SDK reports as optional keep their presence: `distance_type` is
+/// NULL when the SDK reports no distance metric, and `has_num_indices` tells whether
+/// `num_indices` was reported.
+///
+/// The pointers are private so that safe Rust cannot build the type or replace the
+/// strings it owns; only this module hands them to C, and `Drop` releases them.
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBIndexStatistics {
+    pub num_indexed_rows: usize,
+    pub num_unindexed_rows: usize,
+    index_type: *mut c_char,
+    distance_type: *mut c_char,
+    pub num_indices: u32,
+    pub has_num_indices: bool,
+}
+
+impl Drop for LanceDBIndexStatistics {
+    fn drop(&mut self) {
+        unsafe {
+            // The index type is always set by the constructor; only the metric is optional.
+            drop(CString::from_raw(self.index_type));
+            if !self.distance_type.is_null() {
+                drop(CString::from_raw(self.distance_type));
+            }
+        }
+    }
+}
+
+/// Get the statistics the Rust SDK reports for a named index
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `index_name` must be a valid null-terminated C string
+/// - `stats_out` must be a valid pointer to receive the read-only statistics
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` when the statistics were read, including when the index does
+///   not exist, in which case `*stats_out` is NULL
+/// - Other error codes on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_index_statistics(
+    table: *const LanceDBTable,
+    index_name: *const c_char,
+    stats_out: *mut *const LanceDBIndexStatistics,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if stats_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    *stats_out = ptr::null();
+
+    if table.is_null() || index_name.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(name_str) = CStr::from_ptr(index_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    let stats = match runtime.block_on(tbl.index_stats(name_str)) {
+        Ok(Some(stats)) => stats,
+        // The SDK reports a missing index as no value, which is not a failure
+        Ok(None) => return LanceDBError::Success,
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    let index_type = CString::new(stats.index_type.to_string());
+    let distance_type = stats
+        .distance_type
+        .map(|distance_type| CString::new(distance_type.to_string()))
+        .transpose();
+    let (Ok(index_type), Ok(distance_type)) = (index_type, distance_type) else {
+        set_custom_error_message(error_message, "Index statistics text contains a NUL byte");
+        return LanceDBError::Unknown;
+    };
+
+    *stats_out = Box::into_raw(Box::new(LanceDBIndexStatistics {
+        num_indexed_rows: stats.num_indexed_rows,
+        num_unindexed_rows: stats.num_unindexed_rows,
+        index_type: index_type.into_raw(),
+        distance_type: distance_type
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut()),
+        num_indices: stats.num_indices.unwrap_or(0),
+        has_num_indices: stats.num_indices.is_some(),
+    }))
+    .cast_const();
+    LanceDBError::Success
+}
+
+/// Release the statistics returned by lancedb_table_index_statistics
+///
+/// # Safety
+/// - `stats` must be a pointer returned by `lancedb_table_index_statistics`, or NULL
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_index_statistics(stats: *const LanceDBIndexStatistics) {
+    if !stats.is_null() {
+        drop(Box::from_raw(stats.cast_mut()));
     }
 }
 

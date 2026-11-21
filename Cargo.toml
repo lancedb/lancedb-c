@@ -1,6 +1,6 @@
 [package]
 name = "lancedb-c"
-version = "0.33.0"
+version = "0.0.0"
 edition = "2021"
 description = "C bindings for LanceDB"
 homepage = "https://lancedb.github.io/lancedb-c/"
