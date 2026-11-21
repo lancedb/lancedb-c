@@ -210,6 +210,120 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
     }
 }
 
+/// Result of an update operation.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LanceDBUpdateResult {
+    /// Number of rows changed by the update. A legacy remote empty response
+    /// can leave this at zero, which then means unknown rather than no rows.
+    pub rows_updated: u64,
+    /// Table version committed by the update. A legacy remote empty response
+    /// can leave this at zero, which then means unknown.
+    pub version: u64,
+}
+
+/// Update rows in a table using SQL expressions
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` and `expressions` must point to arrays of `num_assignments` valid
+///   null-terminated C strings, with `columns[i]` assigned the value of `expressions[i]`.
+///   The inputs are paired by index; the SDK evaluates every expression against the
+///   original row, so assignments do not observe each other
+/// - `num_assignments` must be greater than zero
+/// - `predicate`, when not NULL, must be a valid null-terminated C string containing an SQL
+///   predicate. An empty predicate updates all rows
+/// - `result_out` must be a valid pointer to receive the operation result
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_update(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    expressions: *const *const c_char,
+    num_assignments: usize,
+    predicate: *const c_char,
+    result_out: *mut LanceDBUpdateResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null()
+        || columns.is_null()
+        || expressions.is_null()
+        || num_assignments == 0
+        || result_out.is_null()
+    {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let mut assignments = Vec::with_capacity(num_assignments);
+    for i in 0..num_assignments {
+        let column_ptr = *columns.add(i);
+        let expression_ptr = *expressions.add(i);
+        if column_ptr.is_null() || expression_ptr.is_null() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        let (Ok(column), Ok(expression)) = (
+            CStr::from_ptr(column_ptr).to_str(),
+            CStr::from_ptr(expression_ptr).to_str(),
+        ) else {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        };
+
+        if column.is_empty() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        assignments.push((column, expression));
+    }
+
+    let predicate = if predicate.is_null() {
+        None
+    } else {
+        let Ok(predicate) = CStr::from_ptr(predicate).to_str() else {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        };
+        // An empty predicate is the documented "update all rows" form.
+        if predicate.is_empty() {
+            None
+        } else {
+            Some(predicate)
+        }
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(async {
+        let mut builder = tbl.update();
+        if let Some(predicate) = predicate {
+            builder = builder.only_if(predicate);
+        }
+        for (column, expression) in assignments {
+            // The input order only preserves the caller's column/expression pairing.
+            // The SDK evaluates every expression against the original row.
+            builder = builder.column(column, expression);
+        }
+        builder.execute().await
+    }) {
+        Ok(update_result) => {
+            *result_out = LanceDBUpdateResult {
+                rows_updated: update_result.rows_updated,
+                version: update_result.version,
+            };
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Create a RecordBatchReader from Arrow C ABI structures
 ///
 /// # Safety

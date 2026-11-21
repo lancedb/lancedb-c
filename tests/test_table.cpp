@@ -5,6 +5,7 @@
 
 #include <string>
 #include <memory>
+#include <utility>
 #include "test_common.h"
 
 struct RunOnStackCtx {
@@ -1126,6 +1127,237 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert with source conditi
     REQUIRE(version_value(table, "key_3") == 10);
     REQUIRE(version_value(table, "key_4") == 10);
   }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Update", "[table]") {
+  const std::string table_name = "test_update_table";
+  auto schema = create_versioned_schema();
+  struct ArrowSchema c_schema;
+  REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+
+  LanceDBTable* table = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create(
+      db, table_name.c_str(), reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
+      create_versioned_reader({10, 10, 10}), &table, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(table != nullptr);
+  if (c_schema.release) {
+    c_schema.release(&c_schema);
+  }
+
+  const auto initial_version = lancedb_table_version(table);
+
+  SECTION("Update only rows matching the predicate") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 5"};
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 1, "key = 'key_1'", &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 1);
+    REQUIRE(update_result.version == initial_version + 1);
+    REQUIRE(update_result.version == lancedb_table_version(table));
+
+    REQUIRE(version_value(table, "key_0") == 10);
+    REQUIRE(version_value(table, "key_1") == 15);
+    REQUIRE(version_value(table, "key_2") == 10);
+  }
+
+  SECTION("Update all rows with multiple assignments") {
+    const char* columns[] = {"key", "version"};
+    const char* expressions[] = {"upper(key)", "version + 1"};
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 2, nullptr, &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 3);
+    REQUIRE(update_result.version == initial_version + 1);
+    REQUIRE(update_result.version == lancedb_table_version(table));
+
+    REQUIRE(version_value(table, "KEY_0") == 11);
+    REQUIRE(version_value(table, "KEY_1") == 11);
+    REQUIRE(version_value(table, "KEY_2") == 11);
+  }
+
+  SECTION("Empty predicate updates every row") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 2"};
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 1, "", &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 3);
+    REQUIRE(update_result.version == initial_version + 1);
+
+    REQUIRE(version_value(table, "key_0") == 12);
+    REQUIRE(version_value(table, "key_1") == 12);
+    REQUIRE(version_value(table, "key_2") == 12);
+  }
+
+  SECTION("Invalid expression preserves the SDK error") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"no_such_column + 1"};
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 1, "key = 'key_1'", &update_result, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    REQUIRE(lancedb_table_version(table) == initial_version);
+    REQUIRE(version_value(table, "key_0") == 10);
+    REQUIRE(version_value(table, "key_1") == 10);
+    REQUIRE(version_value(table, "key_2") == 10);
+  }
+
+  SECTION("Invalid and empty input is rejected") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 1"};
+    const char* null_columns[] = {nullptr};
+    const char* null_expressions[] = {nullptr};
+    const char* empty_columns[] = {""};
+    const char* invalid_columns[] = {"\xff\xfe"};
+    const char* invalid_expressions[] = {"\xff\xfe"};
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update(
+        nullptr, columns, expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, nullptr, expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, columns, nullptr, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 0, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 1, nullptr, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, null_columns, expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, columns, null_expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, empty_columns, expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, invalid_columns, expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, columns, invalid_expressions, 1, nullptr, &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 1, "\xff\xfe", &update_result, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+
+    REQUIRE(lancedb_table_version(table) == initial_version);
+  }
+
+  lancedb_table_free(table);
+}
+
+// Schema and reader for the update-evaluation regression: one row (a, b)
+static std::shared_ptr<arrow::Schema> create_pair_schema() {
+  return arrow::schema({arrow::field("a", arrow::int32()),
+                        arrow::field("b", arrow::int32())});
+}
+
+static LanceDBRecordBatchReader* create_pair_reader(int32_t a, int32_t b) {
+  arrow::Int32Builder a_builder;
+  arrow::Int32Builder b_builder;
+  REQUIRE(a_builder.Append(a).ok());
+  REQUIRE(b_builder.Append(b).ok());
+
+  std::shared_ptr<arrow::Array> a_array, b_array;
+  REQUIRE(a_builder.Finish(&a_array).ok());
+  REQUIRE(b_builder.Finish(&b_array).ok());
+
+  auto batch = arrow::RecordBatch::Make(create_pair_schema(), 1, {a_array, b_array});
+  return create_reader_from_batch(batch);
+}
+
+// Read the (a, b) values of the single row in a pair table
+static std::pair<int32_t, int32_t> pair_values(LanceDBTable* table) {
+  LanceDBQuery* query = lancedb_query_new(table);
+  REQUIRE(query != nullptr);
+
+  LanceDBQueryResult* query_result = lancedb_query_execute(query);
+  REQUIRE(query_result != nullptr);
+
+  char* error_message = nullptr;
+  FFI_ArrowArray** result_arrays = nullptr;
+  FFI_ArrowSchema* result_schema = nullptr;
+  size_t count = 0;
+  REQUIRE(lancedb_query_result_to_arrow(
+      query_result, &result_arrays, &result_schema, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(count == 1);
+
+  auto imported_schema = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(result_schema));
+  REQUIRE(imported_schema.ok());
+  auto imported_batch = arrow::ImportRecordBatch(
+      reinterpret_cast<ArrowArray*>(result_arrays[0]), imported_schema.ValueUnsafe());
+  REQUIRE(imported_batch.ok());
+
+  auto batch = imported_batch.ValueUnsafe();
+  REQUIRE(batch->num_rows() == 1);
+  auto a_array = std::static_pointer_cast<arrow::Int32Array>(batch->column(0));
+  auto b_array = std::static_pointer_cast<arrow::Int32Array>(batch->column(1));
+  const auto values = std::make_pair(a_array->Value(0), b_array->Value(0));
+
+  lancedb_free_arrow_arrays(result_arrays, count);
+  lancedb_free_arrow_schema(result_schema);
+
+  return values;
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Update evaluates against the original row", "[table]") {
+  const std::string table_name = "test_update_original_row";
+  auto schema = create_pair_schema();
+  struct ArrowSchema c_schema;
+  REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+
+  LanceDBTable* table = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create(
+      db, table_name.c_str(), reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
+      create_pair_reader(1, 2), &table, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(table != nullptr);
+  if (c_schema.release) {
+    c_schema.release(&c_schema);
+  }
+
+  // Swapping the two columns only produces (2, 1) when both expressions read
+  // the original row rather than the batch changed by the other assignment.
+  const char* columns[] = {"a", "b"};
+  const char* expressions[] = {"b", "a"};
+  LanceDBUpdateResult update_result = {};
+  REQUIRE(lancedb_table_update(
+      table, columns, expressions, 2, nullptr, &update_result, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(update_result.rows_updated == 1);
+  REQUIRE(update_result.version != 0);
+
+  const auto values = pair_values(table);
+  REQUIRE(values.first == 2);
+  REQUIRE(values.second == 1);
 
   lancedb_table_free(table);
 }
