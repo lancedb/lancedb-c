@@ -1,0 +1,153 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright The LanceDB Authors
+
+name: Shared Library Packages
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-script:
+    name: Package script checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the commit being tested
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Run packaging fixture checks
+        run: python3 .github/scripts/test_package.py
+
+  package:
+    name: Package ${{ matrix.target }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            python: python3
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            python: python3
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            python: python3
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            python: python3
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            python: python
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            python: python
+
+    steps:
+      - name: Check out the commit being packaged
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out head
+        shell: bash
+        run: |
+          actual="$(git rev-parse HEAD)"
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "checked out ${actual}"
+          test "${actual}" = "${expected}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Report runner architecture
+        if: runner.os != 'Windows'
+        run: |
+          uname -a
+          rustc -vV
+
+      - name: Report runner architecture (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Output "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          rustc -vV
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ protobuf-compiler
+          protoc --version
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf
+          protoc --version
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install protoc --version=29.0.0 -y --no-progress
+          protoc --version
+
+      - name: Configure MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64' || 'amd64' }}
+
+      - name: Build shared library (macOS)
+        if: runner.os == 'macOS'
+        run: >
+          cargo rustc --release --locked --target ${{ matrix.target }} --lib --
+          -C link-arg=-Wl,-install_name,@rpath/liblancedb.dylib
+
+      - name: Build shared library
+        if: runner.os != 'macOS'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Create package
+        id: package
+        run: >
+          ${{ matrix.python }} .github/scripts/package.py create
+          --target ${{ matrix.target }}
+          --commit ${{ github.event.pull_request.head.sha || github.sha }}
+          --output-dir dist
+
+      - name: Verify package with a real consumer
+        run: >
+          ${{ matrix.python }} .github/scripts/package.py verify
+          --target ${{ matrix.target }}
+          --commit ${{ github.event.pull_request.head.sha || github.sha }}
+          --archive ${{ steps.package.outputs.archive }}
+          --checksum ${{ steps.package.outputs.checksum }}
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lancedb-c-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

@@ -557,6 +557,8 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
         }
         if let Some(ref df_filter) = query_ref.df_filter {
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
+        } else if let Some(ref filter) = query_ref.filter {
+            rust_query = rust_query.only_if(filter);
         }
 
         rust_query.explain_plan(verbose).await
@@ -625,12 +627,14 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         }
         if let Some(ref df_filter) = query_ref.df_filter {
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
+        } else if let Some(ref filter) = query_ref.filter {
+            rust_query = rust_query.only_if(filter);
         }
         if let Some(distance_type) = query_ref.distance_type {
             rust_query = rust_query.distance_type(distance_type);
         }
         if let Some(nprobes) = query_ref.nprobes {
-            rust_query = rust_query.nprobes(nprobes);
+            rust_query = rust_query.nprobes(nprobes)?;
         }
         if let Some(refine_factor) = query_ref.refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);
@@ -748,7 +752,7 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
             rust_query = rust_query.distance_type(distance_type);
         }
         if let Some(nprobes) = query_box.nprobes {
-            rust_query = rust_query.nprobes(nprobes);
+            rust_query = rust_query.nprobes(nprobes)?;
         }
         if let Some(refine_factor) = query_box.refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);
