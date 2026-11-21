@@ -1143,6 +1143,29 @@ LanceDBError lancedb_query_where_filter(
 );
 
 /**
+ * Set full-text search for query
+ *
+ * The table must have a full-text search index on the searched text column.
+ * LanceDB applies the filter and projection in the same query and adds its
+ * score column. If no limit is set, LanceDB's default top-K applies.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param text - full-text query string
+ * @param column - text column name, or NULL/empty to use the indexed text column
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_full_text_search(
+    LanceDBQuery* query,
+    const char* text,
+    const char* column,
+    char** error_message
+);
+
+/**
  * Set DataFusion Expr filter for query
  *
  * If both a DataFusion and a SQL WHERE clause filters are set, the DataFusion expression
@@ -1246,6 +1269,31 @@ LanceDBError lancedb_vector_query_select(
 LanceDBError lancedb_vector_query_where_filter(
     LanceDBVectorQuery* query,
     const char* filter,
+    char** error_message
+);
+
+/**
+ * Set full-text search for vector query
+ *
+ * This turns the vector query into a hybrid nearest-neighbour plus full-text
+ * search. The table must have a full-text search index on the searched text
+ * column. LanceDB applies the vector, filter, projection and limit settings to
+ * both searches, fuses the result sets with its default reranker and adds its
+ * relevance score column.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param text - full-text query string
+ * @param column - text column name, or NULL/empty to use the indexed text column
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_full_text_search(
+    LanceDBVectorQuery* query,
+    const char* text,
+    const char* column,
     char** error_message
 );
 

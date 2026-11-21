@@ -16,12 +16,14 @@ use arrow_data::ArrayData;
 use futures::TryStreamExt;
 
 use datafusion_expr::Expr;
+use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
 use lancedb::{DistanceType, Table};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    handle_error, set_invalid_argument_message, set_unknown_error_message, LanceDBError,
+    handle_error, set_custom_error_message, set_invalid_argument_message,
+    set_unknown_error_message, LanceDBError,
 };
 use crate::expr::LanceDBExpr;
 use crate::types::LanceDBDistanceType;
@@ -35,6 +37,7 @@ pub struct LanceDBQuery {
     select: Option<Select>,
     filter: Option<String>,
     df_filter: Option<Expr>,
+    full_text_search: Option<FullTextSearchQuery>,
 }
 
 /// Opaque handle to a LanceDB VectorQuery
@@ -48,6 +51,7 @@ pub struct LanceDBVectorQuery {
     select: Option<Select>,
     filter: Option<String>,
     df_filter: Option<Expr>,
+    full_text_search: Option<FullTextSearchQuery>,
     distance_type: Option<DistanceType>,
     nprobes: Option<usize>,
     refine_factor: Option<u32>,
@@ -83,6 +87,7 @@ pub unsafe extern "C" fn lancedb_query_new(table: *const LanceDBTable) -> *mut L
         select: None,
         filter: None,
         df_filter: None,
+        full_text_search: None,
     });
 
     Box::into_raw(query)
@@ -121,6 +126,7 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
         select: None,
         filter: None,
         df_filter: None,
+        full_text_search: None,
         distance_type: None,
         nprobes: None,
         refine_factor: None,
@@ -128,6 +134,39 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
     });
 
     Box::into_raw(vector_query)
+}
+
+/// Build a full-text search from the query text and optional text column
+///
+/// # Safety
+/// - `text` must be a valid null-terminated UTF-8 string
+/// - `column` may be NULL or a valid null-terminated UTF-8 string. An empty
+///   column leaves the choice to LanceDB, which uses the indexed text column.
+unsafe fn full_text_search_from_c(
+    text: *const c_char,
+    column: *const c_char,
+) -> Result<FullTextSearchQuery, String> {
+    if text.is_null() {
+        return Err("full-text search text is required".to_string());
+    }
+
+    let text = CStr::from_ptr(text)
+        .to_str()
+        .map_err(|_| "full-text search text is not valid UTF-8".to_string())?;
+    let mut search = FullTextSearchQuery::new(text.to_string());
+
+    if !column.is_null() {
+        let column = CStr::from_ptr(column)
+            .to_str()
+            .map_err(|_| "full-text search column is not valid UTF-8".to_string())?;
+        if !column.is_empty() {
+            search = search
+                .with_column(column.to_string())
+                .map_err(|error| format!("Invalid FTS column: {error}"))?;
+        }
+    }
+
+    Ok(search)
 }
 
 /// Set limit for query
@@ -242,6 +281,41 @@ pub unsafe extern "C" fn lancedb_query_where_filter(
 
     (*query).filter = Some(filter_str);
     LanceDBError::Success
+}
+
+/// Set full-text search for query
+///
+/// The table must have a full-text search index on the text column. If it does
+/// not, execution fails.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `text` must be a valid null-terminated UTF-8 string
+/// - `column` may be NULL or an empty string to let LanceDB use the indexed
+///   text column, or a valid null-terminated UTF-8 string naming the column
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_full_text_search(
+    query: *mut LanceDBQuery,
+    text: *const c_char,
+    column: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match full_text_search_from_c(text, column) {
+        Ok(search) => {
+            (*query).full_text_search = Some(search);
+            LanceDBError::Success
+        }
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            LanceDBError::InvalidArgument
+        }
+    }
 }
 
 /// Set DataFusion Expr filter for query
@@ -410,6 +484,42 @@ pub unsafe extern "C" fn lancedb_vector_query_where_filter(
     LanceDBError::Success
 }
 
+/// Set full-text search for vector query
+///
+/// This turns the vector query into a hybrid nearest-neighbour plus full-text
+/// search. The table must have a full-text search index on the text column.
+/// LanceDB fuses the two result sets with its default reranker.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `text` must be a valid null-terminated UTF-8 string
+/// - `column` may be NULL or an empty string to let LanceDB use the indexed
+///   text column, or a valid null-terminated UTF-8 string naming the column
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
+    query: *mut LanceDBVectorQuery,
+    text: *const c_char,
+    column: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match full_text_search_from_c(text, column) {
+        Ok(search) => {
+            (*query).full_text_search = Some(search);
+            LanceDBError::Success
+        }
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            LanceDBError::InvalidArgument
+        }
+    }
+}
+
 /// Set DataFusion Expr filter for vector query
 ///
 /// # Safety
@@ -555,6 +665,9 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
         if let Some(ref select) = query_ref.select {
             rust_query = rust_query.select(select.clone());
         }
+        if let Some(ref full_text_search) = query_ref.full_text_search {
+            rust_query = rust_query.full_text_search(full_text_search.clone());
+        }
         if let Some(ref df_filter) = query_ref.df_filter {
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
         } else if let Some(ref filter) = query_ref.filter {
@@ -642,6 +755,9 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         if let Some(ef) = query_ref.ef {
             rust_query = rust_query.ef(ef);
         }
+        if let Some(ref full_text_search) = query_ref.full_text_search {
+            rust_query = rust_query.full_text_search(full_text_search.clone());
+        }
 
         rust_query.explain_plan(verbose).await
     }) {
@@ -691,6 +807,9 @@ pub unsafe extern "C" fn lancedb_query_execute(
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
         } else if let Some(ref filter) = query_box.filter {
             rust_query = rust_query.only_if(filter);
+        }
+        if let Some(ref full_text_search) = query_box.full_text_search {
+            rust_query = rust_query.full_text_search(full_text_search.clone());
         }
 
         rust_query.execute().await
@@ -759,6 +878,9 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
         }
         if let Some(ef) = query_box.ef {
             rust_query = rust_query.ef(ef);
+        }
+        if let Some(ref full_text_search) = query_box.full_text_search {
+            rust_query = rust_query.full_text_search(full_text_search.clone());
         }
 
         rust_query.execute().await

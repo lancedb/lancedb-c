@@ -562,6 +562,30 @@ if(BUILD_TESTS)
   )
   list(APPEND TEST_TARGETS lancedb_vector_query_tests)
 
+  # Add test executable for full-text and hybrid query tests (runs without valgrind)
+  add_executable(lancedb_fts_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_fts.cpp
+  )
+  target_link_libraries(lancedb_fts_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_fts_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_fts_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_fts_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_fts_tests)
+
   # Enable CTest
   enable_testing()
 
@@ -683,6 +707,8 @@ if(BUILD_TESTS)
   add_test(NAME lancedb_vector_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_index_tests>)
   # Run vector query tests WITHOUT valgrind (too slow under valgrind)
   add_test(NAME lancedb_vector_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_query_tests>)
+  # Run full-text and hybrid query tests WITHOUT valgrind (index and query work is slow under valgrind)
+  add_test(NAME lancedb_fts_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_fts_tests>)
 
   if(BUILD_COVERAGE)
     set(PROFDATA_FILE "${CMAKE_BINARY_DIR}/coverage.profdata")
