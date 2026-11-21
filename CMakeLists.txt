@@ -3,6 +3,14 @@
 cmake_minimum_required(VERSION 3.22)
 project(lancedb-c VERSION 0.21.2)
 
+# Intel macOS (x86_64-apple-darwin) is not a supported target.
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+endif()
+if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
+  message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -30,8 +38,8 @@ if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
     endif()
   elseif(APPLE)
     if(CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86_64")
-      set(RUST_TARGET_TRIPLE "x86_64-apple-darwin")
-    elseif(CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "arm64")
+      message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+    elseif(CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "arm64" OR CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "aarch64")
       set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
     endif()
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -62,6 +70,10 @@ else()
   )
 endif()
 
+if(RUST_TARGET_TRIPLE STREQUAL "x86_64-apple-darwin")
+  message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+endif()
+
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/${RUST_TARGET_DIR}/debug")
   set(RUST_BUILD_TYPE "")
@@ -75,7 +87,12 @@ set(STATIC_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}lancedb${C
 set(SHARED_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
   set(SHARED_LIB_PATH "${RUST_TARGET_DIR}/lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb${CMAKE_IMPORT_LIBRARY_SUFFIX}")
+  if(MSVC)
+    # Rust names its MSVC import library after the DLL: lancedb.dll.lib.
+    set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}.lib")
+  else()
+    set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb${CMAKE_IMPORT_LIBRARY_SUFFIX}")
+  endif()
 endif()
 
 if(BUILD_SHARED_LIBS)
@@ -89,6 +106,7 @@ endif()
 option(BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_TESTS "Build tests" OFF)
+option(BUILD_CONSUMER_TEST "Build the standalone package consumer smoke test" OFF)
 option(BUILD_COVERAGE "Enable Rust code coverage reporting (requires llvm-tools-preview)" OFF)
 
 if(BUILD_COVERAGE)
@@ -711,6 +729,21 @@ if(BUILD_TESTS)
   endif()
 endif()
 
+if(BUILD_CONSUMER_TEST)
+  enable_testing()
+  add_executable(package_consumer tests/package_consumer.cpp)
+  target_link_libraries(package_consumer PRIVATE lancedb Threads::Threads)
+  target_include_directories(package_consumer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  set_target_properties(package_consumer PROPERTIES BUILD_RPATH ${RUST_TARGET_DIR})
+  if(WIN32)
+    add_custom_command(TARGET package_consumer POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${SHARED_LIB_PATH}" "$<TARGET_FILE_DIR:package_consumer>"
+    )
+  endif()
+  add_test(NAME package_consumer
+    COMMAND package_consumer "${CMAKE_BINARY_DIR}/package-consumer-db")
+endif()
+
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target clean
   COMMAND cargo clean --target-dir "${CMAKE_BINARY_DIR}/target"
@@ -761,6 +794,11 @@ if(BUILD_TESTS)
   message(STATUS "Tests: Enabled")
 else()
   message(STATUS "Tests: Disabled (use -DBUILD_TESTS=ON to enable)")
+endif()
+if(BUILD_CONSUMER_TEST)
+  message(STATUS "Consumer test: Enabled")
+else()
+  message(STATUS "Consumer test: Disabled (use -DBUILD_CONSUMER_TEST=ON to enable)")
 endif()
 if(BUILD_COVERAGE)
   message(STATUS "Coverage: Enabled")

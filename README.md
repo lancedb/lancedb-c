@@ -78,9 +78,11 @@ If you prefer to build manually:
 
 ## Prebuilt Shared-Library Packages
 
-The `Shared Library Packages` workflow builds and tests six native targets:
-`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`,
-`windows-amd64` and `windows-arm64`. Each package is named
+The `Shared Library Packages` workflow builds and tests five native targets:
+`linux-amd64`, `linux-arm64`, `darwin-arm64`, `windows-amd64` and
+`windows-arm64`. macOS packages are Apple Silicon only; Intel macOS is not
+supported. The workflow runs for `v*` release tags and on explicit dispatch.
+Each package is named
 `lancedb-c-<commit>-<target>.tar.gz` and contains the shared library, the
 public header, the license, the Windows import library when the platform needs
 one, and a `manifest.json` describing the paths. A `SHA256SUMS` file covers the

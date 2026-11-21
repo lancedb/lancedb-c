@@ -9,6 +9,7 @@ import argparse
 import contextlib
 import io
 import os
+import re
 import struct
 import sys
 import tarfile
@@ -152,6 +153,24 @@ class PackageArchiveTests(PackageFixture):
                 SystemExit, "SHA256SUMS lists unexpected entries: unexpected\\.txt"
             ):
                 package.verify_checksums(package_root)
+
+
+class TargetPolicyTests(unittest.TestCase):
+    def test_workflow_matrix_matches_package_targets(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2] / ".github" / "workflows" / "packages.yml"
+        ).read_text(encoding="utf-8")
+        matrix_targets = set(
+            re.findall(r"^\s*-\s+target:\s+(\S+)\s*$", workflow, re.MULTILINE)
+        )
+        self.assertEqual(matrix_targets, set(package.TARGETS))
+
+    def test_intel_macos_is_not_a_supported_target(self) -> None:
+        with self.assertRaises(SystemExit):
+            package.target_for("x86_64-apple-darwin")
+        with self.assertRaises(SystemExit):
+            package.target_for("darwin-amd64")
+        self.assertNotIn("darwin-amd64", {target.name for target in package.TARGETS.values()})
 
 
 class ParserTests(unittest.TestCase):
