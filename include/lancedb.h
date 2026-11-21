@@ -63,6 +63,7 @@ typedef struct LanceDBSession LanceDBSession;
 /**
  * Opaque handle to a LanceDB ObjectStoreRegistry
  */
+typedef struct LanceDBObjectStoreRegistry LanceDBObjectStoreRegistry;
 typedef struct LanceDBObjectStoreRegistry LanceDBRegistry;
 
 /**
