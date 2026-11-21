@@ -1652,6 +1652,27 @@ LanceDBError lancedb_table_list_indices(
 );
 
 /**
+ * Prewarm a named index
+ *
+ * Loads the index into memory and caches it, so the first query does not pay
+ * for the load.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param index_name - null-terminated C string containing the index name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS if the index was prewarmed, LANCEDB_INDEX_NOT_FOUND if the
+ *         index does not exist, other error codes on failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_prewarm_index(
+    const LanceDBTable* table,
+    const char* index_name,
+    char** error_message
+);
+
+/**
  * Drop an index
  *
  * @param table - pointer to LanceDBTable
