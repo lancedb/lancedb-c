@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import gzip
 import hashlib
 import json
 import os
@@ -116,21 +117,25 @@ def copy_file(source: Path, destination: Path, mode: int) -> None:
 
 
 def write_deterministic_tar(source_root: Path, archive: Path) -> None:
-    """Write a tar.gz with stable metadata so repeated packaging is comparable."""
-    with tarfile.open(archive, "w:gz", format=tarfile.GNU_FORMAT) as tar:
-        for path in sorted(source_root.rglob("*")):
-            arcname = f"{source_root.name}/{path.relative_to(source_root).as_posix()}"
-            info = tar.gettarinfo(str(path), arcname=arcname)
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            info.mtime = 0
-            if path.is_file():
-                with path.open("rb") as file:
-                    tar.addfile(info, file)
-            else:
-                tar.addfile(info)
+    """Write a tar.gz with stable metadata so identical inputs give identical bytes."""
+    with archive.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(
+                fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
+            ) as tar:
+                for path in sorted(source_root.rglob("*")):
+                    arcname = f"{source_root.name}/{path.relative_to(source_root).as_posix()}"
+                    info = tar.gettarinfo(str(path), arcname=arcname)
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    if path.is_file():
+                        with path.open("rb") as file:
+                            tar.addfile(info, file)
+                    else:
+                        tar.addfile(info)
 
 
 def extract_tar(archive: Path, destination: Path) -> None:
@@ -282,6 +287,31 @@ def glibc_version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.removeprefix("GLIBC_").split("."))
 
 
+def parse_macho_install_name(otool_output: str) -> str | None:
+    lines = otool_output.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "cmd LC_ID_DYLIB":
+            continue
+        for candidate in lines[index + 1 : index + 12]:
+            stripped = candidate.strip()
+            if not stripped.startswith("name "):
+                continue
+            value = stripped.removeprefix("name ")
+            if " (offset " in value:
+                value = value.split(" (offset ", 1)[0]
+            return value.strip()
+        return None
+    return None
+
+
+def read_macho_install_name(library: Path) -> str:
+    output = run(["otool", "-l", str(library)], show=False).stdout
+    install_name = parse_macho_install_name(output)
+    if not install_name:
+        raise SystemExit(f"could not read LC_ID_DYLIB from {library}")
+    return install_name
+
+
 def print_runtime_dependencies(target: Target, library: Path) -> None:
     if target.os == "linux":
         run(["file", str(library)])
@@ -296,17 +326,12 @@ def print_runtime_dependencies(target: Target, library: Path) -> None:
             print("Required GLIBC versions: " + ", ".join(sorted(versions, key=glibc_version_key)))
     elif target.os == "darwin":
         run(["file", str(library)])
-        install_name = [
-            line.strip()
-            for line in run(["otool", "-D", str(library)], show=False).stdout.splitlines()
-            if line.strip()
-        ]
-        if not install_name:
-            raise SystemExit(f"could not read the install name of {library}")
-        print("Install name: " + install_name[0])
-        if install_name[0].startswith("/"):
+        install_name = read_macho_install_name(library)
+        print("Install name: " + install_name)
+        if install_name != "@rpath/liblancedb.dylib":
             raise SystemExit(
-                f"{library} has an absolute install name and is not relocatable: {install_name[0]}"
+                f"{library} has install name {install_name!r}, expected "
+                "'@rpath/liblancedb.dylib' so the package stays relocatable"
             )
         run(["otool", "-L", str(library)])
     else:
@@ -325,17 +350,38 @@ def find_package_root(work_dir: Path, expected_name: str) -> Path:
     return roots[0]
 
 
-def verify_checksums(package_root: Path) -> None:
+def read_checksum_inventory(package_root: Path) -> dict[str, str]:
     checksum_file = package_root / "SHA256SUMS"
     if not checksum_file.is_file():
         raise SystemExit("package has no SHA256SUMS")
-    for line in checksum_file.read_text(encoding="utf-8").splitlines():
+    entries: dict[str, str] = {}
+    for line_number, line in enumerate(checksum_file.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
+        if "  " not in line:
+            raise SystemExit(f"SHA256SUMS line {line_number} is not '<sha256>  <path>'")
         expected, relative = line.split("  ", 1)
+        if relative in entries:
+            raise SystemExit(f"SHA256SUMS lists {relative} more than once")
+        entries[relative] = expected
+    return entries
+
+
+def verify_checksums(package_root: Path) -> None:
+    entries = read_checksum_inventory(package_root)
+    expected_paths = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file() and path.name != "SHA256SUMS"
+    }
+    missing = sorted(expected_paths - entries.keys())
+    extra = sorted(entries.keys() - expected_paths)
+    if missing:
+        raise SystemExit(f"SHA256SUMS is missing: {', '.join(missing)}")
+    if extra:
+        raise SystemExit(f"SHA256SUMS lists unexpected entries: {', '.join(extra)}")
+    for relative, expected in entries.items():
         path = package_root / relative
-        if not path.is_file():
-            raise SystemExit(f"checksum entry points to a missing file: {relative}")
         actual = sha256_file(path)
         if actual != expected:
             raise SystemExit(f"checksum mismatch for {relative}: {actual} != {expected}")
@@ -391,6 +437,23 @@ def build_and_run_consumer(target: Target, package_root: Path, source: Path, wor
         run([str(executable), str(uri)], env=env)
 
 
+def verify_archive_checksum(archive: Path, checksum_file: Path) -> str:
+    if not checksum_file.is_file():
+        raise SystemExit(f"missing archive checksum: {checksum_file}")
+    checksum_fields = checksum_file.read_text(encoding="utf-8").split()
+    if len(checksum_fields) != 2:
+        raise SystemExit(f"invalid archive checksum file: {checksum_file}")
+    expected_digest, checksum_name = checksum_fields
+    if checksum_name != archive.name:
+        raise SystemExit(
+            f"archive checksum names {checksum_name!r}, expected {archive.name!r}"
+        )
+    actual_digest = sha256_file(archive)
+    if actual_digest != expected_digest:
+        raise SystemExit(f"archive checksum mismatch: {actual_digest} != {expected_digest}")
+    return actual_digest
+
+
 def verify_package(args: argparse.Namespace) -> None:
     target = target_for(args.target)
     repo_root = Path(args.repo_root).resolve()
@@ -398,12 +461,7 @@ def verify_package(args: argparse.Namespace) -> None:
     if not archive.is_file():
         raise SystemExit(f"missing archive: {archive}")
 
-    actual_digest = sha256_file(archive)
-    checksum_file = Path(args.checksum).resolve() if args.checksum else Path(f"{archive}.sha256")
-    if checksum_file.is_file():
-        expected_digest = checksum_file.read_text(encoding="utf-8").split()[0]
-        if actual_digest != expected_digest:
-            raise SystemExit(f"archive checksum mismatch: {actual_digest} != {expected_digest}")
+    actual_digest = verify_archive_checksum(archive, Path(args.checksum).resolve())
     print(f"Archive SHA256: {actual_digest}")
 
     with tempfile.TemporaryDirectory(prefix="lancedb-c-verify-") as temp:
@@ -440,9 +498,10 @@ def verify_package(args: argparse.Namespace) -> None:
         print(f"Library architecture: {actual_arch}")
 
         print_runtime_dependencies(target, library)
-        build_and_run_consumer(
-            target, package_root, Path(args.consumer_source).resolve(), work_dir
-        )
+        consumer_source = Path(args.consumer_source)
+        if not consumer_source.is_absolute():
+            consumer_source = repo_root / consumer_source
+        build_and_run_consumer(target, package_root, consumer_source.resolve(), work_dir)
 
     print(f"package verification OK: target={target.name}")
 
@@ -463,7 +522,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     verify.add_argument("--commit", required=True)
     verify.add_argument("--repo-root", default=".")
     verify.add_argument("--archive", required=True)
-    verify.add_argument("--checksum")
+    verify.add_argument("--checksum", required=True)
     verify.add_argument(
         "--consumer-source", default="tests/package_consumer.cpp"
     )

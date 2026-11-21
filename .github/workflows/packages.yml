@@ -16,6 +16,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  package-script:
+    name: Package script checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the commit being tested
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Run packaging fixture checks
+        run: python3 .github/scripts/test_package.py
+
   package:
     name: Package ${{ matrix.target }} on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
@@ -46,7 +60,16 @@ jobs:
       - name: Check out the commit being packaged
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out head
+        shell: bash
+        run: |
+          actual="$(git rev-parse HEAD)"
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "checked out ${actual}"
+          test "${actual}" = "${expected}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -95,7 +118,14 @@ jobs:
         with:
           arch: ${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64' || 'amd64' }}
 
+      - name: Build shared library (macOS)
+        if: runner.os == 'macOS'
+        run: >
+          cargo rustc --release --locked --target ${{ matrix.target }} --lib --
+          -C link-arg=-Wl,-install_name,@rpath/liblancedb.dylib
+
       - name: Build shared library
+        if: runner.os != 'macOS'
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Create package
