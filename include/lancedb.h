@@ -93,7 +93,7 @@ typedef struct FFI_ArrowArray FFI_ArrowArray;
  * lancedb_ipc_buffer_free() is called. The caller must not write to or free it,
  * and keeps both fields unchanged until then.
  */
-typedef struct LanceDBIpcBuffer {
+typedef struct {
     const uint8_t* data;  /* Start of the file bytes, NULL when no file is held */
     size_t len;           /* Length of the file bytes */
 } LanceDBIpcBuffer;
@@ -1611,7 +1611,7 @@ LanceDBError lancedb_record_batch_reader_from_arrow(
 /**
  * Create a RecordBatchReader and/or an Arrow schema from an Arrow IPC file
  *
- * @param data - borrowed bytes of an Arrow IPC file
+ * @param data - borrowed bytes of an Arrow IPC file (NULL only when len is 0)
  * @param len - number of bytes in data
  * @param reader_out - optional pointer to receive a reader over every batch (NULL to skip)
  * @param schema_out - optional pointer to receive the Arrow C ABI schema (NULL to skip)
@@ -1623,9 +1623,11 @@ LanceDBError lancedb_record_batch_reader_from_arrow(
  * lancedb_table_add() or merged with a single lancedb_table_merge_insert().
  * The schema alone is enough to create an empty table of the same shape.
  * The bytes are only borrowed: the caller may release them as soon as this
- * function returns. Every batch is decoded before returning, so zero bytes, an
- * IPC stream, a truncated file or a corrupt batch fail with LANCEDB_INVALID_INPUT
- * and a decoding message before any table is changed.
+ * function returns. Every batch is decoded before returning, so zero bytes (also
+ * a NULL pointer with len 0), an IPC stream, a truncated file or a corrupt batch
+ * fail with LANCEDB_INVALID_INPUT and a decoding message before any table is
+ * changed. A size that cannot describe the buffer, or a file whose announced
+ * footer does not fit in it, is rejected before the decoder reads anything.
  * On entry, both outputs and the error message are cleared.
  * The caller must free a returned reader with lancedb_record_batch_reader_free()
  * and a returned schema with lancedb_free_arrow_schema(). If error_message is

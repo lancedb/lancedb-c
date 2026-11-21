@@ -640,9 +640,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Arrow IPC output", "[query][ip
     REQUIRE(error_message == nullptr);
 
     LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(1);
-    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) != LANCEDB_SUCCESS);
+    const LanceDBError status = lancedb_query_execute_with_status(query, &result, &error_message);
+    // The SDK reports the unresolved column, not a NULL pointer and a lost error
+    REQUIRE(status != LANCEDB_SUCCESS);
+    REQUIRE(status != LANCEDB_UNKNOWN);
     REQUIRE(result == nullptr);
     REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
     lancedb_free_string(error_message);
 
     // A null builder is rejected without a query

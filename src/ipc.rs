@@ -82,16 +82,57 @@ pub unsafe extern "C" fn lancedb_ipc_buffer_free(buffer: *mut LanceDBIpcBuffer) 
     (*buffer).len = 0;
 }
 
+/// Smallest possible Arrow IPC file: header magic, footer length and footer magic
+const MIN_IPC_FILE_LEN: usize = 18;
+
+/// Reject bytes that cannot hold the footer their own last ten bytes announce
+///
+/// The Arrow reader sizes its footer buffer from the length stored in the file,
+/// so checking that the footer fits the input keeps a truncated or crafted file
+/// from asking for an allocation larger than the bytes the caller passed.
+fn check_ipc_file_bounds(data: &[u8]) -> Result<(), ArrowError> {
+    if data.len() < MIN_IPC_FILE_LEN {
+        return Err(ArrowError::ParseError(format!(
+            "a file of {} bytes is too short to hold an Arrow IPC footer",
+            data.len()
+        )));
+    }
+
+    let footer_length_and_magic: [u8; 10] = data[data.len() - 10..]
+        .try_into()
+        .expect("the last ten bytes exist in a checked buffer");
+    let footer_len = arrow_ipc::reader::read_footer_length(footer_length_and_magic)?;
+    if footer_len > data.len() - MIN_IPC_FILE_LEN {
+        return Err(ArrowError::ParseError(format!(
+            "a footer of {footer_len} bytes does not fit a file of {} bytes",
+            data.len()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Decode every batch of a borrowed Arrow IPC file
 ///
 /// The reader stays behind this call: it borrows `data`, which the caller may
 /// release as soon as the function returns. Decoding everything up front makes
 /// a failure in any batch an input error before a table can be mutated.
 pub(crate) fn read_ipc_file(data: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), ArrowError> {
+    check_ipc_file_bounds(data)?;
     let reader = FileReader::try_new(Cursor::new(data), None)?;
     let schema = reader.schema();
     let batches = reader.collect::<Result<Vec<RecordBatch>, ArrowError>>()?;
     Ok((schema, batches))
+}
+
+/// Run a decode under a panic barrier
+///
+/// The Arrow IPC decoder indexes and unwraps fields it read from the file, so a
+/// malformed batch can panic instead of returning an error. Containing the panic
+/// here keeps it from unwinding across the C boundary: the caller sees
+/// `LANCEDB_INVALID_INPUT` like for any other unreadable file.
+fn contain_decode_panic<T>(decode: impl FnOnce() -> T) -> Result<T, ()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)).map_err(|_| ())
 }
 
 /// A reader over the batches decoded from an Arrow IPC file
@@ -117,7 +158,8 @@ impl RecordBatchReader for DecodedBatchesReader {
 /// Decode an Arrow IPC file into an owned reader and/or an Arrow C ABI schema
 ///
 /// # Safety
-/// - `data` must point to `len` readable bytes that stay valid for the call
+/// - `data` must point to `len` readable bytes that stay valid for the call. It
+///   may be NULL only when `len` is 0, which is reported as empty input.
 /// - `reader_out` and `schema_out` must be writable when not NULL, and at least
 ///   one of them must not be NULL
 /// - `error_message` can be NULL to ignore detailed error messages
@@ -126,7 +168,8 @@ impl RecordBatchReader for DecodedBatchesReader {
 /// - `LANCEDB_SUCCESS` with the requested outputs set
 /// - `LANCEDB_INVALID_ARGUMENT` for a NULL argument
 /// - `LANCEDB_INVALID_INPUT` when the bytes are not a readable Arrow IPC file,
-///   including when any batch is truncated or corrupt
+///   including when the input is empty, a size cannot describe a buffer, or any
+///   batch is truncated or corrupt
 ///
 /// Every batch is decoded before this function returns, so the caller may
 /// release `data` immediately. A returned reader owns all batches and is freed
@@ -150,10 +193,11 @@ pub unsafe extern "C" fn lancedb_record_batch_reader_from_ipc_file(
     }
     clear_error_message(error_message);
 
-    if data.is_null() || (reader_out.is_null() && schema_out.is_null()) {
+    if (reader_out.is_null() && schema_out.is_null()) || (data.is_null() && len > 0) {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
+    // A NULL pointer with no bytes is the empty input described below
     if len == 0 {
         set_custom_error_message(
             error_message,
@@ -161,14 +205,30 @@ pub unsafe extern "C" fn lancedb_record_batch_reader_from_ipc_file(
         );
         return LanceDBError::InvalidInput;
     }
+    // A length that cannot describe a Rust slice is input the decoder rejects
+    // before any pointer arithmetic happens
+    if len > isize::MAX as usize {
+        set_custom_error_message(
+            error_message,
+            "Invalid input: the size is too large to be an Arrow IPC file",
+        );
+        return LanceDBError::InvalidInput;
+    }
 
     let bytes = std::slice::from_raw_parts(data, len);
-    let (schema, batches) = match read_ipc_file(bytes) {
-        Ok(decoded) => decoded,
-        Err(error) => {
+    let (schema, batches) = match contain_decode_panic(|| read_ipc_file(bytes)) {
+        Ok(Ok(decoded)) => decoded,
+        Ok(Err(error)) => {
             set_custom_error_message(
                 error_message,
                 &format!("Invalid input: failed to read the Arrow IPC file: {error}"),
+            );
+            return LanceDBError::InvalidInput;
+        }
+        Err(()) => {
+            set_custom_error_message(
+                error_message,
+                "Invalid input: the Arrow IPC decoder could not read this file",
             );
             return LanceDBError::InvalidInput;
         }
@@ -224,4 +284,144 @@ pub(crate) fn write_ipc_file_from_schema(schema: &Schema) -> Result<Vec<u8>, Arr
     let mut writer = FileWriter::try_new(Vec::<u8>::new(), schema)?;
     writer.finish()?;
     writer.into_inner()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use arrow_array::{Int32Array, StringArray};
+    use arrow_schema::{DataType, Field};
+
+    use crate::connection::get_runtime;
+    use crate::error::error_to_error_code;
+
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]))
+    }
+
+    fn test_batch(schema: Arc<Schema>, keys: &[&str], values: &[i32]) -> RecordBatch {
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(keys.to_vec())),
+                Arc::new(Int32Array::from(values.to_vec())),
+            ],
+        )
+        .expect("a valid test batch")
+    }
+
+    /// A stream over prepared items, so a test can decide where an SDK error or
+    /// a zero-row batch appears without depending on a real query
+    struct TestStream {
+        schema: Arc<Schema>,
+        batches: std::vec::IntoIter<Result<RecordBatch, lancedb::error::Error>>,
+    }
+
+    impl futures::Stream for TestStream {
+        type Item = Result<RecordBatch, lancedb::error::Error>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.batches.next())
+        }
+    }
+
+    impl lancedb::arrow::RecordBatchStream for TestStream {
+        fn schema(&self) -> Arc<Schema> {
+            self.schema.clone()
+        }
+    }
+
+    fn test_stream(
+        schema: Arc<Schema>,
+        batches: Vec<Result<RecordBatch, lancedb::error::Error>>,
+    ) -> SendableRecordBatchStream {
+        Box::pin(TestStream {
+            schema,
+            batches: batches.into_iter(),
+        })
+    }
+
+    fn write_test_file(schema: Arc<Schema>, batches: Vec<RecordBatch>) -> Vec<u8> {
+        get_runtime()
+            .block_on(write_ipc_file_from_stream(
+                schema.clone(),
+                test_stream(schema, batches.into_iter().map(Ok).collect()),
+            ))
+            .expect("the stream is valid")
+    }
+
+    #[test]
+    fn writes_batches_in_stream_order_including_zero_row_batches() {
+        let schema = test_schema();
+        let bytes = write_test_file(
+            schema.clone(),
+            vec![
+                test_batch(schema.clone(), &["a", "b"], &[1, 2]),
+                test_batch(schema.clone(), &[], &[]),
+                test_batch(schema.clone(), &["c"], &[3]),
+            ],
+        );
+
+        let mut reader = FileReader::try_new(Cursor::new(bytes), None).expect("a readable file");
+        assert_eq!(reader.schema().fields().len(), 2);
+        let rows: Vec<usize> = reader
+            .by_ref()
+            .map(|batch| batch.expect("a readable batch").num_rows())
+            .collect();
+        assert_eq!(rows, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn stream_error_after_a_batch_keeps_the_sdk_error() {
+        let schema = test_schema();
+        let outcome = get_runtime().block_on(write_ipc_file_from_stream(
+            schema.clone(),
+            test_stream(
+                schema.clone(),
+                vec![
+                    Ok(test_batch(schema.clone(), &["a"], &[1])),
+                    Ok(test_batch(schema, &["b"], &[2])),
+                    Err(lancedb::error::Error::InvalidInput {
+                        message: "synthetic stream failure".to_string(),
+                    }),
+                ],
+            ),
+        ));
+
+        let error = outcome.expect_err("a stream error must fail the whole file");
+        assert_eq!(error_to_error_code(&error), LanceDBError::InvalidInput);
+        assert!(error.to_string().contains("synthetic stream failure"));
+    }
+
+    #[test]
+    fn rejects_a_footer_that_does_not_fit_the_file() {
+        let schema = test_schema();
+        let mut bytes = write_test_file(schema.clone(), vec![test_batch(schema, &["a"], &[1])]);
+
+        // Announce a footer one byte longer than the file can hold
+        let announced = bytes.len() as i32 + 1;
+        let offset = bytes.len() - 10;
+        bytes[offset..offset + 4].copy_from_slice(&announced.to_le_bytes());
+
+        let error = read_ipc_file(&bytes).expect_err("the footer cannot fit the input");
+        assert!(error.to_string().contains("does not fit"));
+    }
+
+    #[test]
+    fn a_decoder_panic_is_contained_as_invalid_input() {
+        let contained = contain_decode_panic(|| -> Result<(), ArrowError> {
+            panic!("synthetic decoder panic")
+        });
+        assert!(contained.is_err());
+    }
 }

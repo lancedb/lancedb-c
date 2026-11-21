@@ -1416,8 +1416,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Arrow IPC output", "[ve
     REQUIRE(error_message == nullptr);
 
     auto contents = read_ipc_file(buffer.data, buffer.len);
-    REQUIRE(contents.schema->num_fields() == 1);
+    // The projection keeps the requested column and the SDK keeps the distance
+    // column it added for a vector query
+    REQUIRE(contents.schema->num_fields() == 2);
     REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.schema->field(1)->name() == "_distance");
     REQUIRE(contents.batches.size() >= 1);
     REQUIRE(read_ipc_file_strings(contents, 0).size() == 5);
 
@@ -1437,10 +1440,14 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Arrow IPC output", "[ve
     REQUIRE(error_message == nullptr);
 
     LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(1);
-    REQUIRE(lancedb_vector_query_execute_with_status(query, &result, &error_message)
-        != LANCEDB_SUCCESS);
+    const LanceDBError status =
+        lancedb_vector_query_execute_with_status(query, &result, &error_message);
+    // The SDK reports the unresolved column, not a NULL pointer and a lost error
+    REQUIRE(status != LANCEDB_SUCCESS);
+    REQUIRE(status != LANCEDB_UNKNOWN);
     REQUIRE(result == nullptr);
     REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
     lancedb_free_string(error_message);
 
     // The legacy entry point keeps its null-pointer return convention

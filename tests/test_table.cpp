@@ -1815,6 +1815,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
       REQUIRE(reader == nullptr);
       REQUIRE(c_schema == nullptr);
       REQUIRE(error_message != nullptr);
+      // The decoding failure keeps its diagnostic instead of a generic message
+      REQUIRE(std::string(error_message).find("Invalid input") != std::string::npos);
       lancedb_free_string(error_message);
     }
 
