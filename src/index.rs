@@ -645,10 +645,10 @@ pub unsafe extern "C" fn lancedb_free_index_list(indices: *mut *mut c_char, coun
 #[repr(C)]
 #[derive(Debug)]
 pub struct LanceDBIndexInfo {
-    pub name: *mut c_char,
-    pub columns: *mut *mut c_char,
-    pub num_columns: usize,
-    pub index_type: *mut c_char,
+    name: *mut c_char,
+    columns: *mut *mut c_char,
+    num_columns: usize,
+    index_type: *mut c_char,
 }
 
 impl Drop for LanceDBIndexInfo {
@@ -715,7 +715,7 @@ unsafe fn index_info_from_sdk(index: lancedb::index::IndexConfig) -> Result<Lanc
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_list_indices_info(
     table: *const LanceDBTable,
-    indices_out: *mut *mut LanceDBIndexInfo,
+    indices_out: *mut *const LanceDBIndexInfo,
     count_out: *mut usize,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
@@ -724,7 +724,7 @@ pub unsafe extern "C" fn lancedb_table_list_indices_info(
         return LanceDBError::InvalidArgument;
     }
 
-    *indices_out = ptr::null_mut();
+    *indices_out = ptr::null();
     *count_out = 0;
 
     let tbl = &(*table).inner;
@@ -748,7 +748,7 @@ pub unsafe extern "C" fn lancedb_table_list_indices_info(
             }
 
             *count_out = infos.len();
-            *indices_out = Box::into_raw(infos.into_boxed_slice()) as *mut LanceDBIndexInfo;
+            *indices_out = Box::into_raw(infos.into_boxed_slice()) as *const LanceDBIndexInfo;
             LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
@@ -762,12 +762,12 @@ pub unsafe extern "C" fn lancedb_table_list_indices_info(
 /// - `count` must match the count returned by `lancedb_table_list_indices_info`
 /// - Safe to call with a NULL pointer
 #[no_mangle]
-pub unsafe extern "C" fn lancedb_free_index_info(indices: *mut LanceDBIndexInfo, count: usize) {
+pub unsafe extern "C" fn lancedb_free_index_info(indices: *const LanceDBIndexInfo, count: usize) {
     if indices.is_null() {
         return;
     }
 
-    let slice = std::ptr::slice_from_raw_parts_mut(indices, count);
+    let slice = std::ptr::slice_from_raw_parts_mut(indices as *mut LanceDBIndexInfo, count);
     drop(Box::from_raw(slice));
 }
 

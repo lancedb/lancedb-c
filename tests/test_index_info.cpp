@@ -68,7 +68,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Info", "[index]") {
         LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    LanceDBIndexInfo* infos = nullptr;
+    const LanceDBIndexInfo* infos = nullptr;
     size_t count = 0;
     REQUIRE(lancedb_table_list_indices_info(table, &infos, &count, &error_message) ==
             LANCEDB_SUCCESS);
@@ -140,7 +140,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Info", "[index]") {
     LanceDBTable* table = create_table_with_data(table_name, 10, 0);
     REQUIRE(table != nullptr);
 
-    LanceDBIndexInfo* infos = nullptr;
+    const LanceDBIndexInfo* infos = nullptr;
     size_t count = 1;
     char* error_message = nullptr;
     REQUIRE(lancedb_table_list_indices_info(table, &infos, &count, &error_message) ==
@@ -158,7 +158,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Info", "[index]") {
     LanceDBTable* table = create_table_with_data(table_name, 10, 0);
     REQUIRE(table != nullptr);
 
-    LanceDBIndexInfo* infos = nullptr;
+    const LanceDBIndexInfo* infos = nullptr;
     size_t count = 0;
     REQUIRE(lancedb_table_list_indices_info(nullptr, &infos, &count, nullptr) ==
             LANCEDB_INVALID_ARGUMENT);

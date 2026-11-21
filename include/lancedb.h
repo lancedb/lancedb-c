@@ -1761,10 +1761,10 @@ void lancedb_free_arrow_arrays(
  * with lancedb_free_index_info().
  */
 typedef struct {
-    char* name;          // Name of the index as assigned by LanceDB
-    char** columns;      // Ordered column names covered by the index
-    size_t num_columns;  // Number of entries in columns
-    char* index_type;    // SDK index type, for example "IVF_PQ", "BTREE" or "FTS"
+    const char* const name;           // Name of the index as assigned by LanceDB
+    const char* const* const columns; // Ordered column names covered by the index
+    const size_t num_columns;         // Number of entries in columns
+    const char* const index_type;     // SDK index type, for example "IVF_PQ", "BTREE" or "FTS"
 } LanceDBIndexInfo;
 
 /**
@@ -1788,7 +1788,7 @@ typedef struct {
  */
 LanceDBError lancedb_table_list_indices_info(
     const LanceDBTable* table,
-    LanceDBIndexInfo** indices_out,
+    const LanceDBIndexInfo** indices_out,
     size_t* count_out,
     char** error_message
 );
@@ -1801,7 +1801,7 @@ LanceDBError lancedb_table_list_indices_info(
  *
  * Safe to call with a NULL pointer.
  */
-void lancedb_free_index_info(LanceDBIndexInfo* indices, size_t count);
+void lancedb_free_index_info(const LanceDBIndexInfo* indices, size_t count);
 
 /**
  * List all versions of the table
