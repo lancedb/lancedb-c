@@ -845,7 +845,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Filter on non-existent 
 
   // Filter on a column that does not exist in the table
   error_message = nullptr;
-  result = lancedb_vector_query_where_filter(query, "key = \"key_42\" OR unknown = \"value\"", &error_message);
+  result = lancedb_vector_query_where_filter(query, "key = 'key_42' OR unknown = 'value'", &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time

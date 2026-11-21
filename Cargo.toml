@@ -18,19 +18,19 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 tokio = { version = "1.23", features = ["rt-multi-thread"] }
 libc = "0.2"
-lancedb = { version = "0.33.0", features = ["remote"] }
-lance = "=9.0.0"
-lance-io = "=9.0.0"
-lance-namespace = "=9.0.0"
-arrow-array = "58.0"
-arrow-data = "58.0"
-arrow-schema = "58.0"
-datafusion-common = "54"
-datafusion-expr = "54"
-datafusion-functions-json = "0.54"
-datafusion-functions = { version = "54", default-features = false, features = ["string_expressions"] }
-datafusion-functions-nested = "54"
-datafusion-physical-expr = "54"
+lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.21", features = ["remote"] }
+lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
+lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
+lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
+arrow-array = "59.2.0"
+arrow-data = "59.2.0"
+arrow-schema = "59.2.0"
+datafusion-common = "55"
+datafusion-expr = "55"
+datafusion-functions-json = "0.55"
+datafusion-functions = { version = "55", default-features = false, features = ["string_expressions"] }
+datafusion-functions-nested = "55"
+datafusion-physical-expr = "55"
 futures = "0"
 stacker = "0.1"
 chrono = "0"

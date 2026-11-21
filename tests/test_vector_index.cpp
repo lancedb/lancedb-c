@@ -181,12 +181,12 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     lancedb_table_free(table);
   }
 
-  SECTION("Create IVF_FLAT index on empty table should fail") {
+  SECTION("Create IVF_FLAT index on empty table") {
     // Create empty table
     create_empty_table(table_name);
     LanceDBTable* table = open_table(table_name);
 
-    // Try to create IVF_FLAT index on empty table (should fail - needs training data)
+    // IVF_FLAT index creation is allowed before any data is added.
     const char* columns[] = {"data"};
     LanceDBVectorIndexConfig config = {
       .num_partitions = -1,
@@ -201,13 +201,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     LanceDBError result = lancedb_table_create_vector_index(
         table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, &error_message);
 
-    // Vector index creation on empty table should fail
-    REQUIRE(result != LANCEDB_SUCCESS);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
 
-    if (error_message) {
-      INFO("Error message: " << error_message);
-      lancedb_free_string(error_message);
-    }
+    // The newly created index must be listed on the still-empty table.
+    char** indices = nullptr;
+    size_t count = 0;
+    result = lancedb_table_list_indices(table, &indices, &count, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    lancedb_free_index_list(indices, count);
 
     lancedb_table_free(table);
   }
