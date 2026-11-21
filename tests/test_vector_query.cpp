@@ -963,6 +963,47 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - post-filter after vecto
     lancedb_free_string(postfilter_plan);
   }
 
+  SECTION("Explain plan keeps a SQL filter with post-filtering") {
+    auto make_sql_filtered_query = [&](bool postfilter) {
+      LanceDBVectorQuery* query = lancedb_vector_query_new(
+          table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+      REQUIRE(query != nullptr);
+
+      char* error_message = nullptr;
+      REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_99'", &error_message) == LANCEDB_SUCCESS);
+      if (postfilter) {
+        REQUIRE(lancedb_vector_query_postfilter(query, &error_message) == LANCEDB_SUCCESS);
+      }
+      REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      return query;
+    };
+
+    LanceDBVectorQuery* prefilter_query = make_sql_filtered_query(false);
+    char* prefilter_plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        prefilter_query, true, &prefilter_plan, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(prefilter_plan != nullptr);
+    lancedb_vector_query_free(prefilter_query);
+
+    LanceDBVectorQuery* postfilter_query = make_sql_filtered_query(true);
+    char* postfilter_plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        postfilter_query, true, &postfilter_plan, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(postfilter_plan != nullptr);
+    lancedb_vector_query_free(postfilter_query);
+
+    // The SQL predicate must reach the plan in both modes, and post-filtering
+    // must still move the filter after the vector search.
+    REQUIRE(std::string(prefilter_plan).find("key_99") != std::string::npos);
+    REQUIRE(std::string(postfilter_plan).find("key_99") != std::string::npos);
+    REQUIRE(std::string(prefilter_plan) != std::string(postfilter_plan));
+
+    lancedb_free_string(prefilter_plan);
+    lancedb_free_string(postfilter_plan);
+  }
+
   lancedb_table_free(table);
 }
 
