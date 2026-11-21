@@ -1679,6 +1679,44 @@ LanceDBError lancedb_table_index_stats(
 );
 
 /**
+ * Wait until the named indices are fully indexed
+ *
+ * Blocks the calling thread and polls the index statistics until every named index
+ * reports no unindexed rows, or until the budget runs out. Waiting does not build or
+ * extend an index, so an index that does not cover all the rows of the table never
+ * becomes fully indexed by waiting: use the index creation or optimization functions to
+ * (re)build it, and wait to learn when the build has committed.
+ *
+ * The names are waited on in the same call, and every one of them must be an existing
+ * index. Waiting for all the indices of a table is not part of this function: pass the
+ * names returned by lancedb_table_list_indices(). There is no cancellation.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param index_names - array of null-terminated C strings containing index names
+ * @param num_index_names - number of names in the array, at least 1
+ * @param timeout_ms - budget in milliseconds, greater than 0. The SDK polls once per
+ *   second and caps the budget at two hours; a larger budget is rejected with the
+ *   maximum the SDK reports
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS once every named index is fully indexed, LANCEDB_TIMEOUT when
+ *   the budget runs out, LANCEDB_INVALID_ARGUMENT for invalid arguments, or the error
+ *   code of the SDK failure
+ *
+ * The budget is checked between polls, so the call can return up to one poll interval
+ * after it runs out.
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_wait_for_index(
+    const LanceDBTable* table,
+    const char* const* index_names,
+    size_t num_index_names,
+    uint64_t timeout_ms,
+    char** error_message
+);
+
+/**
  * Free Arrow arrays returned by vector search functions
  *
  * @param arrays - array of Arrow C ABI array pointers

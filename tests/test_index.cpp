@@ -638,3 +638,79 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]")
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Wait For Index", "[index]") {
+  const std::string table_name = "wait_for_index_test";
+  LanceDBTable* table = create_table_with_data(table_name, 100, 0);
+  REQUIRE(table != nullptr);
+
+  const char* columns[] = {"key"};
+  LanceDBScalarIndexConfig config = {
+    .replace = 0
+  };
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_scalar_index(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  // the wait is addressed by name, so read back the name the index was created with
+  char** indices = nullptr;
+  size_t count = 0;
+  REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(count == 1);
+  const std::string index_name = indices[0];
+  lancedb_free_index_list(indices, count);
+
+  SECTION("Waiting for a fully indexed index succeeds") {
+    const char* index_names[] = {index_name.c_str()};
+    REQUIRE(lancedb_table_wait_for_index(
+        table, index_names, 1, 30 * 1000, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+
+  SECTION("Waiting for an index that does not exist times out") {
+    const char* index_names[] = {"no_such_index"};
+    REQUIRE(lancedb_table_wait_for_index(
+        table, index_names, 1, 100, &error_message) == LANCEDB_TIMEOUT);
+    REQUIRE(error_message != nullptr);
+    INFO("Error message: " << error_message);
+    // the SDK names the indices it was still waiting for
+    REQUIRE(std::string(error_message).find("no_such_index") != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("A budget above the SDK maximum is rejected by the SDK") {
+    const char* index_names[] = {index_name.c_str()};
+    // the maximum belongs to the SDK: ask for three hours and expect its own report
+    REQUIRE(lancedb_table_wait_for_index(
+        table, index_names, 1, 3 * 60 * 60 * 1000, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    INFO("Error message: " << error_message);
+    REQUIRE(std::string(error_message).find("timeout must be less than") != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Waiting with invalid arguments fails") {
+    const char* index_names[] = {index_name.c_str()};
+    const char* null_names[] = {nullptr};
+    const char* invalid_names[] = {INVALID_UTF8};
+
+    REQUIRE(lancedb_table_wait_for_index(
+        nullptr, index_names, 1, 1000, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_wait_for_index(
+        table, nullptr, 1, 1000, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_wait_for_index(
+        table, index_names, 0, 1000, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_wait_for_index(
+        table, null_names, 1, 1000, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_wait_for_index(
+        table, invalid_names, 1, 1000, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    // a zero budget is a missing one, not an unbounded wait
+    REQUIRE(lancedb_table_wait_for_index(
+        table, index_names, 1, 0, nullptr) == LANCEDB_INVALID_ARGUMENT);
+  }
+
+  lancedb_table_free(table);
+}
