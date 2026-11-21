@@ -1794,6 +1794,12 @@ typedef enum {
  * The fields follow the compaction options of the LanceDB SDK. set_fields
  * selects the fields that are read; every other field keeps the SDK default.
  * Sizes are checked against size_t before the compaction starts.
+ *
+ * An Enterprise table plans compaction on the server. It accepts only the
+ * overrides the server supports and rejects the others with
+ * LANCEDB_NOT_SUPPORTED before submission. It also treats a
+ * target_rows_per_fragment equal to the SDK default (1048576) as omitted, even
+ * when its bit is set, so a table-level target can win over that value.
  */
 typedef struct {
     uint32_t set_fields;                    // Bitmask of LanceDBCompactionField values (0 = defaults)
@@ -1827,14 +1833,15 @@ typedef enum {
  *
  * older_than_nanos is the minimum age of a prunable version, in nanoseconds, so
  * a sub-second age keeps its exact length. The age must not be negative. When the
- * bit is not set, the SDK default age applies; when it is set, zero means an
- * immediate cutoff that prunes every old version.
+ * bit is not set, the SDK default age applies. When it is set, zero means a
+ * cutoff at the current time: every version older than now is removed, while the
+ * latest version and protected versions still survive.
  *
  * delete_unverified permits deleting files that are newer than the SDK's safety
  * margin for in-progress transactions; setting it can corrupt a dataset that
  * another process is still writing, so leave it unset unless that is safe.
- * error_if_tagged_old_versions makes the prune fail when an old version is still
- * tagged instead of silently retaining it.
+ * Tagged versions are retained by default; error_if_tagged_old_versions makes
+ * the prune fail instead of silently retaining them.
  */
 typedef struct {
     uint32_t set_fields;                    // Bitmask of LanceDBPruneField values (0 = defaults)
@@ -1901,11 +1908,11 @@ typedef struct {
  * index optimization with their defaults, exactly like
  * lancedb_table_optimize(LANCEDB_OPTIMIZE_ALL).
  *
- * This entry point lets the SDK decide which actions and options a table backend
- * supports: for example, an Enterprise table only hosts LANCEDB_OPTIMIZE_COMPACT
- * and returns LANCEDB_NOT_SUPPORTED for the other actions. The returned metrics
- * are the ones the SDK reports, including its placeholder metrics for a remote
- * compaction.
+ * The SDK decides which actions and options a table backend supports: an
+ * Enterprise table only hosts LANCEDB_OPTIMIZE_COMPACT and returns
+ * LANCEDB_NOT_SUPPORTED for the other actions. Its compaction returns once the
+ * server accepts the job, with zeroed placeholder metrics while the compaction
+ * may still be running; a local table reports the work it did.
  *
  * Invalid input is rejected with LANCEDB_INVALID_ARGUMENT before any optimization
  * runs: an action value that is not a LanceDBOptimizeType enumerator, an unknown

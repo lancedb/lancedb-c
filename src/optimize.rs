@@ -366,3 +366,51 @@ pub unsafe extern "C" fn lancedb_table_optimize_with_action(
         Err(e) => handle_error(&e, error_message),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The prune age crosses the C boundary as nanoseconds and reaches the SDK
+    /// unchanged, with its presence bit deciding whether the SDK sees an age.
+    #[test]
+    fn prune_keeps_the_configured_nanosecond_age() {
+        let config = LanceDBOptimizeConfig {
+            action: 2, // LANCEDB_OPTIMIZE_PRUNE
+            prune: LanceDBPruneOptions {
+                set_fields: PRUNE_OLDER_THAN,
+                older_than_nanos: 500_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        match build_optimize_action(&config) {
+            Ok(OptimizeAction::Prune {
+                older_than,
+                delete_unverified,
+                error_if_tagged_old_versions,
+            }) => {
+                assert_eq!(older_than, Some(Duration::nanoseconds(500_000_000)));
+                assert_eq!(delete_unverified, None);
+                assert_eq!(error_if_tagged_old_versions, None);
+            }
+            Ok(_) => panic!("expected a prune action"),
+            Err(message) => panic!("expected a prune action, got error: {message}"),
+        }
+
+        // The value alone does not set the age; the presence bit does.
+        let without_age = LanceDBOptimizeConfig {
+            prune: LanceDBPruneOptions {
+                set_fields: 0,
+                ..config.prune
+            },
+            ..config
+        };
+        match build_optimize_action(&without_age) {
+            Ok(OptimizeAction::Prune { older_than, .. }) => assert_eq!(older_than, None),
+            Ok(_) => panic!("expected a prune action"),
+            Err(message) => panic!("expected a prune action, got error: {message}"),
+        }
+    }
+}

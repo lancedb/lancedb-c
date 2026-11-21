@@ -708,8 +708,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize With Action", "[index]"
     REQUIRE(kept.prune.bytes_removed == 0);
     REQUIRE(lancedb_table_version(table) == 4);
 
-    // A microsecond is older than every version this table wrote, far below the
-    // whole-second boundary that a coarser unit would round to a different cutoff.
+    // A microsecond keeps this young fixture prunable, so a whole-second
+    // round-up would leave its old versions and fail here. It cannot catch a
+    // truncation to zero, because a cutoff at now also removes them; the Rust
+    // conversion test pins the exact duration.
     LanceDBOptimizeConfig sub_second = {};
     sub_second.action = LANCEDB_OPTIMIZE_PRUNE;
     sub_second.prune.set_fields =
