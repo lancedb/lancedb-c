@@ -1780,8 +1780,7 @@ LanceDBIndexOptions lancedb_index_options_default(void);
  * concurrent writes can extend it and a same-name prior index can satisfy it
  * before this submission finishes. The SDK submits the create/replace request
  * before checking its two-hour budget cap, so an over-cap error can arrive
- * after the server accepted the request. Waiting does not cover rows added
- * after creation.
+ * after the server accepted the request.
  *
  * Values outside the documented ranges, invalid UTF-8, unsupported index types
  * and SDK errors are returned through error_message when provided.
