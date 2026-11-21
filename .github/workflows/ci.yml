@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: Build ${{ matrix.lib_type }} on ${{ matrix.os }}
@@ -57,6 +61,9 @@ jobs:
 
       - name: Build
         run: ninja -C build
+
+      - name: Check C17 consumer
+        run: ninja -C build check-c17
 
       - name: Check
         if: matrix.lib_type == 'shared'
@@ -128,8 +135,10 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 4
 
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+      - name: Test C and C++ consumers
+        run: |
+          ctest --test-dir build -R "^lancedb_c17_consumer$" --output-on-failure --no-tests=error
+          ctest --test-dir build -R "^package_consumer$" --output-on-failure --no-tests=error
 
   build_almalinux:
     name: Build on AlmaLinux 10

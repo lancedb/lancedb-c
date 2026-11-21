@@ -785,17 +785,78 @@ if(BUILD_TESTS)
   endif()
 endif()
 
-if(BUILD_CONSUMER_TEST)
+# Compile and run the public header with a strict C17 consumer. The source has
+# no C++ dependencies, so this catches C-incompatible header changes and C ABI
+# failures that the C++ tests cannot see. BUILD_CONSUMER_TEST lets platform CI
+# exercise this check without enabling the Catch2 C++ test suite.
+if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
   enable_testing()
-  add_executable(package_consumer tests/package_consumer.cpp)
-  target_link_libraries(package_consumer PRIVATE lancedb Threads::Threads)
-  target_include_directories(package_consumer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  set_target_properties(package_consumer PROPERTIES BUILD_RPATH ${RUST_TARGET_DIR})
-  add_test(NAME package_consumer
-    COMMAND package_consumer "${CMAKE_BINARY_DIR}/package-consumer-db")
-  if(WIN32)
-    set_tests_properties(package_consumer PROPERTIES
-      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${RUST_TARGET_DIR}")
+
+  add_executable(lancedb_c17_consumer tests/c17_consumer.c)
+  target_link_libraries(lancedb_c17_consumer
+    PRIVATE
+    lancedb
+    Threads::Threads
+  )
+  target_include_directories(lancedb_c17_consumer
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_compile_options(lancedb_c17_consumer PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Werror;-pedantic>
+    $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+  )
+  set_target_properties(lancedb_c17_consumer PROPERTIES
+    C_STANDARD 17
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  if(TARGET coverage)
+    add_dependencies(coverage lancedb_c17_consumer)
+  endif()
+
+  set(_c17_ctest_config_args)
+  if(CMAKE_CONFIGURATION_TYPES)
+    set(_c17_ctest_config_args -C $<CONFIG>)
+  endif()
+
+  add_custom_target(check-c17
+    COMMAND ${TEST_ENV_PREFIX} ${CMAKE_CTEST_COMMAND}
+      --test-dir ${CMAKE_CURRENT_BINARY_DIR}
+      ${_c17_ctest_config_args}
+      -R "^lancedb_c17_consumer$"
+      --output-on-failure
+      --no-tests=error
+    DEPENDS lancedb_c17_consumer
+    COMMENT "Checking the public header with a strict C17 consumer..."
+    VERBATIM
+  )
+
+  add_test(NAME lancedb_c17_consumer
+    COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_c17_consumer>
+      ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
+  )
+
+  if(BUILD_CONSUMER_TEST)
+    add_executable(package_consumer tests/package_consumer.cpp)
+    target_link_libraries(package_consumer PRIVATE lancedb Threads::Threads)
+    target_include_directories(package_consumer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set_target_properties(package_consumer PROPERTIES BUILD_RPATH ${RUST_TARGET_DIR})
+    add_test(NAME package_consumer
+      COMMAND package_consumer "${CMAKE_BINARY_DIR}/package-consumer-db")
+  endif()
+
+  if(WIN32 AND BUILD_SHARED_LIBS)
+    # The DLL stays in the Rust target directory; put it on the test PATH
+    # instead of adding a second DLL staging step.
+    set(_consumer_tests lancedb_c17_consumer)
+    if(BUILD_CONSUMER_TEST)
+      list(APPEND _consumer_tests package_consumer)
+    endif()
+    set_tests_properties(${_consumer_tests} PROPERTIES
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${RUST_TARGET_DIR}"
+    )
   endif()
 endif()
 
@@ -809,7 +870,7 @@ add_custom_target(clean-all
 # Check target for code quality
 add_custom_target(check
   COMMAND cargo fmt --check
-  COMMAND cargo clippy
+  COMMAND cargo clippy --all-targets -- -D warnings
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Running Rust formatting and linting checks..."
 )
