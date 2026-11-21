@@ -612,79 +612,52 @@ pub struct LanceDBIndexInfo {
     pub index_type: *mut c_char,
 }
 
-/// Free the allocations owned by one LanceDBIndexInfo
-unsafe fn free_index_info(info: &mut LanceDBIndexInfo) {
-    if !info.name.is_null() {
-        drop(CString::from_raw(info.name));
-        info.name = ptr::null_mut();
+/// Free the allocations owned by one fully initialized LanceDBIndexInfo
+unsafe fn free_index_info(info: &LanceDBIndexInfo) {
+    drop(CString::from_raw(info.name));
+    for i in 0..info.num_columns {
+        drop(CString::from_raw(*info.columns.add(i)));
     }
-
-    if !info.columns.is_null() {
-        for i in 0..info.num_columns {
-            let column = *info.columns.add(i);
-            if !column.is_null() {
-                drop(CString::from_raw(column));
-            }
-        }
-        libc::free(info.columns as *mut libc::c_void);
-        info.columns = ptr::null_mut();
-    }
-    info.num_columns = 0;
-
-    if !info.index_type.is_null() {
-        drop(CString::from_raw(info.index_type));
-        info.index_type = ptr::null_mut();
-    }
+    libc::free(info.columns as *mut libc::c_void);
+    drop(CString::from_raw(info.index_type));
 }
 
 /// Fill one C index description from the SDK's index configuration
 ///
-/// On failure the destination stays zeroed, so the caller can pass it to
-/// free_index_info without tracking which fields were allocated.
+/// On failure the destination is left untouched. All temporary allocations are
+/// owned by Rust locals until they are moved into the destination.
 unsafe fn fill_index_info(
     dest: *mut LanceDBIndexInfo,
     index: lancedb::index::IndexConfig,
 ) -> Result<(), ()> {
-    let mut info = LanceDBIndexInfo {
-        name: ptr::null_mut(),
-        columns: ptr::null_mut(),
-        num_columns: 0,
-        index_type: ptr::null_mut(),
-    };
+    let name = CString::new(index.name).map_err(|_| ())?;
+    let index_type = CString::new(index.index_type.to_string()).map_err(|_| ())?;
+    let columns = index
+        .columns
+        .into_iter()
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
 
-    let allocated = (|| -> Result<(), ()> {
-        info.name = CString::new(index.name).map_err(|_| ())?.into_raw();
-        info.index_type = CString::new(index.index_type.to_string())
-            .map_err(|_| ())?
-            .into_raw();
-
-        let num_columns = index.columns.len();
-        if num_columns > 0 {
-            // calloc keeps every entry null until it is filled, so a failure in
-            // the middle of the loop leaves a safely freeable array behind
-            let columns =
-                libc::calloc(num_columns, std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
-            if columns.is_null() {
-                return Err(());
-            }
-            info.columns = columns;
-            info.num_columns = num_columns;
-
-            for (i, column) in index.columns.into_iter().enumerate() {
-                let column = CString::new(column).map_err(|_| ())?;
-                *info.columns.add(i) = column.into_raw();
-            }
-        }
-
-        Ok(())
-    })();
-
-    if allocated.is_err() {
-        free_index_info(&mut info);
+    let num_columns = columns.len();
+    // Allocate at least one slot so a returned entry always has a freeable
+    // column array, even if the SDK reports no column names.
+    let column_ptrs =
+        libc::calloc(num_columns.max(1), std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+    if column_ptrs.is_null() {
         return Err(());
     }
 
-    *dest = info;
+    for (i, column) in columns.into_iter().enumerate() {
+        *column_ptrs.add(i) = column.into_raw();
+    }
+
+    *dest = LanceDBIndexInfo {
+        name: name.into_raw(),
+        columns: column_ptrs,
+        num_columns,
+        index_type: index_type.into_raw(),
+    };
     Ok(())
 }
 
@@ -735,11 +708,9 @@ pub unsafe extern "C" fn lancedb_table_list_indices_info(
 
             for (i, index) in indices.into_iter().enumerate() {
                 if fill_index_info(info_array.add(i), index).is_err() {
-                    // calloc zeroed every entry, including the one that failed
-                    for j in 0..=i {
-                        free_index_info(&mut *info_array.add(j));
-                    }
-                    libc::free(info_array as *mut libc::c_void);
+                    // fill_index_info only writes dest on success, so the entries
+                    // before i are initialized and the current one is still zeroed
+                    lancedb_free_index_info(info_array, i);
                     set_unknown_error_message(error_message);
                     return LanceDBError::Unknown;
                 }
@@ -766,7 +737,7 @@ pub unsafe extern "C" fn lancedb_free_index_info(indices: *mut LanceDBIndexInfo,
     }
 
     for i in 0..count {
-        free_index_info(&mut *indices.add(i));
+        free_index_info(&*indices.add(i));
     }
     libc::free(indices as *mut libc::c_void);
 }
