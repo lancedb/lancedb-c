@@ -104,6 +104,9 @@ jobs:
           search_artifacts: true
           if_no_artifact_found: warn
 
+      # A merge base created before the toolchain pin has a baseline artifact
+      # measured with the runner default. Rebuild it with this pull request's
+      # toolchain so the line counts are comparable.
       - name: Check baseline toolchain
         id: baseline_toolchain
         if: github.event_name == 'pull_request'
