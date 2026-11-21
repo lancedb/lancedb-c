@@ -20,6 +20,28 @@ static std::vector<float> generate_random_query_vector(size_t dimensions) {
   return query_vector;
 }
 
+// Count the rows across all batches in a query result and free the result.
+static size_t count_rows_and_free(LanceDBQueryResult* query_result) {
+  REQUIRE(query_result != nullptr);
+
+  FFI_ArrowArray** arrays = nullptr;
+  FFI_ArrowSchema* schema = nullptr;
+  size_t batch_count = 0;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_result_to_arrow(
+      query_result, &arrays, &schema, &batch_count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  size_t row_count = 0;
+  for (size_t i = 0; i < batch_count; i++) {
+    row_count += reinterpret_cast<ArrowArray*>(arrays[i])->length;
+  }
+
+  lancedb_free_arrow_arrays(arrays, batch_count);
+  lancedb_free_arrow_schema(schema);
+  return row_count;
+}
+
 // Helper function to generate deterministic query vector for a fixed seed
 static std::vector<float> generate_random_query_vector(size_t dimensions, uint32_t seed) {
   std::vector<float> query_vector(dimensions);
@@ -855,6 +877,95 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Filter on non-existent 
   lancedb_table_free(table);
 }
 
+// Post-filtering matches the Rust SDK: the filter runs on the vector search
+// results instead of restricting the search, so it can drop rows and return
+// fewer than the requested limit.
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - post-filter after vector search", "[vector_query]") {
+  const std::string table_name = "vector_query_postfilter_test";
+  constexpr size_t total_rows = 100;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  // With this fixture's ascending vectors, key_0 .. key_4 are the five nearest
+  // rows to an all-zero query vector and key_99 is the farthest.
+  std::vector<float> query_vector(TEST_SCHEMA_DIMENSIONS, 0.0f);
+
+  SECTION("Default pre-filtering finds a match regardless of distance") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = \"key_99\"", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(count_rows_and_free(lancedb_vector_query_execute(query)) == 1);
+  }
+
+  SECTION("Post-filtering applies the filter to the nearest rows") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = \"key_99\"", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_postfilter(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(count_rows_and_free(lancedb_vector_query_execute(query)) == 0);
+  }
+
+  SECTION("Explain plan reflects post-filtering") {
+    auto make_filtered_query = [&](bool postfilter) {
+      LanceDBVectorQuery* query = lancedb_vector_query_new(
+          table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+      REQUIRE(query != nullptr);
+
+      char* error_message = nullptr;
+      REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+      LanceDBExpr* expr = lancedb_expr_binary(
+          lancedb_expr_column("key"),
+          LANCEDB_BINARY_OP_EQ,
+          lancedb_expr_literal_string("key_99"));
+      REQUIRE(expr != nullptr);
+      REQUIRE(lancedb_vector_query_df_filter(query, expr, &error_message) == LANCEDB_SUCCESS);
+      if (postfilter) {
+        REQUIRE(lancedb_vector_query_postfilter(query, &error_message) == LANCEDB_SUCCESS);
+      }
+      REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      return query;
+    };
+
+    LanceDBVectorQuery* prefilter_query = make_filtered_query(false);
+    char* prefilter_plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        prefilter_query, true, &prefilter_plan, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(prefilter_plan != nullptr);
+    lancedb_vector_query_free(prefilter_query);
+
+    LanceDBVectorQuery* postfilter_query = make_filtered_query(true);
+    char* postfilter_plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        postfilter_query, true, &postfilter_plan, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(postfilter_plan != nullptr);
+    lancedb_vector_query_free(postfilter_query);
+
+    // Post-filtering moves the filter after the vector search, so the two
+    // plans must not be identical.
+    REQUIRE(std::string(prefilter_plan) != std::string(postfilter_plan));
+
+    lancedb_free_string(prefilter_plan);
+    lancedb_free_string(postfilter_plan);
+  }
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - DataFusion Expr Filter", "[vector_query][expr]") {
   const std::string table_name = "vector_query_df_filter_test";
   constexpr size_t total_rows = 100;
@@ -1266,6 +1377,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
     REQUIRE(lancedb_vector_query_column(query, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_select(query, nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_where_filter(query, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_postfilter(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
 
     lancedb_vector_query_free(query);

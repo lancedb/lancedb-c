@@ -1215,6 +1215,30 @@ LanceDBError lancedb_vector_query_df_filter(
 );
 
 /**
+ * Make the vector query filter run after the vector search
+ *
+ * By default, the filter set with lancedb_vector_query_where_filter() or
+ * lancedb_vector_query_df_filter() is applied before the vector search.
+ * Calling this function applies the filter to the vector search results instead,
+ * matching the Rust SDK's postfilter().
+ *
+ * This only affects queries that also set a filter. Post-filtering can return
+ * fewer than `limit` rows, or no rows, when the nearest vectors do not match
+ * the filter. Setting a refine_factor can help recover some results.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_postfilter(
+    LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
  * Set distance type for vector query
  *
  * @param query - pointer to LanceDBVectorQuery
