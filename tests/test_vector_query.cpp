@@ -1385,6 +1385,28 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
     }
   }
 
+  SECTION("Invalid distance type values are rejected") {
+    const int invalid_distance_types[] = {-1, 4};
+
+    for (const int distance_type : invalid_distance_types) {
+      LanceDBVectorQuery* query = lancedb_vector_query_new(
+          table, vector.data(), vector.size());
+      REQUIRE(query != nullptr);
+
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_set_distance_type(
+          query, distance_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+
+      // A rejected setter leaves the query usable with a valid distance.
+      REQUIRE(lancedb_vector_query_distance_type(
+          query, LANCEDB_DISTANCE_L2, nullptr) == LANCEDB_SUCCESS);
+
+      lancedb_vector_query_free(query);
+    }
+  }
+
   SECTION("Vector query setters with strings that are not valid UTF-8 should fail") {
     // A string that is not valid UTF-8, to exercise the string conversion failures
     const char* const invalid_utf8 = "\xff\xfe";
