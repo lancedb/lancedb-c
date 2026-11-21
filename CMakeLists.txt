@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.22)
-project(lancedb-c VERSION 0.21.2)
+
+include(cmake/LanceDBVersion.cmake)
+project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -318,8 +320,13 @@ if(BUILD_DOCS)
   set(SPHINX_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/docs)
   set(SPHINX_BUILD ${CMAKE_CURRENT_BINARY_DIR}/docs/html)
 
+  # Sphinx normally resolves the version itself. CMake passes its
+  # configure-time result through a private variable so a later build-time
+  # LANCEDB_VERSION cannot change the docs, while standalone Sphinx keeps the
+  # strict public override path.
   add_custom_target(docs
     COMMAND ${CMAKE_COMMAND} -E env DOXYGEN_XML_DIR=${DOXYGEN_OUTPUT_DIR}
+      LANCEDB_RESOLVED_VERSION=${LANCEDB_VERSION}
       ${SPHINX_EXECUTABLE} -b html
       -W --keep-going
       ${SPHINX_SOURCE} ${SPHINX_BUILD}
@@ -756,6 +763,7 @@ install(DIRECTORY include/ DESTINATION include)
 install(FILES "${CMAKE_BINARY_DIR}/lancedb.pc" DESTINATION lib/pkgconfig)
 
 message(STATUS "=== LanceDB C/C++ Bindings Configuration ===")
+message(STATUS "Version: ${LANCEDB_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 if(BUILD_SHARED_LIBS)
   message(STATUS "Library type: Shared")

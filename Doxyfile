@@ -2,7 +2,7 @@
 
 # Project information
 PROJECT_NAME           = "LanceDB C API"
-PROJECT_NUMBER         = "0.1.0"
+PROJECT_NUMBER         = "@LANCEDB_VERSION@"
 PROJECT_BRIEF          = "C bindings for LanceDB"
 
 # Input configuration
