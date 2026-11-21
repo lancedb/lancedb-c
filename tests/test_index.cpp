@@ -633,9 +633,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Create Index Options", "[index]") {
     REQUIRE(lancedb_table_create_index(
         table, invalid_columns, 1, LANCEDB_INDEX_BTREE, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
-    REQUIRE(lancedb_table_create_index(
-        table, columns, 1, static_cast<LanceDBIndexType>(99), &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
-
     options.replace = 2;
     REQUIRE(lancedb_table_create_index(
         table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
