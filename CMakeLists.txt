@@ -572,6 +572,42 @@ if(BUILD_TESTS)
     set(TEST_ENV_PREFIX)
   endif()
 
+  # Compile and run the public header with a strict C17 consumer. The source has
+  # no C++ dependencies, so this catches C-incompatible header changes and C ABI
+  # failures that the C++ tests cannot see.
+  add_executable(lancedb_c17_consumer tests/c17_consumer.c)
+  target_link_libraries(lancedb_c17_consumer
+    PRIVATE
+    lancedb
+    Threads::Threads
+  )
+  target_include_directories(lancedb_c17_consumer
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_compile_options(lancedb_c17_consumer PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Werror;-pedantic>
+    $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+  )
+  set_target_properties(lancedb_c17_consumer PROPERTIES
+    C_STANDARD 17
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+  list(APPEND TEST_TARGETS lancedb_c17_consumer)
+
+  add_custom_target(check-c17
+    COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_c17_consumer>
+      ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
+    DEPENDS lancedb_c17_consumer
+    COMMENT "Checking the public header with a strict C17 consumer..."
+  )
+
+  add_test(NAME lancedb_c17_consumer
+    COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_c17_consumer>
+      ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
+  )
+
   # Check if valgrind is available
   find_program(VALGRIND_EXECUTABLE valgrind)
   if(VALGRIND_EXECUTABLE)
@@ -721,7 +757,7 @@ add_custom_target(clean-all
 # Check target for code quality
 add_custom_target(check
   COMMAND cargo fmt --check
-  COMMAND cargo clippy
+  COMMAND cargo clippy --all-targets -- -D warnings
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Running Rust formatting and linting checks..."
 )
