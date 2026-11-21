@@ -651,24 +651,24 @@ pub struct LanceDBIndexInfo {
     pub index_type: *mut c_char,
 }
 
-/// Free the allocations owned by one fully initialized LanceDBIndexInfo
-unsafe fn free_index_info(info: &LanceDBIndexInfo) {
-    drop(CString::from_raw(info.name));
-    for i in 0..info.num_columns {
-        drop(CString::from_raw(*info.columns.add(i)));
+impl Drop for LanceDBIndexInfo {
+    fn drop(&mut self) {
+        unsafe {
+            drop(CString::from_raw(self.name));
+            for i in 0..self.num_columns {
+                drop(CString::from_raw(*self.columns.add(i)));
+            }
+            libc::free(self.columns as *mut libc::c_void);
+            drop(CString::from_raw(self.index_type));
+        }
     }
-    libc::free(info.columns as *mut libc::c_void);
-    drop(CString::from_raw(info.index_type));
 }
 
-/// Fill one C index description from the SDK's index configuration
+/// Build one C index description from the SDK's index configuration
 ///
-/// On failure the destination is left untouched. All temporary allocations are
-/// owned by Rust locals until they are moved into the destination.
-unsafe fn fill_index_info(
-    dest: *mut LanceDBIndexInfo,
-    index: lancedb::index::IndexConfig,
-) -> Result<(), ()> {
+/// Temporary values stay owned by Rust until the complete C result can be
+/// constructed, so a conversion failure releases them automatically.
+unsafe fn index_info_from_sdk(index: lancedb::index::IndexConfig) -> Result<LanceDBIndexInfo, ()> {
     let name = CString::new(index.name).map_err(|_| ())?;
     let index_type = CString::new(index.index_type.to_string()).map_err(|_| ())?;
     let columns = index
@@ -691,13 +691,12 @@ unsafe fn fill_index_info(
         *column_ptrs.add(i) = column.into_raw();
     }
 
-    *dest = LanceDBIndexInfo {
+    Ok(LanceDBIndexInfo {
         name: name.into_raw(),
         columns: column_ptrs,
         num_columns,
         index_type: index_type.into_raw(),
-    };
-    Ok(())
+    })
 }
 
 /// List every index on the table with its name, columns and SDK index type
@@ -737,26 +736,19 @@ pub unsafe extern "C" fn lancedb_table_list_indices_info(
                 return LanceDBError::Success;
             }
 
-            let count = indices.len();
-            let info_array = libc::calloc(count, std::mem::size_of::<LanceDBIndexInfo>())
-                as *mut LanceDBIndexInfo;
-            if info_array.is_null() {
-                set_unknown_error_message(error_message);
-                return LanceDBError::Unknown;
-            }
-
-            for (i, index) in indices.into_iter().enumerate() {
-                if fill_index_info(info_array.add(i), index).is_err() {
-                    // fill_index_info only writes dest on success, so the entries
-                    // before i are initialized and the current one is still zeroed
-                    lancedb_free_index_info(info_array, i);
-                    set_unknown_error_message(error_message);
-                    return LanceDBError::Unknown;
+            let mut infos = Vec::with_capacity(indices.len());
+            for index in indices {
+                match index_info_from_sdk(index) {
+                    Ok(info) => infos.push(info),
+                    Err(_) => {
+                        set_unknown_error_message(error_message);
+                        return LanceDBError::Unknown;
+                    }
                 }
             }
 
-            *indices_out = info_array;
-            *count_out = count;
+            *count_out = infos.len();
+            *indices_out = Box::into_raw(infos.into_boxed_slice()) as *mut LanceDBIndexInfo;
             LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
@@ -775,10 +767,8 @@ pub unsafe extern "C" fn lancedb_free_index_info(indices: *mut LanceDBIndexInfo,
         return;
     }
 
-    for i in 0..count {
-        free_index_info(&*indices.add(i));
-    }
-    libc::free(indices as *mut libc::c_void);
+    let slice = std::ptr::slice_from_raw_parts_mut(indices, count);
+    drop(Box::from_raw(slice));
 }
 
 /// Index statistics returned by lancedb_table_index_stats
