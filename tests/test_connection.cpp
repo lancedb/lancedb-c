@@ -181,6 +181,35 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Session", "[connection]") {
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
   }
+  SECTION("A panic while connecting is reported, not fatal") {
+    // an endpoint with a space in it makes the S3 request signing code of
+    // the object store panic, before anything is sent over the network.
+    // the panic happens inside a runtime task and must come back as an error.
+    LanceDBConnectBuilder* builder = lancedb_connect("s3://no-such-bucket/test-lancedb");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_storage_option(builder, "endpoint", "http://local host:9000");
+    builder = lancedb_connect_builder_storage_option(builder, "aws_region", "default");
+    builder = lancedb_connect_builder_storage_option(builder, "aws_access_key_id", "test");
+    builder = lancedb_connect_builder_storage_option(builder, "aws_secret_access_key", "test");
+    builder = lancedb_connect_builder_storage_option(builder, "allow_http", "true");
+    builder = lancedb_connect_builder_storage_option(builder, "aws_s3_addressing_style", "path");
+    REQUIRE(builder != nullptr);
+    LanceDBConnection* db = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &db, &error_message) == LANCEDB_RUNTIME);
+    REQUIRE(db == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("panicked") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // the runtime keeps working after the panic
+    builder = lancedb_connect(uri.c_str());
+    error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &db, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(db != nullptr);
+    REQUIRE(error_message == nullptr);
+    lancedb_connection_free(db);
+  }
   SECTION("Connect failure of the internal namespace") {
     // the directory already exists, so it is not created again, and the connection
     // gets as far as the "dir" namespace client that the listing database always
