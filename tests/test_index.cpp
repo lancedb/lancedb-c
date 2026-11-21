@@ -694,3 +694,85 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB C enum inputs are validated", "[index]
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Prewarm Index", "[index]") {
+  const std::string table_name = "prewarm_index_test";
+
+  // Create a BTREE index over the "key" column and return the index name the
+  // SDK assigned to it.
+  auto create_btree_index = [](LanceDBTable* table) {
+    const char* columns[] = {"key"};
+    LanceDBScalarIndexConfig config = {
+      .replace = 0
+    };
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_scalar_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(indices != nullptr);
+
+    std::string index_name = indices[0];
+    lancedb_free_index_list(indices, count);
+    return index_name;
+  };
+
+  SECTION("Prewarm an existing index") {
+    LanceDBTable* table = create_table_with_data(table_name, 100, 0);
+    REQUIRE(table != nullptr);
+
+    const std::string index_name = create_btree_index(table);
+    INFO("Prewarming index: " << index_name);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_table_prewarm_index(table, index_name.c_str(), &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // Prewarming must not change the index list, and the index stays usable.
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(indices[0]) == index_name);
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Prewarm a missing index returns INDEX_NOT_FOUND") {
+    LanceDBTable* table = create_table_with_data(table_name, 100, 0);
+    REQUIRE(table != nullptr);
+
+    // The table carries a real index, so the failure is about the requested name.
+    create_btree_index(table);
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_table_prewarm_index(table, "no_such_index", &error_message);
+
+    REQUIRE(result == LANCEDB_INDEX_NOT_FOUND);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Prewarm with invalid arguments fails") {
+    LanceDBTable* table = create_table_with_data(table_name, 100, 0);
+    REQUIRE(table != nullptr);
+
+    REQUIRE(lancedb_table_prewarm_index(nullptr, "idx", nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_prewarm_index(table, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_prewarm_index(table, INVALID_UTF8, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    lancedb_table_free(table);
+  }
+}
