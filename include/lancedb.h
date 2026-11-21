@@ -1770,14 +1770,18 @@ LanceDBIndexOptions lancedb_index_options_default(void);
  * LANCEDB_INDEX_AUTO passes the SDK's Auto index through; it is not remapped to
  * a concrete index type.
  *
- * wait_timeout_ms is a polling budget for index creation, not a wall-clock
+ * wait_timeout_ms is an SDK polling budget for index creation, not a wall-clock
  * guarantee and not a cancellation. Zero does not wait. Native tables build
  * synchronously and ignore the value. A remote server that returns a job ID
  * waits for that job with the SDK timeout; reaching the budget returns
  * LANCEDB_TIMEOUT but does not cancel the submitted build. A legacy remote
- * server without a job ID falls back to polling the named index (the custom
- * name, or the SDK default name) with the same budget. The SDK rejects a budget
- * above its two-hour maximum. Waiting does not cover rows added after creation.
+ * server without a job ID polls the named index (custom name or SDK default
+ * name) instead; that poll reads the index's current num_unindexed_rows, so
+ * concurrent writes can extend it and a same-name prior index can satisfy it
+ * before this submission finishes. The SDK submits the create/replace request
+ * before checking its two-hour budget cap, so an over-cap error can arrive
+ * after the server accepted the request. Waiting does not cover rows added
+ * after creation.
  *
  * Values outside the documented ranges, invalid UTF-8, unsupported index types
  * and SDK errors are returned through error_message when provided.
