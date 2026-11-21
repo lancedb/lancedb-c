@@ -286,6 +286,8 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     ("LanceDBIndexInfo", "columns"): Allow(allow_const=True),
     ("LanceDBIndexInfo", "num_columns"): Allow(allow_const=True),
     ("LanceDBIndexInfo", "index_type"): Allow(allow_const=True),
+    ("LanceDBIndexStatistics", "index_type"): Allow(allow_const=True),
+    ("LanceDBIndexStatistics", "distance_type"): Allow(allow_const=True),
     # Rust stores the raw integer and validates it before converting to an
     # enum, avoiding undefined behavior for an out-of-range C value.
     ("LanceDBVectorIndexConfig", "distance_type"): Allow(allow_enum_int=True),
