@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build ${{ matrix.lib_type }} on ${{ matrix.os }}
@@ -68,6 +71,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Run packaging fixture checks
         run: python3 .github/scripts/test_package.py
@@ -79,6 +84,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Enable long paths for Cargo git checkouts
         shell: pwsh
