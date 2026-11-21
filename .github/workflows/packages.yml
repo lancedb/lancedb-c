@@ -71,6 +71,17 @@ jobs:
           echo "checked out ${actual}"
           test "${actual}" = "${expected}"
 
+      # The locked Lance v15.0.0-beta.25 fixture contains a 188-character
+      # relative test-data path. The default runner Cargo home makes Cargo's
+      # git checkout path exceed Windows MAX_PATH; C:\c keeps the longest
+      # checkout path at 238 characters, so use it only on Windows.
+      - name: Use short Cargo home on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p /c/c
+          echo 'CARGO_HOME=C:\c' >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -90,6 +101,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Output "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          Write-Output "CARGO_HOME=$env:CARGO_HOME"
           rustc -vV
 
       - name: Install protoc (Linux)
