@@ -163,7 +163,7 @@ static const char* LANCEDB_UNKNOWN_ERROR_MESSAGE = "Unknown error";
  * The returned string is valid for the lifetime of the program.
  * The caller must not free the returned string.
  */
-[[maybe_unused]] static const char* lancedb_error_to_message(LanceDBError error) {
+static inline const char* lancedb_error_to_message(LanceDBError error) {
     if (error == LANCEDB_UNKNOWN) {
         return LANCEDB_UNKNOWN_ERROR_MESSAGE;
     }
