@@ -58,9 +58,6 @@ TARGETS = {
     "aarch64-unknown-linux-gnu": Target(
         "linux-arm64", "aarch64-unknown-linux-gnu", "linux", "aarch64", "liblancedb.so"
     ),
-    "x86_64-apple-darwin": Target(
-        "darwin-amd64", "x86_64-apple-darwin", "darwin", "x86_64", "liblancedb.dylib"
-    ),
     "aarch64-apple-darwin": Target(
         "darwin-arm64", "aarch64-apple-darwin", "darwin", "aarch64", "liblancedb.dylib"
     ),
