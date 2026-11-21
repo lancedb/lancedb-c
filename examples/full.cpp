@@ -365,7 +365,7 @@ int main() {
         } else {
           std::cout << "set query projection to: key, data, tag1, tag2" << std::endl;
           // add filter
-          const char* filter = "tag1 = \"category_1\" AND tag2 = \"type_0\"";
+          const char* filter = "tag1 = 'category_1' AND tag2 = 'type_0'";
           if (LanceDBError result = lancedb_vector_query_where_filter(query, filter, nullptr); result != LANCEDB_SUCCESS) {
             std::cerr << "error adding filter to query, error: " << lancedb_error_to_message(result) << std::endl;
           } else {
@@ -468,7 +468,7 @@ int main() {
         std::cout << "table: " << table_names[i] << " has: " << row_count << " rows" << std::endl;
 
         // delete some rows
-        const auto delete_predicates = {"key = \"key_10\"", "key = \"key_20\"", "key = \"key_30\"", "key = \"kaboom\""};
+        const auto delete_predicates = {"key = 'key_10'", "key = 'key_20'", "key = 'key_30'", "key = 'kaboom'"};
         for (const auto& predicate : delete_predicates) {
           if (const LanceDBError result = lancedb_table_delete(tbl, predicate, nullptr); result != LANCEDB_SUCCESS) {
             std::cerr << "error deleting row with predicate: " << predicate << ", error: " << lancedb_error_to_message(result) << std::endl;

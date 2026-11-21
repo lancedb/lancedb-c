@@ -102,6 +102,25 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
     lancedb_connection_free(db);
     lancedb_session_free(session);
   }
+  SECTION("Enterprise connections reject a custom session") {
+    LanceDBSession* session = lancedb_session_new(nullptr);
+    REQUIRE(session != nullptr);
+    LanceDBConnectBuilder* builder = lancedb_connect("db://test");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_session(builder, session);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* db = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &db, &error_message)
+        == LANCEDB_NOT_SUPPORTED);
+    REQUIRE(db == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("session is not supported") != std::string::npos);
+    lancedb_free_string(error_message);
+    lancedb_session_free(session);
+  }
+
   SECTION("NULL session on builder should be allowed and use default session") {
     LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
     REQUIRE(builder != nullptr);

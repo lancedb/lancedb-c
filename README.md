@@ -29,7 +29,7 @@ This repository contains comprehensive C FFI bindings for LanceDB, allowing you 
 
 ### Prerequisites
 
-- Rust toolchain (rustc, cargo)
+- Rust 1.95.0 or newer (`rustc` and `cargo`; the minimum declared by the locked dependency graph)
 - CMake (3.15 or later)
 - C++ compiler with C++20 support (gcc, clang)
 - Apache Arrow C++ library

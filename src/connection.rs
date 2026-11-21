@@ -11,9 +11,8 @@ use std::sync::OnceLock;
 
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::Schema;
-use lance_namespace::models::{
-    CreateNamespaceRequest, DropNamespaceRequest, ListNamespacesRequest,
-};
+use futures::TryStreamExt;
+use lance_namespace::models::{CreateNamespaceRequest, DropNamespaceRequest};
 use lancedb::connection::{connect, ConnectBuilder, Connection, TableNamesBuilder};
 use lancedb::utils::validate_table_name;
 use lancedb::Table;
@@ -1215,11 +1214,11 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces(
     let conn = &(*connection).inner;
     let runtime = get_runtime();
 
-    let mut request = ListNamespacesRequest::new();
-    request.id = Some(parent_namespace);
-    match runtime.block_on(conn.list_namespaces(request)) {
-        Ok(response) => {
-            let namespaces = response.namespaces;
+    match runtime.block_on(
+        conn.list_namespaces(&parent_namespace, Default::default())
+            .try_collect::<Vec<String>>(),
+    ) {
+        Ok(namespaces) => {
             let count = namespaces.len();
             *count_out = count;
 
