@@ -61,37 +61,45 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Resolve the checked-out commit
-        id: source
-        shell: bash
-        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Verify the checked-out head
         if: github.ref_type != 'tag'
         shell: bash
         run: |
           actual="$(git rev-parse HEAD)"
+          expected="${{ github.sha }}"
           echo "checked out ${actual}"
-          test "${actual}" = "${{ github.sha }}"
+          test "${actual}" = "${expected}"
 
-      - name: Verify the release tag
+      # A tag dispatch checks out the exact commit SHA with shallow history, so
+      # the tag ref is not present. Fetch it explicitly and require its peeled
+      # commit to be HEAD. This also rejects a tag on a parent or another branch.
+      - name: Verify release tag
+        id: release-tag
         if: github.ref_type == 'tag'
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          case "${RELEASE_TAG}" in
-            v*) ;;
-            *) echo "::error::release packages require a v* tag"; exit 1 ;;
-          esac
+          release_version="$("${{ matrix.python }}" .github/scripts/version.py validate-tag "${RELEASE_TAG}")"
           git fetch --force --no-tags origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          tag_object="$(git rev-parse "refs/tags/${RELEASE_TAG}")"
           tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{}")"
           head_commit="$(git rev-parse HEAD)"
           echo "release tag: ${RELEASE_TAG}"
+          echo "release version: ${release_version}"
+          echo "tag object: ${tag_object}"
           echo "tag commit: ${tag_commit}"
           echo "checked out: ${head_commit}"
-          test "${tag_commit}" = "${head_commit}"
+          if [ "${tag_commit}" != "${head_commit}" ]; then
+            echo "::error::tag ${RELEASE_TAG} peels to ${tag_commit}, not the checked-out ${head_commit}"
+            exit 1
+          fi
+          echo "LANCEDB_VERSION=${release_version}" >> "$GITHUB_ENV"
+          echo "LANCEDB_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "LANCEDB_TAG_OBJECT=${tag_object}" >> "$GITHUB_ENV"
+          echo "LANCEDB_TAG_COMMIT=${tag_commit}" >> "$GITHUB_ENV"
+          echo "commit=${tag_commit}" >> "$GITHUB_OUTPUT"
 
       # The locked Lance v15.0.0-beta.25 fixture contains a 188-character
       # relative test-data path. The default runner Cargo home makes Cargo's
@@ -167,21 +175,21 @@ jobs:
         run: >
           ${{ matrix.python }} .github/scripts/package.py create
           --target ${{ matrix.target }}
-          --commit ${{ steps.source.outputs.commit }}
+          --commit ${{ steps.release-tag.outputs.commit || github.sha }}
           --output-dir dist
 
       - name: Verify package with a real consumer
         run: >
           ${{ matrix.python }} .github/scripts/package.py verify
           --target ${{ matrix.target }}
-          --commit ${{ steps.source.outputs.commit }}
+          --commit ${{ steps.release-tag.outputs.commit || github.sha }}
           --archive ${{ steps.package.outputs.archive }}
           --checksum ${{ steps.package.outputs.checksum }}
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: lancedb-c-${{ steps.source.outputs.commit }}-${{ matrix.target }}
+          name: lancedb-c-${{ steps.release-tag.outputs.commit || github.sha }}-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
           retention-days: 7

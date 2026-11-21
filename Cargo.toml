@@ -1,14 +1,16 @@
-# This file should be copied to /home/yuvalif/lancedb/c/Cargo.toml
-
 [package]
 name = "lancedb-c"
-version = "0.33.0"
+version = "0.0.0"
 edition = "2021"
 description = "C bindings for LanceDB"
+homepage = "https://lancedb.github.io/lancedb-c/"
+documentation = "https://lancedb.github.io/lancedb-c/"
+readme = "README.md"
+repository = "https://github.com/lancedb/lancedb-c"
 license = "Apache-2.0"
-repository = "https://github.com/yuvalif/lancedb-c"
 keywords = ["database", "vector", "search", "c", "ffi"]
 categories = ["database", "api-bindings"]
+publish = false
 rust-version = "1.95.0"
 
 [lib]

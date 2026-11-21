@@ -79,18 +79,42 @@ If you prefer to build manually:
 ## Prebuilt Shared-Library Packages
 
 The `Shared Library Packages` workflow builds and tests five native targets:
-`linux-amd64`, `linux-arm64`, `darwin-arm64`, `windows-amd64` and
-`windows-arm64`. macOS packages are Apple Silicon only; Intel macOS is not
-supported. The workflow runs for `v*` release tags and on explicit dispatch.
+`linux-amd64`, `linux-arm64`, `darwin-arm64` (Apple Silicon), `windows-amd64`
+and `windows-arm64`. macOS packages are Apple Silicon only; Intel macOS is not
+supported. The workflow runs for `v*` release tags and on explicit dispatch;
+the fast packaging fixture checks still run on pull requests through `CI`.
 Each package is named
 `lancedb-c-<commit>-<target>.tar.gz` and contains the shared library, the
 public header, the license, the Windows import library when the platform needs
 one, and a `manifest.json` describing the paths. A `SHA256SUMS` file covers the
 package contents; the archive has a sibling `.sha256` file.
 
+The C binding has its own version line, independent of the Cargo package and
+the pinned SDK. The Cargo package version is fixed at `0.0.0`; the release
+version comes from the Git tag. Pull-request and untagged local builds report
+`0.0.0-dev` in CMake, pkg-config, documentation and `manifest.json`.
+
+Tags use strict SemVer with a `v` prefix. If several valid tags point at the
+same commit, local builds prefer the last stable tag in Git's version sort,
+otherwise the last prerelease; a tag dispatch always uses the explicitly
+selected tag. `v0.0.0-dev` is reserved for the untagged fallback.
+
+To prepare a release, create an annotated tag such as `v0.1.0-preview.1` on the
+exact commit and dispatch `Shared Library Packages` on that tag. The workflow
+fetches the tag, requires its peeled commit to be the checked-out commit, and
+uses the tag version for the build, package manifest and consumer verification.
+A tag on a parent or another branch is rejected. The workflow does not create
+tags or publish releases itself. CMake reads the tag when it configures, so
+after creating or moving a tag in an existing build directory, rerun the CMake
+configuration step before building. CMake passes its configure-time version to
+the docs target through a private variable, so a different build-time
+`LANCEDB_VERSION` does not change an already configured docs build.
+
 These archives are currently CI artifacts, not published releases. The
 `target` names match Go's `GOOS-GOARCH` spelling and the manifest is the
-contract the future pure-Go loader will consume.
+contract the future pure-Go loader will consume. Release notes must record the
+tag object and peeled commit, the pinned SDK revision, and the SHA-256 of each
+published archive.
 
 ## Tests
 

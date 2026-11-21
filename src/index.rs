@@ -38,6 +38,24 @@ pub enum LanceDBIndexType {
     IvfHnswSq = 8,
 }
 
+impl LanceDBIndexType {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    pub(crate) fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::Auto),
+            1 => Some(Self::BTree),
+            2 => Some(Self::Bitmap),
+            3 => Some(Self::LabelList),
+            4 => Some(Self::FTS),
+            5 => Some(Self::IvfFlat),
+            6 => Some(Self::IvfPq),
+            7 => Some(Self::IvfHnswPq),
+            8 => Some(Self::IvfHnswSq),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for vector indices
 #[repr(C)]
 #[derive(Clone)]
@@ -46,7 +64,7 @@ pub struct LanceDBVectorIndexConfig {
     pub num_sub_vectors: c_int, // Number of sub-vectors for PQ indices (-1 = auto)
     pub max_iterations: c_int, // Maximum training iterations (-1 = default)
     pub sample_rate: c_float,  // Sampling rate for training (0.0 = default)
-    pub distance_type: LanceDBDistanceType, // Distance metric
+    pub distance_type: c_int,  // Raw C distance type; validated before conversion
     pub replace: c_int,        // Replace existing index (1 = true, 0 = false)
 }
 
@@ -57,7 +75,7 @@ impl Default for LanceDBVectorIndexConfig {
             num_sub_vectors: -1,
             max_iterations: -1,
             sample_rate: 0.0,
-            distance_type: LanceDBDistanceType::L2,
+            distance_type: LanceDBDistanceType::L2 as c_int,
             replace: 1,
         }
     }
@@ -115,6 +133,19 @@ pub enum LanceDBOptimizeType {
     Index = 3,
 }
 
+impl LanceDBOptimizeType {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    pub(crate) fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::All),
+            1 => Some(Self::Compat),
+            2 => Some(Self::Prune),
+            3 => Some(Self::Index),
+            _ => None,
+        }
+    }
+}
+
 /// Create a vector index on table columns
 ///
 /// # Safety
@@ -131,7 +162,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     table: *const LanceDBTable,
     columns: *const *const c_char,
     num_columns: usize,
-    index_type: LanceDBIndexType,
+    index_type: c_int,
     config: *const LanceDBVectorIndexConfig,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
@@ -139,6 +170,11 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
+
+    let Some(index_type) = LanceDBIndexType::from_c_int(index_type) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     // Extract column names
     let mut column_names = Vec::with_capacity(num_columns);
@@ -168,6 +204,10 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
     } else {
         (*config).clone()
     };
+    let Some(distance_type) = LanceDBDistanceType::from_c_int(cfg.distance_type) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let index = match index_type {
         LanceDBIndexType::Auto => Index::Auto,
@@ -182,7 +222,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
             if cfg.sample_rate > 0.0 {
                 builder = builder.sample_rate(cfg.sample_rate as u32);
             }
-            builder = builder.distance_type(cfg.distance_type.into());
+            builder = builder.distance_type(distance_type.into());
 
             Index::IvfFlat(builder)
         }
@@ -200,7 +240,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
             if cfg.sample_rate > 0.0 {
                 builder = builder.sample_rate(cfg.sample_rate as u32);
             }
-            builder = builder.distance_type(cfg.distance_type.into());
+            builder = builder.distance_type(distance_type.into());
 
             Index::IvfPq(builder)
         }
@@ -218,7 +258,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
             if cfg.sample_rate > 0.0 {
                 builder = builder.sample_rate(cfg.sample_rate as u32);
             }
-            builder = builder.distance_type(cfg.distance_type.into());
+            builder = builder.distance_type(distance_type.into());
 
             Index::IvfHnswPq(builder)
         }
@@ -233,7 +273,7 @@ pub unsafe extern "C" fn lancedb_table_create_vector_index(
             if cfg.sample_rate > 0.0 {
                 builder = builder.sample_rate(cfg.sample_rate as u32);
             }
-            builder = builder.distance_type(cfg.distance_type.into());
+            builder = builder.distance_type(distance_type.into());
 
             Index::IvfHnswSq(builder)
         }
@@ -271,7 +311,7 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
     table: *const LanceDBTable,
     columns: *const *const c_char,
     num_columns: usize,
-    index_type: LanceDBIndexType,
+    index_type: c_int,
     config: *const LanceDBScalarIndexConfig,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
@@ -279,6 +319,11 @@ pub unsafe extern "C" fn lancedb_table_create_scalar_index(
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
+
+    let Some(index_type) = LanceDBIndexType::from_c_int(index_type) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     // Extract column names
     let mut column_names = Vec::with_capacity(num_columns);
@@ -590,13 +635,18 @@ pub unsafe extern "C" fn lancedb_table_drop_index(
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_optimize(
     table: *const LanceDBTable,
-    optimize_type: LanceDBOptimizeType,
+    optimize_type: c_int,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
+
+    let Some(optimize_type) = LanceDBOptimizeType::from_c_int(optimize_type) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
 
     let tbl = &(*table).inner;
     let runtime = get_runtime();
@@ -639,6 +689,136 @@ pub unsafe extern "C" fn lancedb_free_index_list(indices: *mut *mut c_char, coun
         }
         libc::free(indices as *mut libc::c_void);
     }
+}
+
+/// Information about one index on a table
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBIndexInfo {
+    name: *mut c_char,
+    columns: *mut *mut c_char,
+    num_columns: usize,
+    index_type: *mut c_char,
+}
+
+impl Drop for LanceDBIndexInfo {
+    fn drop(&mut self) {
+        unsafe {
+            drop(CString::from_raw(self.name));
+            for i in 0..self.num_columns {
+                drop(CString::from_raw(*self.columns.add(i)));
+            }
+            libc::free(self.columns as *mut libc::c_void);
+            drop(CString::from_raw(self.index_type));
+        }
+    }
+}
+
+/// Build one C index description from the SDK's index configuration
+///
+/// Temporary values stay owned by Rust until the complete C result can be
+/// constructed, so a conversion failure releases them automatically.
+unsafe fn index_info_from_sdk(index: lancedb::index::IndexConfig) -> Result<LanceDBIndexInfo, ()> {
+    let name = CString::new(index.name).map_err(|_| ())?;
+    let index_type = CString::new(index.index_type.to_string()).map_err(|_| ())?;
+    let columns = index
+        .columns
+        .into_iter()
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+
+    let num_columns = columns.len();
+    // Allocate at least one slot so a returned entry always has a freeable
+    // column array, even if the SDK reports no column names.
+    let column_ptrs =
+        libc::calloc(num_columns.max(1), std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+    if column_ptrs.is_null() {
+        return Err(());
+    }
+
+    for (i, column) in columns.into_iter().enumerate() {
+        *column_ptrs.add(i) = column.into_raw();
+    }
+
+    Ok(LanceDBIndexInfo {
+        name: name.into_raw(),
+        columns: column_ptrs,
+        num_columns,
+        index_type: index_type.into_raw(),
+    })
+}
+
+/// List every index on the table with its name, columns and SDK index type
+///
+/// The names-only lancedb_table_list_indices remains available for callers that
+/// only need the names.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `indices_out` must be a valid pointer to receive the array of index information
+/// - `count_out` must be a valid pointer to receive the count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_list_indices_info(
+    table: *const LanceDBTable,
+    indices_out: *mut *const LanceDBIndexInfo,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || indices_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    *indices_out = ptr::null();
+    *count_out = 0;
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.list_indices()) {
+        Ok(indices) => {
+            if indices.is_empty() {
+                return LanceDBError::Success;
+            }
+
+            let mut infos = Vec::with_capacity(indices.len());
+            for index in indices {
+                match index_info_from_sdk(index) {
+                    Ok(info) => infos.push(info),
+                    Err(_) => {
+                        set_unknown_error_message(error_message);
+                        return LanceDBError::Unknown;
+                    }
+                }
+            }
+
+            *count_out = infos.len();
+            *indices_out = Box::into_raw(infos.into_boxed_slice()) as *const LanceDBIndexInfo;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Free index information array returned by lancedb_table_list_indices_info
+///
+/// # Safety
+/// - `indices` must be a pointer returned by `lancedb_table_list_indices_info`
+/// - `count` must match the count returned by `lancedb_table_list_indices_info`
+/// - Safe to call with a NULL pointer
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_index_info(indices: *const LanceDBIndexInfo, count: usize) {
+    if indices.is_null() {
+        return;
+    }
+
+    let slice = std::ptr::slice_from_raw_parts_mut(indices as *mut LanceDBIndexInfo, count);
+    drop(Box::from_raw(slice));
 }
 
 /// Index statistics returned by lancedb_table_index_stats

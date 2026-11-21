@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.22)
-project(lancedb-c VERSION 0.21.2)
+
+include(cmake/LanceDBVersion.cmake)
+project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
 # macOS support is Apple Silicon only. Require exactly one arm64 architecture
 # when CMAKE_OSX_ARCHITECTURES is explicit so a universal build cannot produce
@@ -370,8 +372,13 @@ if(BUILD_DOCS)
   set(SPHINX_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/docs)
   set(SPHINX_BUILD ${CMAKE_CURRENT_BINARY_DIR}/docs/html)
 
+  # Sphinx normally resolves the version itself. CMake passes its
+  # configure-time result through a private variable so a later build-time
+  # LANCEDB_VERSION cannot change the docs, while standalone Sphinx keeps the
+  # strict public override path.
   add_custom_target(docs
     COMMAND ${CMAKE_COMMAND} -E env DOXYGEN_XML_DIR=${DOXYGEN_OUTPUT_DIR}
+      LANCEDB_RESOLVED_VERSION=${LANCEDB_VERSION}
       ${SPHINX_EXECUTABLE} -b html
       -W --keep-going
       ${SPHINX_SOURCE} ${SPHINX_BUILD}
@@ -475,7 +482,9 @@ if(BUILD_TESTS)
   add_executable(lancedb_index_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_index.cpp
+    tests/test_index_info.cpp
   )
   target_link_libraries(lancedb_index_tests
     PRIVATE
@@ -547,6 +556,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_df_query_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_df_query.cpp
   )
   target_link_libraries(lancedb_df_query_tests
@@ -594,6 +604,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_vector_query_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_vector_query.cpp
   )
   target_link_libraries(lancedb_vector_query_tests
@@ -613,6 +624,17 @@ if(BUILD_TESTS)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
   list(APPEND TEST_TARGETS lancedb_vector_query_tests)
+
+  # C_STANDARD is a target property. Apply strict C17 only to the targets that
+  # compile the C consumer helper; each has no other C sources, so the C++
+  # sources and all other targets keep their existing flags.
+  foreach(target lancedb_index_tests lancedb_df_query_tests lancedb_vector_query_tests)
+    set_target_properties(${target} PROPERTIES
+      C_STANDARD 17
+      C_STANDARD_REQUIRED ON
+      C_EXTENSIONS OFF
+    )
+  endforeach()
 
   # Enable CTest
   enable_testing()
@@ -807,6 +829,7 @@ install(DIRECTORY include/ DESTINATION include)
 install(FILES "${CMAKE_BINARY_DIR}/lancedb.pc" DESTINATION lib/pkgconfig)
 
 message(STATUS "=== LanceDB C/C++ Bindings Configuration ===")
+message(STATUS "Version: ${LANCEDB_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 if(BUILD_SHARED_LIBS)
   message(STATUS "Library type: Shared")
