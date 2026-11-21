@@ -801,6 +801,305 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
   }
 }
 
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize With Action", "[index]") {
+  const std::string table_name = "optimize_action_test";
+
+  // Four fragments of 20 rows each, so compaction has fragments to merge and
+  // pruning has three old versions to remove.
+  auto create_fragmented_table = [&]() {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+    for (const int start_index : {20, 40, 60}) {
+      auto reader = create_reader_from_batch(create_test_record_batch(20, start_index));
+      REQUIRE(reader != nullptr);
+      char* error_message = nullptr;
+      REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+    return table;
+  };
+
+  auto read_stats = [](const LanceDBTable* table) {
+    LanceDBTableStats stats = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_stats(table, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return stats;
+  };
+
+  SECTION("Compact merges the small fragments and reports them") {
+    LanceDBTable* table = create_fragmented_table();
+    REQUIRE(read_stats(table).fragment_stats.num_fragments == 4);
+
+    // Every compaction override is set at once, so each one is converted on
+    // the way to the SDK. A 1000-row target merges the four 20-row fragments.
+    LanceDBOptimizeConfig config = {};
+    config.action = LANCEDB_OPTIMIZE_COMPACT;
+    config.compaction.set_fields =
+        LANCEDB_COMPACTION_TARGET_ROWS_PER_FRAGMENT |
+        LANCEDB_COMPACTION_MAX_ROWS_PER_GROUP |
+        LANCEDB_COMPACTION_MAX_BYTES_PER_FILE |
+        LANCEDB_COMPACTION_MATERIALIZE_DELETIONS |
+        LANCEDB_COMPACTION_MATERIALIZE_DELETIONS_THRESHOLD |
+        LANCEDB_COMPACTION_NUM_THREADS |
+        LANCEDB_COMPACTION_BATCH_SIZE;
+    config.compaction.target_rows_per_fragment = 1000;
+    config.compaction.max_rows_per_group = 64;
+    config.compaction.max_bytes_per_file = 1024 * 1024;
+    config.compaction.materialize_deletions = 0;
+    config.compaction.materialize_deletions_threshold = 0.5f;
+    config.compaction.num_threads = 1;
+    config.compaction.batch_size = 32;
+
+    LanceDBOptimizeStats stats = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &config, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats.has_compaction == 1);
+    REQUIRE(stats.has_prune == 0);
+    REQUIRE(stats.compaction.fragments_removed == 4);
+    REQUIRE(stats.compaction.fragments_added == 1);
+    REQUIRE(stats.compaction.files_removed > 0);
+    REQUIRE(stats.compaction.files_added > 0);
+    REQUIRE(read_stats(table).fragment_stats.num_fragments == 1);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    // Nothing is left to compact, so the same call rewrites nothing.
+    LanceDBOptimizeStats second = {};
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &config, &second, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(second.has_compaction == 1);
+    REQUIRE(second.compaction.fragments_removed == 0);
+    REQUIRE(second.compaction.fragments_added == 0);
+    REQUIRE(second.compaction.files_removed == 0);
+    REQUIRE(second.compaction.files_added == 0);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("An explicit materialize_deletions=false differs from the omitted default") {
+    LanceDBTable* table = create_fragmented_table();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_delete(table, "key = 'key_7'", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 79);
+    REQUIRE(read_stats(table).num_deleted_rows == 1);
+
+    // A zero target keeps row-count consolidation away, so only the deletion
+    // trigger can rewrite a fragment.
+    LanceDBOptimizeConfig keep_deletions = {};
+    keep_deletions.action = LANCEDB_OPTIMIZE_COMPACT;
+    keep_deletions.compaction.set_fields =
+        LANCEDB_COMPACTION_TARGET_ROWS_PER_FRAGMENT |
+        LANCEDB_COMPACTION_MATERIALIZE_DELETIONS |
+        LANCEDB_COMPACTION_MATERIALIZE_DELETIONS_THRESHOLD;
+    keep_deletions.compaction.target_rows_per_fragment = 0;
+    keep_deletions.compaction.materialize_deletions = 0;
+    keep_deletions.compaction.materialize_deletions_threshold = 0.0f;
+
+    LanceDBOptimizeStats explicit_off = {};
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &keep_deletions, &explicit_off, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(explicit_off.has_compaction == 1);
+    REQUIRE(explicit_off.compaction.fragments_removed == 0);
+    REQUIRE(explicit_off.compaction.files_removed == 0);
+    REQUIRE(read_stats(table).num_deleted_rows == 1);
+
+    // Omitting materialize_deletions keeps the SDK default of true, which
+    // materializes the deletion and drops the deletion file.
+    LanceDBOptimizeConfig materialize = {};
+    materialize.action = LANCEDB_OPTIMIZE_COMPACT;
+    materialize.compaction.set_fields =
+        LANCEDB_COMPACTION_TARGET_ROWS_PER_FRAGMENT |
+        LANCEDB_COMPACTION_MATERIALIZE_DELETIONS_THRESHOLD;
+    materialize.compaction.target_rows_per_fragment = 0;
+    materialize.compaction.materialize_deletions_threshold = 0.0f;
+
+    LanceDBOptimizeStats default_on = {};
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &materialize, &default_on, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(default_on.has_compaction == 1);
+    REQUIRE(default_on.compaction.fragments_removed == 1);
+    REQUIRE(default_on.compaction.fragments_added == 1);
+    REQUIRE(read_stats(table).num_deleted_rows == 0);
+    REQUIRE(lancedb_table_count_rows(table) == 79);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Prune keeps versions by default and prunes them for a sub-second age") {
+    LanceDBTable* table = create_fragmented_table();
+    REQUIRE(lancedb_table_version(table) == 4);
+
+    // The default age is a week, so a table written just now loses nothing.
+    LanceDBOptimizeConfig default_age = {};
+    default_age.action = LANCEDB_OPTIMIZE_PRUNE;
+
+    LanceDBOptimizeStats kept = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &default_age, &kept, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(kept.has_prune == 1);
+    REQUIRE(kept.has_compaction == 0);
+    REQUIRE(kept.prune.old_versions == 0);
+    REQUIRE(kept.prune.bytes_removed == 0);
+    REQUIRE(lancedb_table_version(table) == 4);
+
+    // A microsecond keeps this young fixture prunable, so a whole-second
+    // round-up would leave its old versions and fail here. It cannot catch a
+    // truncation to zero, because a cutoff at now also removes them; the Rust
+    // conversion test pins the exact duration.
+    LanceDBOptimizeConfig sub_second = {};
+    sub_second.action = LANCEDB_OPTIMIZE_PRUNE;
+    sub_second.prune.set_fields =
+        LANCEDB_PRUNE_OLDER_THAN |
+        LANCEDB_PRUNE_DELETE_UNVERIFIED |
+        LANCEDB_PRUNE_ERROR_IF_TAGGED_OLD_VERSIONS;
+    sub_second.prune.older_than_nanos = 1000;
+    sub_second.prune.delete_unverified = 1;
+    sub_second.prune.error_if_tagged_old_versions = 0;
+
+    LanceDBOptimizeStats pruned = {};
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &sub_second, &pruned, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(pruned.has_prune == 1);
+    REQUIRE(pruned.prune.old_versions == 3);
+    REQUIRE(pruned.prune.bytes_removed > 0);
+    // The current version and its rows survive the prune.
+    REQUIRE(lancedb_table_version(table) == 4);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    // Only the current version is left, so a second prune removes nothing.
+    LanceDBOptimizeStats again = {};
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &sub_second, &again, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(again.prune.old_versions == 0);
+    REQUIRE(again.prune.bytes_removed == 0);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("All and Index report the metric groups of their action") {
+    LanceDBTable* table = create_fragmented_table();
+
+    // Index optimization has no index to fold rows into here, and the SDK
+    // reports neither metric group for it.
+    LanceDBOptimizeConfig index_config = {};
+    index_config.action = LANCEDB_OPTIMIZE_INDEX;
+    LanceDBOptimizeStats index_stats = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &index_config, &index_stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(index_stats.has_compaction == 0);
+    REQUIRE(index_stats.has_prune == 0);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    // ALL compacts and prunes with the action defaults.
+    LanceDBOptimizeConfig all_config = {};
+    all_config.action = LANCEDB_OPTIMIZE_ALL;
+    LanceDBOptimizeStats all_stats = {};
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &all_config, &all_stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(all_stats.has_compaction == 1);
+    REQUIRE(all_stats.compaction.fragments_removed == 4);
+    REQUIRE(all_stats.compaction.fragments_added == 1);
+    REQUIRE(all_stats.has_prune == 1);
+    // ALL prunes with the default week-long age, which keeps the versions above.
+    REQUIRE(all_stats.prune.old_versions == 0);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Invalid options are rejected before any optimization runs") {
+    LanceDBTable* table = create_fragmented_table();
+    REQUIRE(read_stats(table).fragment_stats.num_fragments == 4);
+    REQUIRE(lancedb_table_version(table) == 4);
+
+    auto require_invalid = [&](const LanceDBTable* rejected_table,
+                               const LanceDBOptimizeConfig* rejected_config,
+                               const char* expected_field) {
+      LanceDBOptimizeStats rejected_stats = {};
+      char* message = nullptr;
+      REQUIRE(lancedb_table_optimize_with_action(
+          rejected_table, rejected_config, &rejected_stats, &message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(message != nullptr);
+      if (expected_field != nullptr) {
+        INFO("message: " << message);
+        REQUIRE(std::string(message).find(expected_field) != std::string::npos);
+      }
+      // A rejected call reports no statistics of an action that never ran.
+      REQUIRE(rejected_stats.has_compaction == 0);
+      REQUIRE(rejected_stats.has_prune == 0);
+      lancedb_free_string(message);
+    };
+
+    LanceDBOptimizeConfig config = {};
+    config.action = 99;
+    require_invalid(table, &config, "action");
+
+    // NULL arguments that a caller cannot recover from
+    LanceDBOptimizeStats stats = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_with_action(
+        nullptr, &config, &stats, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, nullptr, &stats, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_table_optimize_with_action(
+        table, &config, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    config.action = LANCEDB_OPTIMIZE_COMPACT;
+    config.compaction.set_fields = 1u << 20;
+    require_invalid(table, &config, "compaction");
+
+    config.compaction.set_fields = LANCEDB_COMPACTION_MATERIALIZE_DELETIONS;
+    config.compaction.materialize_deletions = 2;
+    require_invalid(table, &config, "materialize_deletions");
+
+    config = {};
+    config.action = LANCEDB_OPTIMIZE_PRUNE;
+    config.prune.set_fields = LANCEDB_PRUNE_OLDER_THAN;
+    config.prune.older_than_nanos = -1;
+    require_invalid(table, &config, "older_than_nanos");
+
+    config.prune.set_fields = LANCEDB_PRUNE_DELETE_UNVERIFIED;
+    config.prune.delete_unverified = 2;
+    require_invalid(table, &config, "delete_unverified");
+
+    config.prune.set_fields = LANCEDB_PRUNE_ERROR_IF_TAGGED_OLD_VERSIONS;
+    config.prune.error_if_tagged_old_versions = -1;
+    require_invalid(table, &config, "error_if_tagged_old_versions");
+
+    // None of the rejected calls changed the table.
+    REQUIRE(read_stats(table).fragment_stats.num_fragments == 4);
+    REQUIRE(lancedb_table_version(table) == 4);
+    REQUIRE(lancedb_table_count_rows(table) == 80);
+
+    lancedb_table_free(table);
+  }
+}
+
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]") {
   const std::string table_name = "index_invalid_args_test";
   LanceDBTable* table = create_table_with_data(table_name, 20, 0);
