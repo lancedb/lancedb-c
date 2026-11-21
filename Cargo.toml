@@ -9,7 +9,7 @@ license = "Apache-2.0"
 repository = "https://github.com/yuvalif/lancedb-c"
 keywords = ["database", "vector", "search", "c", "ffi"]
 categories = ["database", "api-bindings"]
-rust-version = "1.91.0"
+rust-version = "1.95.0"
 
 [lib]
 name = "lancedb"

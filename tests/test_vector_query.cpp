@@ -1342,6 +1342,27 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - explain plan", "[vector
     lancedb_vector_query_free(query);
   }
 
+  SECTION("nprobes zero is rejected at execute and explain") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_nprobes(query, 0, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(query, false, &plan, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("nprobes must be greater than 0") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // execute consumes the query and reports the same failure by returning NULL
+    REQUIRE(lancedb_vector_query_execute(query) == nullptr);
+  }
+
   SECTION("Explain plan reflects a DataFusion filter") {
     LanceDBExpr* col_expr = lancedb_expr_column("key");
     LanceDBExpr* val_expr = lancedb_expr_literal_string("key_42");

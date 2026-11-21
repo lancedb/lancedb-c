@@ -111,21 +111,12 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
         }
         lancedb::error::Error::InvalidInput { .. } => LanceDBError::InvalidInput,
         lancedb::error::Error::TableNotFound { .. } => LanceDBError::TableNotFound,
-        lancedb::error::Error::TableCorrupted { .. } => LanceDBError::Lance,
         lancedb::error::Error::DatabaseNotFound { .. } => LanceDBError::DatabaseNotFound,
         lancedb::error::Error::DatabaseAlreadyExists { .. } => LanceDBError::DatabaseAlreadyExists,
         lancedb::error::Error::IndexNotFound { .. } => LanceDBError::IndexNotFound,
         lancedb::error::Error::EmbeddingFunctionNotFound { .. } => {
             LanceDBError::EmbeddingFunctionNotFound
         }
-        // DataFusion schema failures used to reach the C API as External errors (LANCEDB_OTHER);
-        // keep that code now that lancedb reports the missing column explicitly.
-        lancedb::error::Error::ColumnNotFound { .. } => LanceDBError::Other,
-        lancedb::error::Error::FieldNotFound { .. } => LanceDBError::Other,
-        lancedb::error::Error::ColumnAlreadyExists { .. } => LanceDBError::Schema,
-        lancedb::error::Error::NotAComputedColumn { .. } => LanceDBError::InvalidInput,
-        lancedb::error::Error::NotAMaterializedView { .. } => LanceDBError::NotSupported,
-        lancedb::error::Error::InvalidExpression { .. } => LanceDBError::InvalidInput,
         lancedb::error::Error::TableAlreadyExists { .. } => LanceDBError::TableAlreadyExists,
         lancedb::error::Error::CreateDir { .. } => LanceDBError::CreateDir,
         lancedb::error::Error::Schema { .. } => LanceDBError::Schema,
@@ -136,10 +127,6 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
             not_found_from_message(message).unwrap_or(LanceDBError::Runtime)
         }
         lancedb::error::Error::Timeout { .. } => LanceDBError::Timeout,
-        lancedb::error::Error::JobFailed { .. } => LanceDBError::Runtime,
-        lancedb::error::Error::JobCancelled { .. } => LanceDBError::Other,
-        lancedb::error::Error::JobNotFound { .. } => LanceDBError::NotFound,
-        lancedb::error::Error::Sql { .. } => LanceDBError::Other,
         lancedb::error::Error::ObjectStore { source } => {
             storage_failure_from_message(&source.to_string()).unwrap_or(LanceDBError::ObjectStore)
         }
@@ -159,11 +146,12 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
         }
         lancedb::error::Error::Http { .. } => LanceDBError::Http,
         lancedb::error::Error::Retry { .. } => LanceDBError::Retry,
-        lancedb::error::Error::ResponseInterrupted { .. } => LanceDBError::Http,
         lancedb::error::Error::Arrow { .. } => LanceDBError::Arrow,
         lancedb::error::Error::NotSupported { .. } => LanceDBError::NotSupported,
-        lancedb::error::Error::Other { .. } => LanceDBError::Other,
-        lancedb::error::Error::External { .. } => LanceDBError::Other,
+        // SDK variants added after 0.33 that have no dedicated C code (schema,
+        // job, SQL and interrupted-stream errors, including missing columns)
+        // keep the historical LANCEDB_OTHER mapping used for External errors.
+        _ => LanceDBError::Other,
     }
 }
 

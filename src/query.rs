@@ -630,10 +630,7 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
             rust_query = rust_query.distance_type(distance_type);
         }
         if let Some(nprobes) = query_ref.nprobes {
-            rust_query = match rust_query.nprobes(nprobes) {
-                Ok(q) => q,
-                Err(e) => return Err(e),
-            };
+            rust_query = rust_query.nprobes(nprobes)?;
         }
         if let Some(refine_factor) = query_ref.refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);
@@ -751,10 +748,7 @@ pub unsafe extern "C" fn lancedb_vector_query_execute(
             rust_query = rust_query.distance_type(distance_type);
         }
         if let Some(nprobes) = query_box.nprobes {
-            rust_query = match rust_query.nprobes(nprobes) {
-                Ok(q) => q,
-                Err(e) => return Err(e),
-            };
+            rust_query = rust_query.nprobes(nprobes)?;
         }
         if let Some(refine_factor) = query_box.refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);

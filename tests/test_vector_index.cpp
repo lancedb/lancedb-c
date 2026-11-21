@@ -216,6 +216,30 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index", "[vector_index]") {
     lancedb_table_free(table);
   }
 
+  SECTION("Create IVF_FLAT index on a missing column fails") {
+    LanceDBTable* table = create_table_with_data(table_name, 16, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"missing"};
+    LanceDBVectorIndexConfig config = {
+      .num_partitions = -1,
+      .num_sub_vectors = -1,
+      .max_iterations = -1,
+      .sample_rate = 0.0f,
+      .distance_type = LANCEDB_DISTANCE_L2,
+      .replace = 0
+    };
+
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_table_create_vector_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, &error_message);
+
+    REQUIRE(result != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    lancedb_table_free(table);
+  }
+
   SECTION("Replace existing vector index") {
     // Create table with data
     LanceDBTable* table = create_table_with_data(table_name, 256, 0);
