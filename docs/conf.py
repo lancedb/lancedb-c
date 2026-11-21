@@ -1,14 +1,19 @@
 # Configuration file for the Sphinx documentation builder.
 
 import os
+import sys
+from pathlib import Path
+
+_repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_repo_root / ".github" / "scripts"))
+
+from version import resolve_version
 
 # -- Project information -----------------------------------------------------
 project = 'LanceDB C API'
 copyright = '2025, The LanceDB Authors'
 author = 'The LanceDB Authors'
-# CMake passes the tag-derived binding version. Standalone builds default to
-# the development version because the C version does not come from Cargo.
-release = os.environ.get('LANCEDB_VERSION', '0.0.0-dev')
+release = resolve_version(_repo_root)
 
 # -- General configuration ---------------------------------------------------
 extensions = [

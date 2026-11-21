@@ -78,8 +78,8 @@ If you prefer to build manually:
 
 ## Prebuilt Shared-Library Packages
 
-The `Shared Library Packages` workflow builds and tests six native targets:
-`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`,
+The `Shared Library Packages` workflow builds and tests five native targets:
+`linux-amd64`, `linux-arm64`, `darwin-arm64` (Apple Silicon),
 `windows-amd64` and `windows-arm64`. Each package is named
 `lancedb-c-<commit>-<target>.tar.gz` and contains the shared library, the
 public header, the license, the Windows import library when the platform needs
@@ -90,6 +90,11 @@ The C binding has its own version line, independent of the Cargo package and
 the pinned SDK. The Cargo package version is fixed at `0.0.0`; the release
 version comes from the Git tag. Pull-request and untagged local builds report
 `0.0.0-dev` in CMake, pkg-config, documentation and `manifest.json`.
+
+Tags use strict SemVer with a `v` prefix. If several valid tags point at the
+same commit, local builds prefer the last stable tag in Git's version sort,
+otherwise the last prerelease; a tag dispatch always uses the explicitly
+selected tag. `v0.0.0-dev` is reserved for the untagged fallback.
 
 To prepare a release, create an annotated tag such as `v0.1.0-preview.1` on the
 exact commit and dispatch `Shared Library Packages` on that tag. The workflow

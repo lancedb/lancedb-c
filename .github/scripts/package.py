@@ -34,11 +34,11 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+from version import DEV_VERSION, resolve_version
+
 
 SCHEMA_VERSION = 1
 PACKAGE_NAME = "lancedb-c"
-DEV_VERSION = "0.0.0-dev"
-SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,42 +101,10 @@ def sha256_file(path: Path) -> str:
 
 
 def package_version(repo_root: Path) -> str:
-    version = os.environ.get("LANCEDB_VERSION", "").strip()
-    if version.startswith("v"):
-        version = version[1:]
-    if version:
-        if not SEMVER_PATTERN.fullmatch(version):
-            raise SystemExit(f"invalid LANCEDB_VERSION: {version!r}")
-        return version
-
-    if not (repo_root / ".git").exists():
-        return DEV_VERSION
-
     try:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_root),
-                "describe",
-                "--tags",
-                "--exact-match",
-                "--match",
-                "v[0-9]*",
-                "HEAD",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return DEV_VERSION
-
-    if result.returncode == 0:
-        tag = result.stdout.strip().removeprefix("v")
-        if SEMVER_PATTERN.fullmatch(tag):
-            return tag
-    return DEV_VERSION
+        return resolve_version(repo_root)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
 
 def set_github_output(**values: str) -> None:

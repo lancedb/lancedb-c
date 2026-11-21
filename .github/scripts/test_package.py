@@ -23,6 +23,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import package
+import version
 
 
 class PackageFixture(unittest.TestCase):
@@ -54,6 +55,36 @@ class PackageFixture(unittest.TestCase):
                 package.create_package(args)
         archive = output / "lancedb-c-abc123-linux-amd64.tar.gz"
         return archive, Path(f"{archive}.sha256")
+
+
+class VersionPolicyTests(unittest.TestCase):
+    def test_valid_release_tags(self) -> None:
+        for tag, expected in {
+            "v0.1.0": "0.1.0",
+            "v0.1.0-preview.1": "0.1.0-preview.1",
+            "v0.1.0-0.a-2+build.01": "0.1.0-0.a-2+build.01",
+        }.items():
+            self.assertEqual(version.validate_tag(tag), expected)
+
+    def test_invalid_release_tags(self) -> None:
+        for tag in (
+            "v01.2.3",
+            "v0.1.0-preview.01",
+            "v0.0.0-dev",
+            "v1.2",
+            "v0.1.0-",
+            "v0.1.0+",
+            "v0.1.0-a..b",
+            "1.2.3",
+        ):
+            with self.assertRaises(ValueError):
+                version.validate_tag(tag)
+
+    def test_override_must_be_strict_without_v_prefix(self) -> None:
+        self.assertEqual(version.parse_override("0.1.0-preview.1"), "0.1.0-preview.1")
+        for value in ("v0.1.0", "0.0.0-dev", "01.2.3", "0.1.0-preview.01"):
+            with self.assertRaises(ValueError):
+                version.parse_override(value)
 
 
 class VersionTests(PackageFixture):
@@ -93,6 +124,43 @@ class VersionTests(PackageFixture):
             os.environ["LANCEDB_VERSION"] = "0.2.0-preview.3"
             self.assertEqual(package.package_version(repo), "0.2.0-preview.3")
 
+    def test_multiple_valid_tags_prefer_stable(self) -> None:
+        repo = self.init_repo("multiple")
+        subprocess.run(["git", "-C", str(repo), "tag", "v0.1.0"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "tag", "v0.2.0-preview.2"], check=True
+        )
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LANCEDB_VERSION", None)
+            self.assertEqual(package.package_version(repo), "0.1.0")
+
+    def test_invalid_and_development_tags_do_not_hide_valid_tag(self) -> None:
+        repo = self.init_repo("mixed")
+        subprocess.run(["git", "-C", str(repo), "tag", "v0.1.0"], check=True)
+        subprocess.run(["git", "-C", str(repo), "tag", "v01.2.3"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "tag", "v0.1.0-preview.01"], check=True
+        )
+        subprocess.run(["git", "-C", str(repo), "tag", "v0.0.0-dev"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "tag",
+                "-a",
+                "v0.1.0-not_a_version",
+                "-m",
+                "not a release",
+            ],
+            check=True,
+        )
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LANCEDB_VERSION", None)
+            self.assertEqual(package.package_version(repo), "0.1.0")
+
     def test_package_version_ignores_parent_repository_tag(self) -> None:
         parent = self.init_repo("parent")
         subprocess.run(
@@ -107,9 +175,10 @@ class VersionTests(PackageFixture):
             self.assertEqual(package.package_version(source), package.DEV_VERSION)
 
     def test_package_version_rejects_invalid_override(self) -> None:
-        with mock.patch.dict(os.environ, {"LANCEDB_VERSION": "v1"}):
-            with self.assertRaises(SystemExit):
-                package.package_version(self.repo)
+        for value in ("v1", "v0.1.0", "0.0.0-dev", "01.2.3"):
+            with mock.patch.dict(os.environ, {"LANCEDB_VERSION": value}):
+                with self.assertRaises(SystemExit):
+                    package.package_version(self.repo)
 
 
 class PackageArchiveTests(PackageFixture):

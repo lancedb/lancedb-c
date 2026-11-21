@@ -43,9 +43,6 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             python: python3
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            python: python3
           - target: aarch64-apple-darwin
             runner: macos-15
             python: python3
@@ -83,15 +80,13 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::release tag must be v<semver>: ${RELEASE_TAG}"
-            exit 1
-          fi
+          release_version="$("${{ matrix.python }}" .github/scripts/version.py validate-tag "${RELEASE_TAG}")"
           git fetch --force --no-tags origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
           tag_object="$(git rev-parse "refs/tags/${RELEASE_TAG}")"
           tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{}")"
           head_commit="$(git rev-parse HEAD)"
           echo "release tag: ${RELEASE_TAG}"
+          echo "release version: ${release_version}"
           echo "tag object: ${tag_object}"
           echo "tag commit: ${tag_commit}"
           echo "checked out: ${head_commit}"
@@ -99,7 +94,7 @@ jobs:
             echo "::error::tag ${RELEASE_TAG} peels to ${tag_commit}, not the checked-out ${head_commit}"
             exit 1
           fi
-          echo "LANCEDB_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          echo "LANCEDB_VERSION=${release_version}" >> "$GITHUB_ENV"
           echo "LANCEDB_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
           echo "LANCEDB_TAG_OBJECT=${tag_object}" >> "$GITHUB_ENV"
           echo "LANCEDB_TAG_COMMIT=${tag_commit}" >> "$GITHUB_ENV"
