@@ -7,7 +7,7 @@
 //! that can be used as query filters via `lancedb_query_df_filter()`.
 
 use std::ffi::CStr;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 
 use crate::error::set_invalid_argument_message;
 use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
@@ -35,6 +35,28 @@ pub enum LanceDBBinaryOp {
     Multiply = 10,
     Divide = 11,
     Modulo = 12,
+}
+
+impl LanceDBBinaryOp {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    pub(crate) fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::Eq),
+            1 => Some(Self::NotEq),
+            2 => Some(Self::Lt),
+            3 => Some(Self::LtEq),
+            4 => Some(Self::Gt),
+            5 => Some(Self::GtEq),
+            6 => Some(Self::And),
+            7 => Some(Self::Or),
+            8 => Some(Self::Plus),
+            9 => Some(Self::Minus),
+            10 => Some(Self::Multiply),
+            11 => Some(Self::Divide),
+            12 => Some(Self::Modulo),
+            _ => None,
+        }
+    }
 }
 
 impl From<LanceDBBinaryOp> for Operator {
@@ -141,9 +163,11 @@ pub extern "C" fn lancedb_expr_literal_bool(value: bool) -> *mut LanceDBExpr {
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_expr_binary(
     left: *mut LanceDBExpr,
-    op: LanceDBBinaryOp,
+    op: c_int,
     right: *mut LanceDBExpr,
 ) -> *mut LanceDBExpr {
+    let op = LanceDBBinaryOp::from_c_int(op);
+
     let left_expr = if !left.is_null() {
         Some(Box::from_raw(left).inner)
     } else {
@@ -156,6 +180,10 @@ pub unsafe extern "C" fn lancedb_expr_binary(
     };
 
     let (Some(left_expr), Some(right_expr)) = (left_expr, right_expr) else {
+        return std::ptr::null_mut();
+    };
+
+    let Some(op) = op else {
         return std::ptr::null_mut();
     };
 
