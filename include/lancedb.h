@@ -2057,6 +2057,170 @@ LanceDBError lancedb_table_optimize(
 );
 
 /**
+ * Compaction option fields of LanceDBCompactionOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB default for compacting a table, so an omitted option stays
+ * distinct from a value that happens to equal the default.
+ */
+typedef enum {
+    LANCEDB_COMPACTION_TARGET_ROWS_PER_FRAGMENT = 1 << 0,
+    LANCEDB_COMPACTION_MAX_ROWS_PER_GROUP = 1 << 1,
+    LANCEDB_COMPACTION_MAX_BYTES_PER_FILE = 1 << 2,
+    LANCEDB_COMPACTION_MATERIALIZE_DELETIONS = 1 << 3,
+    LANCEDB_COMPACTION_MATERIALIZE_DELETIONS_THRESHOLD = 1 << 4,
+    LANCEDB_COMPACTION_NUM_THREADS = 1 << 5,
+    LANCEDB_COMPACTION_BATCH_SIZE = 1 << 6
+} LanceDBCompactionField;
+
+/**
+ * Compaction overrides, used by lancedb_table_optimize_with_action()
+ *
+ * The fields follow the compaction options of the LanceDB SDK. set_fields
+ * selects the fields that are read; every other field keeps the SDK default.
+ * Sizes are checked against size_t before the compaction starts.
+ *
+ * An Enterprise table plans compaction on the server. It accepts only the
+ * overrides the server supports and rejects the others with
+ * LANCEDB_NOT_SUPPORTED before submission. It also treats a
+ * target_rows_per_fragment equal to the SDK default (1048576) as omitted, even
+ * when its bit is set, so a table-level target can win over that value.
+ */
+typedef struct {
+    uint32_t set_fields;                    // Bitmask of LanceDBCompactionField values (0 = defaults)
+    uint64_t target_rows_per_fragment;      // Target number of rows per fragment
+    uint64_t max_rows_per_group;            // Maximum number of rows per group in a written fragment
+    uint64_t max_bytes_per_file;            // Maximum number of bytes per output data file
+    int materialize_deletions;              // Rewrite fragments with deletions (1 = true, 0 = false)
+    float materialize_deletions_threshold;  // Fraction of deleted rows that triggers materializing deletions
+    uint64_t num_threads;                   // Number of compaction tasks to run in parallel
+    uint64_t batch_size;                    // Batch size used when scanning the input fragments
+} LanceDBCompactionOptions;
+
+/**
+ * Prune option fields of LanceDBPruneOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB default, so an omitted option stays distinct from an explicit
+ * false or an explicit age.
+ */
+typedef enum {
+    LANCEDB_PRUNE_OLDER_THAN = 1 << 0,
+    LANCEDB_PRUNE_DELETE_UNVERIFIED = 1 << 1,
+    LANCEDB_PRUNE_ERROR_IF_TAGGED_OLD_VERSIONS = 1 << 2
+} LanceDBPruneField;
+
+/**
+ * Version pruning overrides, used by lancedb_table_optimize_with_action()
+ *
+ * The fields follow the prune action of the LanceDB SDK. set_fields selects the
+ * fields that are read; every other field keeps the SDK default.
+ *
+ * older_than_nanos is the minimum age of a prunable version, in nanoseconds, so
+ * a sub-second age keeps its exact length. The age must not be negative. When the
+ * bit is not set, the SDK default age applies. When it is set, zero means a
+ * cutoff at the current time: every version older than now is removed, while the
+ * latest version and protected versions still survive.
+ *
+ * delete_unverified permits deleting files that are newer than the SDK's safety
+ * margin for in-progress transactions; setting it can corrupt a dataset that
+ * another process is still writing, so leave it unset unless that is safe.
+ * Tagged versions are retained by default; error_if_tagged_old_versions makes
+ * the prune fail instead of silently retaining them.
+ */
+typedef struct {
+    uint32_t set_fields;                    // Bitmask of LanceDBPruneField values (0 = defaults)
+    int64_t older_than_nanos;               // Minimum age of a prunable version in nanoseconds (>= 0)
+    int delete_unverified;                  // Delete unverified files (1 = true, 0 = false)
+    int error_if_tagged_old_versions;       // Fail on tagged old versions (1 = true, 0 = false)
+} LanceDBPruneOptions;
+
+/**
+ * One configurable optimize action
+ *
+ * action selects the optimization, and the option struct of that action carries
+ * its overrides. The option struct of another action is ignored.
+ *
+ * action is the raw integer value of a LanceDBOptimizeType enumerator. It is an
+ * int rather than the enum type so that this entry point receives the value a
+ * caller passes, including one outside the enumerators, and rejects it with
+ * LANCEDB_INVALID_ARGUMENT instead of an undefined enum conversion.
+ */
+typedef struct {
+    int action;                             // One of the LanceDBOptimizeType values
+    LanceDBCompactionOptions compaction;    // Overrides used by LANCEDB_OPTIMIZE_COMPACT
+    LanceDBPruneOptions prune;              // Overrides used by LANCEDB_OPTIMIZE_PRUNE
+} LanceDBOptimizeConfig;
+
+/**
+ * Fragments and files that compaction rewrote
+ */
+typedef struct {
+    size_t fragments_removed;   // Fragments that compaction removed
+    size_t fragments_added;     // Fragments that compaction added
+    size_t files_removed;       // Files that compaction removed, including deletion files
+    size_t files_added;         // Files that compaction added, including deletion files
+} LanceDBCompactionMetrics;
+
+/**
+ * Files and versions that pruning removed
+ */
+typedef struct {
+    uint64_t bytes_removed;     // Bytes of the removed files
+    uint64_t old_versions;      // Old dataset versions that were removed
+} LanceDBRemovalStats;
+
+/**
+ * Statistics of one optimize action
+ *
+ * The SDK reports compaction and pruning statistics only for an action that ran
+ * them, so each group carries its own presence flag. The values of a group whose
+ * flag is 0 are zero.
+ */
+typedef struct {
+    int has_compaction;                 // 1 when the action reported compaction metrics
+    LanceDBCompactionMetrics compaction; // Compaction metrics; valid only when has_compaction is 1
+    int has_prune;                      // 1 when the action reported pruning metrics
+    LanceDBRemovalStats prune;          // Pruning metrics; valid only when has_prune is 1
+} LanceDBOptimizeStats;
+
+/**
+ * Optimize table with a configurable action and return its statistics
+ *
+ * Unlike lancedb_table_optimize(), which runs each action with its defaults and
+ * discards the statistics, this entry point applies the action's options and
+ * reports what the SDK did. LANCEDB_OPTIMIZE_ALL runs compaction, pruning and
+ * index optimization with their defaults, exactly like
+ * lancedb_table_optimize(LANCEDB_OPTIMIZE_ALL).
+ *
+ * The SDK decides which actions and options a table backend supports: an
+ * Enterprise table only hosts LANCEDB_OPTIMIZE_COMPACT and returns
+ * LANCEDB_NOT_SUPPORTED for the other actions. Its compaction returns once the
+ * server accepts the job, with zeroed placeholder metrics while the compaction
+ * may still be running; a local table reports the work it did.
+ *
+ * Invalid input is rejected with LANCEDB_INVALID_ARGUMENT before any optimization
+ * runs: an action value that is not a LanceDBOptimizeType enumerator, an unknown
+ * set_fields bit, a size that does not fit in size_t, a boolean other than 0 and 1,
+ * or a negative prune age. On error, stats_out is left unchanged.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param config - pointer to LanceDBOptimizeConfig, which must not be NULL
+ * @param stats_out - pointer to receive the statistics, which must not be NULL
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_optimize_with_action(
+    const LanceDBTable* table,
+    const LanceDBOptimizeConfig* config,
+    LanceDBOptimizeStats* stats_out,
+    char** error_message
+);
+
+/**
  * Free index list array returned by lancedb_table_list_indices
  *
  * @param indices - array of string pointers returned by lancedb_table_list_indices
