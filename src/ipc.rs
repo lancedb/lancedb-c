@@ -315,10 +315,7 @@ pub unsafe extern "C" fn lancedb_record_batch_reader_from_ipc_file(
             return LanceDBError::InvalidInput;
         }
         Err(()) => {
-            set_custom_error_message(
-                error_message,
-                "Invalid input: the Arrow IPC decoder could not read this file",
-            );
+            set_custom_error_message(error_message, "Invalid input: the Arrow IPC decoder failed");
             return LanceDBError::InvalidInput;
         }
     };

@@ -1944,6 +1944,51 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
     REQUIRE(std::string(error_message).find("too large") != std::string::npos);
     lancedb_free_string(error_message);
 
+    // A footer that fits the input but cannot be parsed is an input error
+    const auto unreadable_footer = write_ipc_file_with_unreadable_footer();
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        unreadable_footer.data(), unreadable_footer.size(), &reader, nullptr, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("Invalid input") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // A footer that parses but declares blocks past the end of the input is
+    // rejected before the decoder reads any of them
+    const auto blocks_outside = write_ipc_file_with_blocks_outside_the_file();
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        blocks_outside.data(), blocks_outside.size(), &reader, nullptr, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("ends outside the file") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // A file with dictionary blocks decodes with its dictionary encoding intact
+    const auto dictionary_file = write_ipc_file_with_dictionary_column();
+    reader = nullptr;
+    c_schema = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        dictionary_file.data(), dictionary_file.size(), &reader, &c_schema, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+    REQUIRE(c_schema != nullptr);
+    {
+      auto* schema = reinterpret_cast<ArrowSchema*>(c_schema);
+      REQUIRE(schema->n_children == 1);
+      REQUIRE(schema->children[0]->dictionary != nullptr);
+      REQUIRE(std::string(schema->children[0]->dictionary->format) == "u");
+    }
+    lancedb_free_arrow_schema(c_schema);
+    lancedb_record_batch_reader_free(reader);
+
     // A schema the Arrow C ABI cannot carry is a normal invalid-input error, and
     // neither requested output is handed over
     const auto unrepresentable = write_ipc_file_with_unrepresentable_field_name();

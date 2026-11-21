@@ -150,6 +150,18 @@ std::vector<uint8_t> write_ipc_file_with_corrupt_second_batch(
 // by the Arrow C data interface, because it contains a NUL byte
 std::vector<uint8_t> write_ipc_file_with_unrepresentable_field_name();
 
+// Helper function to write an Arrow IPC file with a dictionary-encoded column,
+// so the file carries dictionary blocks beside its record batches
+std::vector<uint8_t> write_ipc_file_with_dictionary_column();
+
+// Helper function to write an Arrow IPC file whose announced footer length is
+// valid for the input but whose footer bytes are not a footer
+std::vector<uint8_t> write_ipc_file_with_unreadable_footer();
+
+// Helper function to write an Arrow IPC file whose footer parses but whose
+// declared record blocks no longer fit the shortened input
+std::vector<uint8_t> write_ipc_file_with_blocks_outside_the_file();
+
 // Helper function to read an Arrow IPC file with the Arrow C++ reader
 IpcFileContents read_ipc_file(const uint8_t* data, size_t len);
 

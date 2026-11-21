@@ -242,6 +242,51 @@ std::vector<uint8_t> write_ipc_file_with_unrepresentable_field_name() {
   return write_ipc_file(schema, {batch});
 }
 
+std::vector<uint8_t> write_ipc_file_with_dictionary_column() {
+  arrow::StringDictionaryBuilder builder;
+  REQUIRE(builder.Append("alpha").ok());
+  REQUIRE(builder.Append("beta").ok());
+  REQUIRE(builder.Append("alpha").ok());
+  std::shared_ptr<arrow::Array> keys;
+  REQUIRE(builder.Finish(&keys).ok());
+
+  auto schema = arrow::schema({arrow::field("key", keys->type())});
+  auto batch = arrow::RecordBatch::Make(schema, keys->length(), {keys});
+  return write_ipc_file(schema, {batch});
+}
+
+std::vector<uint8_t> write_ipc_file_with_unreadable_footer() {
+  auto schema = create_test_schema();
+  auto bytes = write_ipc_file(schema, {create_test_record_batch(1, 0)});
+
+  // A four byte footer length fits the input, but four bytes are not a footer
+  const uint32_t announced_footer = 4;
+  std::memcpy(bytes.data() + bytes.size() - 10, &announced_footer,
+              sizeof(announced_footer));
+  return bytes;
+}
+
+std::vector<uint8_t> write_ipc_file_with_blocks_outside_the_file() {
+  auto schema = create_test_schema();
+  auto bytes = write_ipc_file(
+      schema, {create_test_record_batch(2, 0), create_test_record_batch(3, 2)});
+
+  // Keep the header and enough of the tail for the footer and its magic, and drop
+  // the bytes in between: the footer still parses, but the blocks it declares now
+  // end past the end of the input
+  const int32_t footer_len = read_le_int32(bytes, bytes.size() - 10);
+  const size_t keep_head = 64;
+  const size_t keep_tail = static_cast<size_t>(footer_len) + 64;
+  const size_t declared_last_end =
+      bytes.size() - 10 - static_cast<size_t>(footer_len) - 8;
+  REQUIRE(keep_head + keep_tail < declared_last_end);
+
+  std::vector<uint8_t> truncated;
+  truncated.insert(truncated.end(), bytes.begin(), bytes.begin() + keep_head);
+  truncated.insert(truncated.end(), bytes.end() - keep_tail, bytes.end());
+  return truncated;
+}
+
 IpcFileContents read_ipc_file(const uint8_t* data, size_t len) {
   auto buffer = arrow::Buffer::FromString(
       std::string(reinterpret_cast<const char*>(data), len));
