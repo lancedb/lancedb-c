@@ -6,7 +6,7 @@
 //! This module provides complete query operations with proper Arrow integration
 
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_float};
+use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
 use std::sync::Arc;
 
@@ -51,6 +51,7 @@ pub struct LanceDBVectorQuery {
     select: Option<Select>,
     filter: Option<String>,
     df_filter: Option<Expr>,
+    postfilter: bool,
     distance_type: Option<DistanceType>,
     nprobes: Option<usize>,
     refine_factor: Option<u32>,
@@ -126,6 +127,7 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
         select: None,
         filter: None,
         df_filter: None,
+        postfilter: false,
         distance_type: None,
         nprobes: None,
         refine_factor: None,
@@ -438,15 +440,18 @@ pub unsafe extern "C" fn lancedb_vector_query_df_filter(
     LanceDBError::Success
 }
 
-/// Set distance type for vector query
+/// Make the vector query filter run after the vector search
+///
+/// This only affects queries that also set a filter. Post-filtering can
+/// return fewer than `limit` rows when the nearest vectors do not match the
+/// filter; a higher refine factor can recover some results.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
-pub unsafe extern "C" fn lancedb_vector_query_distance_type(
+pub unsafe extern "C" fn lancedb_vector_query_postfilter(
     query: *mut LanceDBVectorQuery,
-    distance_type: LanceDBDistanceType,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if query.is_null() {
@@ -455,6 +460,31 @@ pub unsafe extern "C" fn lancedb_vector_query_distance_type(
     }
 
     let _ = error_message; // No errors possible in this function
+    (*query).postfilter = true;
+    LanceDBError::Success
+}
+
+/// Set distance type for vector query
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_distance_type(
+    query: *mut LanceDBVectorQuery,
+    distance_type: c_int,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(distance_type) = LanceDBDistanceType::from_c_int(distance_type) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
     (*query).distance_type = Some(distance_type.into());
     LanceDBError::Success
 }
@@ -606,6 +636,7 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
     }
 
     let query_ref = &*query;
+    let postfilter = query_ref.postfilter;
     let runtime = get_runtime();
 
     match runtime.block_on(async {
@@ -646,6 +677,9 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         }
         if let Some(ef) = query_ref.ef {
             rust_query = rust_query.ef(ef);
+        }
+        if postfilter {
+            rust_query = rust_query.postfilter();
         }
 
         rust_query.explain_plan(verbose).await
@@ -728,6 +762,9 @@ fn run_vector_query(
         }
         if let Some(ef) = query.ef {
             rust_query = rust_query.ef(ef);
+        }
+        if query.postfilter {
+            rust_query = rust_query.postfilter();
         }
 
         rust_query.execute().await

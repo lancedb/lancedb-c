@@ -21,6 +21,42 @@
 #include <string>
 #include <vector>
 
+// Helpers compiled as C. The C++ tests cannot create an out-of-range C enum
+// value without undefined behavior, but a C caller can pass one through the
+// public header. These helpers do that and let the tests check the result.
+extern "C" {
+LanceDBError lancedb_test_create_vector_index_with_index_type(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    int index_type,
+    char** error_message);
+LanceDBError lancedb_test_create_vector_index_with_distance_type(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    int distance_type,
+    char** error_message);
+LanceDBError lancedb_test_create_scalar_index_with_index_type(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    int index_type,
+    char** error_message);
+LanceDBError lancedb_test_optimize_with_type(
+    const LanceDBTable* table,
+    int optimize_type,
+    char** error_message);
+LanceDBError lancedb_test_set_distance_type(
+    LanceDBVectorQuery* query,
+    int distance_type,
+    char** error_message);
+LanceDBExpr* lancedb_test_expr_binary(
+    LanceDBExpr* left,
+    int op,
+    LanceDBExpr* right);
+}
+
 // Helper function to check if directory exists
 int directory_exists(const char* path);
 
