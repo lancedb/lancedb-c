@@ -75,7 +75,12 @@ set(STATIC_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}lancedb${C
 set(SHARED_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
   set(SHARED_LIB_PATH "${RUST_TARGET_DIR}/lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb${CMAKE_IMPORT_LIBRARY_SUFFIX}")
+  if(MSVC)
+    # Rust names its MSVC import library after the DLL: lancedb.dll.lib.
+    set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}.lib")
+  else()
+    set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb${CMAKE_IMPORT_LIBRARY_SUFFIX}")
+  endif()
 endif()
 
 if(BUILD_SHARED_LIBS)
@@ -742,17 +747,35 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
     add_dependencies(coverage lancedb_c17_consumer)
   endif()
 
+  set(_c17_ctest_config_args)
+  if(CMAKE_CONFIGURATION_TYPES)
+    set(_c17_ctest_config_args -C $<CONFIG>)
+  endif()
+
   add_custom_target(check-c17
-    COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_c17_consumer>
-      ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
+    COMMAND ${TEST_ENV_PREFIX} ${CMAKE_CTEST_COMMAND}
+      --test-dir ${CMAKE_CURRENT_BINARY_DIR}
+      ${_c17_ctest_config_args}
+      -R "^lancedb_c17_consumer$"
+      --output-on-failure
+      --no-tests=error
     DEPENDS lancedb_c17_consumer
     COMMENT "Checking the public header with a strict C17 consumer..."
+    VERBATIM
   )
 
   add_test(NAME lancedb_c17_consumer
     COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_c17_consumer>
       ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
   )
+
+  if(WIN32 AND BUILD_SHARED_LIBS)
+    # The DLL stays in the Rust target directory; put it on the test PATH
+    # instead of adding a second DLL staging step.
+    set_tests_properties(lancedb_c17_consumer PROPERTIES
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${RUST_TARGET_DIR}"
+    )
+  endif()
 endif()
 
 add_custom_target(clean-all
