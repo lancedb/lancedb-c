@@ -15,7 +15,7 @@ use arrow_schema::{ArrowError, Schema};
 use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::table::{BaseTable, ColumnAlteration, NewColumnTransform};
+use lancedb::table::{ColumnAlteration, NewColumnTransform};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
