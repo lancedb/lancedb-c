@@ -1046,6 +1046,55 @@ LanceDBError lancedb_table_merge_insert(
 );
 
 /**
+ * Result of an update operation
+ *
+ * Embedded tables report the actual affected rows and commit version. A
+ * legacy remote server that returns an empty update response can report zero
+ * for either field, which means unknown there rather than a literal zero.
+ */
+typedef struct {
+    uint64_t rows_updated;   // Rows changed; 0 may mean unknown on legacy remote responses
+    uint64_t version;        // Committed table version; 0 may mean unknown on legacy remote responses
+} LanceDBUpdateResult;
+
+/**
+ * Update rows in a table using SQL expressions
+ *
+ * Each entry in columns is paired with the entry at the same index in
+ * expressions. The input order is preserved when passing the assignments to
+ * the SDK, but it is not an evaluation order: every expression sees the row as
+ * it was before the update. For example, updating a from b and b from a swaps
+ * their original values. Assignments are applied in a single commit.
+ * The caller is responsible for quoting string literals in expressions (for
+ * example "'updated'").
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns - array of column names to update
+ * @param expressions - array of SQL expressions, one per column
+ * @param num_assignments - number of entries in columns and expressions (must be > 0)
+ * @param predicate - SQL predicate selecting the rows to update; NULL or an empty
+ *                    string updates every row
+ * @param result_out - pointer to receive the affected rows and committed version;
+ *                     legacy remote empty responses can report zero (unknown)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The arrays and their strings are borrowed for the duration of the call. They
+ * are not consumed and remain owned by the caller.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_update(
+    const LanceDBTable* table,
+    const char* const* columns,
+    const char* const* expressions,
+    size_t num_assignments,
+    const char* predicate,
+    LanceDBUpdateResult* result_out,
+    char** error_message
+);
+
+/**
  * Delete rows from table based on predicate
  *
  * @param table - pointer to LanceDBTable
