@@ -148,8 +148,10 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
         lancedb::error::Error::Retry { .. } => LanceDBError::Retry,
         lancedb::error::Error::Arrow { .. } => LanceDBError::Arrow,
         lancedb::error::Error::NotSupported { .. } => LanceDBError::NotSupported,
-        lancedb::error::Error::Other { .. } => LanceDBError::Other,
-        lancedb::error::Error::External { .. } => LanceDBError::Other,
+        // SDK variants added after 0.33 that have no dedicated C code (schema,
+        // job, SQL and interrupted-stream errors, including missing columns)
+        // keep the historical LANCEDB_OTHER mapping used for External errors.
+        _ => LanceDBError::Other,
     }
 }
 

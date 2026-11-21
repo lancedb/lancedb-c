@@ -146,11 +146,32 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
 
     // Filter by key = 42 select
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_42\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_42'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Execute query
+    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    REQUIRE(query_result != nullptr);
+
+    verify_query_result(query_result, 1);
+  }
+
+  SECTION("Filter with a double-quoted identifier") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key", "data"};
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // SQL-standard double quotes delimit identifiers, not string values.
+    result = lancedb_query_where_filter(query, "\"key\" = 'key_42'", &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
     LanceDBQueryResult* query_result = lancedb_query_execute(query);
     REQUIRE(query_result != nullptr);
 
@@ -164,7 +185,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
 
     // Filter by key IN (10, 20, 30, 40, 50)
     char* error_message = nullptr;
-    LanceDBError result = lancedb_query_where_filter(query, "key IN (\"key_10\", \"key_20\", \"key_30\", \"key_40\", \"key_50\")", &error_message);
+    LanceDBError result = lancedb_query_where_filter(query, "key IN ('key_10', 'key_20', 'key_30', 'key_40', 'key_50')", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -206,7 +227,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
 
     // Filter by key = 42 select
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_42\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_42'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -224,7 +245,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
 
     // Filter by key IN (10, 20, 30, 40, 50)
     char* error_message = nullptr;
-    LanceDBError result = lancedb_query_where_filter(query, "key IN (\"key_10\", \"key_20\", \"key_30\", \"key_40\", \"key_50\")", &error_message);
+    LanceDBError result = lancedb_query_where_filter(query, "key IN ('key_10', 'key_20', 'key_30', 'key_40', 'key_50')", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -256,7 +277,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
 
     // Filter by a key that doesn't exist (table has key_0 to key_99)
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_999\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_999'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -302,7 +323,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Filter on non-existent column"
 
   // Filter on a column that does not exist in the table
   error_message = nullptr;
-  result = lancedb_query_where_filter(query, "key = \"key_42\" OR unknown = \"value\"", &error_message);
+  result = lancedb_query_where_filter(query, "key = 'key_42' OR unknown = 'value'", &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
@@ -340,7 +361,7 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
     LanceDBQuery* query = lancedb_query_new(table);
     REQUIRE(query != nullptr);
 
-    const std::string filter = "key = \"key_" + std::to_string(i % total_rows) + "\"";
+    const std::string filter = "key = 'key_" + std::to_string(i % total_rows) + "'";
     result = lancedb_query_where_filter(query, filter.c_str(), &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);

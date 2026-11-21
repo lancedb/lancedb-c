@@ -639,7 +639,7 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
             rust_query = rust_query.distance_type(distance_type);
         }
         if let Some(nprobes) = query_ref.nprobes {
-            rust_query = rust_query.nprobes(nprobes);
+            rust_query = rust_query.nprobes(nprobes)?;
         }
         if let Some(refine_factor) = query_ref.refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);
@@ -721,7 +721,7 @@ fn run_vector_query(
             rust_query = rust_query.distance_type(distance_type);
         }
         if let Some(nprobes) = query.nprobes {
-            rust_query = rust_query.nprobes(nprobes);
+            rust_query = rust_query.nprobes(nprobes)?;
         }
         if let Some(refine_factor) = query.refine_factor {
             rust_query = rust_query.refine_factor(refine_factor);

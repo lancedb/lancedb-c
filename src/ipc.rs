@@ -23,8 +23,7 @@ use futures::TryStreamExt;
 use lancedb::arrow::SendableRecordBatchStream;
 
 use crate::error::{
-    clear_error_message, handle_error, set_custom_error_message, set_invalid_argument_message,
-    LanceDBError,
+    clear_error_message, set_custom_error_message, set_invalid_argument_message, LanceDBError,
 };
 use crate::types::LanceDBRecordBatchReader;
 
@@ -109,6 +108,56 @@ fn check_ipc_file_bounds(data: &[u8]) -> Result<(), ArrowError> {
         )));
     }
 
+    // The Arrow reader allocates a batch's metadata and body from the lengths in
+    // the footer before it looks at their contents, so every block the footer
+    // declares has to stay inside the bytes the caller passed
+    let footer_start = data.len() - 10 - footer_len;
+    let footer = arrow_ipc::root_as_footer(&data[footer_start..data.len() - 10])
+        .map_err(|error| ArrowError::ParseError(format!("unreadable IPC footer: {error}")))?;
+    for block in footer.recordBatches().into_iter().flatten() {
+        check_block_bounds(
+            block.offset(),
+            block.metaDataLength(),
+            block.bodyLength(),
+            data.len(),
+        )?;
+    }
+    for block in footer.dictionaries().into_iter().flatten() {
+        check_block_bounds(
+            block.offset(),
+            block.metaDataLength(),
+            block.bodyLength(),
+            data.len(),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Verify that one footer-declared block stays inside the input
+fn check_block_bounds(
+    offset: i64,
+    metadata_len: i32,
+    body_len: i64,
+    file_len: usize,
+) -> Result<(), ArrowError> {
+    let reason = |reason: &str| {
+        ArrowError::ParseError(format!(
+            "a block at offset {offset} with {metadata_len} metadata and {body_len} body bytes {reason}"
+        ))
+    };
+    if offset < 0 || metadata_len < 0 || body_len < 0 {
+        return Err(reason("declares a negative length"));
+    }
+
+    let end = (offset as u64)
+        .checked_add(metadata_len as u64)
+        .and_then(|end| end.checked_add(body_len as u64))
+        .ok_or_else(|| reason("declares a range that overflows"))?;
+    if end > file_len as u64 {
+        return Err(reason("ends outside the file"));
+    }
+
     Ok(())
 }
 
@@ -153,6 +202,42 @@ impl RecordBatchReader for DecodedBatchesReader {
     fn schema(&self) -> Arc<Schema> {
         self.schema.clone()
     }
+}
+
+/// The C outputs of a successful decode, prepared before either is handed over
+struct PreparedDecode {
+    c_schema: Option<arrow_schema::ffi::FFI_ArrowSchema>,
+    reader: Option<LanceDBRecordBatchReader>,
+}
+
+/// Decode the input and prepare whichever C outputs the caller asked for
+///
+/// Both outputs are built before the caller receives either of them, so a
+/// failure cannot leave one output set and the other missing.
+fn prepare_decode(
+    data: &[u8],
+    want_schema: bool,
+    want_reader: bool,
+) -> Result<PreparedDecode, ArrowError> {
+    let (schema, batches) = read_ipc_file(data)?;
+
+    let c_schema = if want_schema {
+        Some(arrow_schema::ffi::FFI_ArrowSchema::try_from(&*schema)?)
+    } else {
+        None
+    };
+    let reader = if want_reader {
+        Some(LanceDBRecordBatchReader::new(Box::new(
+            DecodedBatchesReader {
+                schema,
+                batches: batches.into_iter(),
+            },
+        )))
+    } else {
+        None
+    };
+
+    Ok(PreparedDecode { c_schema, reader })
 }
 
 /// Decode an Arrow IPC file into an owned reader and/or an Arrow C ABI schema
@@ -216,8 +301,12 @@ pub unsafe extern "C" fn lancedb_record_batch_reader_from_ipc_file(
     }
 
     let bytes = std::slice::from_raw_parts(data, len);
-    let (schema, batches) = match contain_decode_panic(|| read_ipc_file(bytes)) {
-        Ok(Ok(decoded)) => decoded,
+    // Decoding and preparing both C outputs happens inside the panic barrier:
+    // everything the caller asked for is ready before the first output is set
+    let prepared = match contain_decode_panic(|| {
+        prepare_decode(bytes, !schema_out.is_null(), !reader_out.is_null())
+    }) {
+        Ok(Ok(prepared)) => prepared,
         Ok(Err(error)) => {
             set_custom_error_message(
                 error_message,
@@ -234,28 +323,12 @@ pub unsafe extern "C" fn lancedb_record_batch_reader_from_ipc_file(
         }
     };
 
-    // The schema is exported first, so a schema the C ABI cannot represent fails
-    // the call before any reader takes ownership of the batches
-    if !schema_out.is_null() {
-        match arrow_schema::ffi::FFI_ArrowSchema::try_from(&*schema) {
-            Ok(ffi_schema) => {
-                *schema_out = Box::into_raw(Box::new(ffi_schema));
-            }
-            Err(error) => {
-                return handle_error(
-                    &lancedb::error::Error::Arrow { source: error },
-                    error_message,
-                )
-            }
-        }
+    // Hand both outputs over together
+    if let Some(c_schema) = prepared.c_schema {
+        *schema_out = Box::into_raw(Box::new(c_schema));
     }
-
-    if !reader_out.is_null() {
-        let reader = DecodedBatchesReader {
-            schema,
-            batches: batches.into_iter(),
-        };
-        *reader_out = Box::into_raw(Box::new(LanceDBRecordBatchReader::new(Box::new(reader))));
+    if let Some(reader) = prepared.reader {
+        *reader_out = Box::into_raw(Box::new(reader));
     }
 
     LanceDBError::Success
@@ -415,6 +488,20 @@ mod tests {
 
         let error = read_ipc_file(&bytes).expect_err("the footer cannot fit the input");
         assert!(error.to_string().contains("does not fit"));
+    }
+
+    #[test]
+    fn block_ranges_must_stay_inside_the_file() {
+        // A block that ends exactly at the end of the input is fine
+        assert!(check_block_bounds(8, 100, 100, 208).is_ok());
+        // One byte past it is not
+        assert!(check_block_bounds(8, 100, 101, 208).is_err());
+        // Neither is a negative or overflowing declaration
+        assert!(check_block_bounds(-1, 100, 100, 208).is_err());
+        assert!(check_block_bounds(8, -1, 100, 208).is_err());
+        assert!(check_block_bounds(8, 100, -1, 208).is_err());
+        assert!(check_block_bounds(i64::MAX, 100, 100, 208).is_err());
+        assert!(check_block_bounds(0, i32::MAX, i64::MAX, 208).is_err());
     }
 
     #[test]

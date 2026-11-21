@@ -378,6 +378,11 @@ LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuil
  *
  * The builder is consumed by this function and must not be used after calling.
  * Passing NULL session is a no-op.
+ *
+ * A custom session is only supported for embedded connections. LanceDB Enterprise
+ * connections (db:// URIs) reject it when the builder is executed:
+ * lancedb_connect_builder_execute() returns LANCEDB_NOT_SUPPORTED with an error message
+ * stating that session is not supported for LanceDB Enterprise connections.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_session(LanceDBConnectBuilder* builder, const LanceDBSession* session);
 
@@ -663,7 +668,9 @@ void lancedb_connection_free(LanceDBConnection* connection);
  * @param options - pointer to LanceDBSessionOptions, or NULL for defaults
  * @return Non-null pointer to LanceDBSession on success, NULL on failure
  *
- * The returned session must be freed with lancedb_session_free().
+ * The returned session must be freed with lancedb_session_free(). A session can be
+ * attached to an embedded connection with lancedb_connect_builder_session(); Enterprise
+ * (db://) connections reject custom sessions when the builder is executed.
  */
 LanceDBSession* lancedb_session_new(const LanceDBSessionOptions* options);
 
@@ -1321,11 +1328,20 @@ LanceDBError lancedb_vector_query_distance_type(
  * results) at the cost of slower queries. Lower values make queries faster but may miss
  * relevant results that are in non-searched partitions.
  *
+ * When this setter is not called, LanceDB leaves the probe bounds unset and uses Lance's
+ * adaptive IVF probe defaults. This replaces the fixed minimum/maximum of 20 used by
+ * LanceDB 0.33 and earlier. Call this setter with 20 to request the previous fixed behavior.
+ *
  * Typical values:
- * - Default is usually 20
  * - Range: 1 to num_partitions (specified during index creation)
  * - Higher nprobes (e.g., num_partitions/2) → better recall, slower queries
  * - Lower nprobes (e.g., 1-10) → faster queries, lower recall
+ *
+ * This setter returns LANCEDB_SUCCESS even for 0. The value is validated when the query is
+ * executed: lancedb_vector_query_execute() returns NULL for nprobes 0, and
+ * lancedb_vector_query_explain_plan() returns LANCEDB_INVALID_INPUT with the message
+ * "nprobes must be greater than 0". Callers that accept untrusted values should validate
+ * them before executing.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param nprobes - number of IVF partitions to search (must be <= num_partitions)
@@ -1670,8 +1686,9 @@ LanceDBError lancedb_record_batch_reader_from_arrow(
  * function returns. Every batch is decoded before returning, so zero bytes (also
  * a NULL pointer with len 0), an IPC stream, a truncated file or a corrupt batch
  * fail with LANCEDB_INVALID_INPUT and a decoding message before any table is
- * changed. A size that cannot describe the buffer, or a file whose announced
- * footer does not fit in it, is rejected before the decoder reads anything.
+ * changed. A size that cannot describe the buffer, a file whose announced footer
+ * does not fit in it, or a footer whose batches point outside it, are rejected
+ * before the decoder allocates from those numbers.
  * On entry, both outputs and the error message are cleared.
  * The caller must free a returned reader with lancedb_record_batch_reader_free()
  * and a returned schema with lancedb_free_arrow_schema(). If error_message is
