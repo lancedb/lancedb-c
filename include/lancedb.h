@@ -1746,6 +1746,11 @@ LanceDBError lancedb_table_index_stats(
 /**
  * Statistics of a single index, as reported by the Rust SDK
  *
+ * The strings are borrowed from the result and are read-only: do not modify them,
+ * write through them or free them individually. They stay valid until the result is
+ * released with lancedb_free_index_statistics(), and the whole result must be treated
+ * as read-only.
+ *
  * The values the SDK reports as optional keep their presence: distance_type is NULL
  * when the SDK reports no distance metric, and has_num_indices tells whether
  * num_indices was reported. index_type is the SDK type name, for example "IVF_PQ",
@@ -1754,8 +1759,8 @@ LanceDBError lancedb_table_index_stats(
 typedef struct {
     size_t num_indexed_rows;    // Rows covered by the index
     size_t num_unindexed_rows;  // Rows not covered by the index yet
-    char* index_type;           // SDK index type name, owned by the result
-    char* distance_type;        // SDK distance metric name, owned by the result (NULL if none)
+    const char* index_type;     // SDK index type name, borrowed from the result
+    const char* distance_type;  // SDK distance metric name, borrowed from the result (NULL if none)
     unsigned int num_indices;   // Number of parts; valid only when has_num_indices is true
     bool has_num_indices;       // Whether the SDK reported the number of parts
 } LanceDBIndexStatistics;
@@ -1768,33 +1773,40 @@ typedef struct {
  *
  * @param table - pointer to LanceDBTable
  * @param index_name - null-terminated C string containing the index name
- * @param stats_out - pointer to receive the statistics, or NULL when the index does not exist
+ * @param stats_out - pointer to receive the read-only statistics, or NULL when the
+ *                    index does not exist
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return LANCEDB_SUCCESS when the statistics were read, including when the index
  *         does not exist, other error codes on failure
  *
  * On success, *stats_out is NULL when the index does not exist and points to the
- * statistics otherwise, so a missing index is not an error. On failure, *stats_out is
- * NULL as well, and error_message carries the reason when requested. The caller must
- * free a non-NULL result with lancedb_free_index_statistics().
+ * read-only result otherwise, so a missing index is not an error. On failure, *stats_out
+ * is NULL as well, and error_message carries the reason when requested.
+ *
+ * The result and the strings it borrows are owned by the library. Do not modify the
+ * result, write through the strings or free them individually; release the whole result
+ * with lancedb_free_index_statistics() once it is no longer used, and release it only
+ * once.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_index_statistics(
     const LanceDBTable* table,
     const char* index_name,
-    LanceDBIndexStatistics** stats_out,
+    const LanceDBIndexStatistics** stats_out,
     char** error_message
 );
 
 /**
- * Free the statistics returned by lancedb_table_index_statistics
+ * Release the statistics returned by lancedb_table_index_statistics
  *
  * @param stats - statistics returned by lancedb_table_index_statistics
  *
+ * The result and the strings it borrows become invalid. Do not free the strings
+ * individually and do not release the same result twice.
  * Safe to call with a NULL pointer.
  */
-void lancedb_free_index_statistics(LanceDBIndexStatistics* stats);
+void lancedb_free_index_statistics(const LanceDBIndexStatistics* stats);
 
 /**
  * Free Arrow arrays returned by vector search functions

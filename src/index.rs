@@ -703,13 +703,16 @@ pub unsafe extern "C" fn lancedb_table_index_stats(
 /// The values the SDK reports as optional keep their presence: `distance_type` is
 /// NULL when the SDK reports no distance metric, and `has_num_indices` tells whether
 /// `num_indices` was reported.
+///
+/// The pointers are private so that safe Rust cannot build the type or replace the
+/// strings it owns; only this module hands them to C, and `Drop` releases them.
 #[repr(C)]
 #[derive(Debug)]
 pub struct LanceDBIndexStatistics {
     pub num_indexed_rows: usize,
     pub num_unindexed_rows: usize,
-    pub index_type: *mut c_char,
-    pub distance_type: *mut c_char,
+    index_type: *mut c_char,
+    distance_type: *mut c_char,
     pub num_indices: u32,
     pub has_num_indices: bool,
 }
@@ -732,7 +735,7 @@ impl Drop for LanceDBIndexStatistics {
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
 /// - `index_name` must be a valid null-terminated C string
-/// - `stats_out` must be a valid pointer to receive the statistics
+/// - `stats_out` must be a valid pointer to receive the read-only statistics
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
 /// # Returns
@@ -743,14 +746,14 @@ impl Drop for LanceDBIndexStatistics {
 pub unsafe extern "C" fn lancedb_table_index_statistics(
     table: *const LanceDBTable,
     index_name: *const c_char,
-    stats_out: *mut *mut LanceDBIndexStatistics,
+    stats_out: *mut *const LanceDBIndexStatistics,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if stats_out.is_null() {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
-    *stats_out = ptr::null_mut();
+    *stats_out = ptr::null();
 
     if table.is_null() || index_name.is_null() {
         set_invalid_argument_message(error_message);
@@ -796,17 +799,18 @@ pub unsafe extern "C" fn lancedb_table_index_statistics(
             .unwrap_or(ptr::null_mut()),
         num_indices: stats.num_indices.unwrap_or(0),
         has_num_indices: stats.num_indices.is_some(),
-    }));
+    }))
+    .cast_const();
     LanceDBError::Success
 }
 
-/// Free the statistics returned by lancedb_table_index_statistics
+/// Release the statistics returned by lancedb_table_index_statistics
 ///
 /// # Safety
 /// - `stats` must be a pointer returned by `lancedb_table_index_statistics`, or NULL
 #[no_mangle]
-pub unsafe extern "C" fn lancedb_free_index_statistics(stats: *mut LanceDBIndexStatistics) {
+pub unsafe extern "C" fn lancedb_free_index_statistics(stats: *const LanceDBIndexStatistics) {
     if !stats.is_null() {
-        drop(Box::from_raw(stats));
+        drop(Box::from_raw(stats.cast_mut()));
     }
 }

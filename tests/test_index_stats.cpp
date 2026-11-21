@@ -23,9 +23,9 @@ std::string single_index_name(const LanceDBTable* table) {
 }
 
 // Read the statistics of an existing index, requiring the call to succeed
-LanceDBIndexStatistics* get_index_statistics(const LanceDBTable* table, const std::string& index_name) {
+const LanceDBIndexStatistics* get_index_statistics(const LanceDBTable* table, const std::string& index_name) {
   char* error_message = nullptr;
-  LanceDBIndexStatistics* stats = nullptr;
+  const LanceDBIndexStatistics* stats = nullptr;
   REQUIRE(lancedb_table_index_statistics(table, index_name.c_str(), &stats, &error_message) == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   REQUIRE(stats != nullptr);
@@ -52,7 +52,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Statistics", "[index]") {
 
     const std::string index_name = single_index_name(table);
 
-    LanceDBIndexStatistics* stats = get_index_statistics(table, index_name);
+    const LanceDBIndexStatistics* stats = get_index_statistics(table, index_name);
     REQUIRE(stats->index_type != nullptr);
     CHECK(std::string(stats->index_type) == "BTREE");
     // A scalar index carries no distance metric
@@ -92,7 +92,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Statistics", "[index]") {
         table, columns, 1, LANCEDB_INDEX_BTREE, &config, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    LanceDBIndexStatistics* stats = nullptr;
+    const LanceDBIndexStatistics* stats = nullptr;
     REQUIRE(lancedb_table_index_statistics(
         table, "missing_index", &stats, &error_message) == LANCEDB_SUCCESS);
     CHECK(stats == nullptr);
@@ -114,7 +114,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Statistics", "[index]") {
     lancedb_free_string(error_message);
     error_message = nullptr;
 
-    LanceDBIndexStatistics* stats = nullptr;
+    const LanceDBIndexStatistics* stats = nullptr;
     REQUIRE(lancedb_table_index_statistics(
         nullptr, "any_index", &stats, &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);

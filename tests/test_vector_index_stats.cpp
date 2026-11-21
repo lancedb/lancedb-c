@@ -47,7 +47,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Index Statistics", "[vector_ind
 
     const std::string index_name = single_index_name(table);
 
-    LanceDBIndexStatistics* stats = nullptr;
+    const LanceDBIndexStatistics* stats = nullptr;
     REQUIRE(lancedb_table_index_statistics(
         table, index_name.c_str(), &stats, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
