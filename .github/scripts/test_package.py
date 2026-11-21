@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 import os
 import struct
 import sys
@@ -31,6 +32,10 @@ class PackageFixture(unittest.TestCase):
         (self.repo / "include").mkdir(parents=True)
         (self.repo / "LICENSE").write_text("license\n", encoding="utf-8")
         (self.repo / "include" / "lancedb.h").write_text("header\n", encoding="utf-8")
+        (self.repo / "Cargo.toml").write_text(
+            '[package]\nname = "lancedb-c"\nversion = "0.34.0-preview.1"\n',
+            encoding="utf-8",
+        )
         self.library_dir = self.root / "library"
         self.library_dir.mkdir()
         (self.library_dir / "liblancedb.so").write_bytes(b"fake shared library")
@@ -95,6 +100,27 @@ class PackageArchiveTests(PackageFixture):
         self.assertEqual(modes["lib/liblancedb.so"], 0o755)
         self.assertEqual(modes["manifest.json"], 0o644)
         self.assertEqual(modes["SHA256SUMS"], 0o644)
+
+    def test_manifest_records_package_version(self) -> None:
+        archive, _ = self.create("package")
+        with tempfile.TemporaryDirectory(prefix="lancedb-c-extract-") as temp:
+            package.extract_tar(archive, Path(temp))
+            manifest = json.loads(
+                (Path(temp) / "lancedb-c-abc123-linux-amd64" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(manifest["version"], "0.34.0-preview.1")
+
+    def test_cargo_package_version_uses_package_section(self) -> None:
+        (self.repo / "Cargo.toml").write_text(
+            '[dependencies]\nfoo = { version = "9.9.9" }\n\n'
+            '[package]\nname = "lancedb-c"\nversion = "1.2.3-preview.4"\n',
+            encoding="utf-8",
+        )
+
+        self.assertEqual(package.cargo_package_version(self.repo), "1.2.3-preview.4")
 
     def test_archive_checksum_is_required_and_matches(self) -> None:
         archive, checksum = self.create("package")

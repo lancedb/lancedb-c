@@ -13,9 +13,8 @@ The package layout is the contract the later pure-Go loader consumes:
       manifest.json
       SHA256SUMS
 
-`target` uses the Go toolchain's GOOS-GOARCH names.  The manifest describes the
-files without yet assigning an independent C binding version; that version is
-added with the release process.
+`target` uses the Go toolchain's GOOS-GOARCH names. The manifest records the
+Cargo package version, commit and packaged files.
 """
 
 from __future__ import annotations
@@ -99,6 +98,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def cargo_package_version(repo_root: Path) -> str:
+    cargo_toml = repo_root / "Cargo.toml"
+    in_package = False
+    for raw_line in cargo_toml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("["):
+            if line == "[package]":
+                in_package = True
+            elif in_package:
+                break
+            continue
+        if in_package:
+            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    raise SystemExit(f"missing package version in {cargo_toml}")
+
+
 def set_github_output(**values: str) -> None:
     output = os.environ.get("GITHUB_OUTPUT")
     if not output:
@@ -158,10 +175,11 @@ def extract_tar(archive: Path, destination: Path) -> None:
             tar.extract(member, destination)
 
 
-def package_manifest(target: Target, commit: str) -> dict:
+def package_manifest(target: Target, commit: str, version: str) -> dict:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "name": PACKAGE_NAME,
+        "version": version,
         "target": target.name,
         "rustTarget": target.triple,
         "commit": commit,
@@ -190,6 +208,7 @@ def create_package(args: argparse.Namespace) -> None:
             raise SystemExit(f"missing build output: {library}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    version = cargo_package_version(repo_root)
     package_root_name = f"{PACKAGE_NAME}-{args.commit}-{target.name}"
     with tempfile.TemporaryDirectory(prefix="lancedb-c-package-") as temp:
         package_root = Path(temp) / package_root_name
@@ -203,7 +222,7 @@ def create_package(args: argparse.Namespace) -> None:
                 0o644,
             )
 
-        manifest = package_manifest(target, args.commit)
+        manifest = package_manifest(target, args.commit, version)
         (package_root / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
         )
@@ -492,7 +511,7 @@ def verify_package(args: argparse.Namespace) -> None:
         if not manifest_path.is_file():
             raise SystemExit("package has no manifest.json")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        expected = package_manifest(target, args.commit)
+        expected = package_manifest(target, args.commit, cargo_package_version(repo_root))
         if manifest != expected:
             raise SystemExit(f"manifest mismatch:\n{json.dumps(manifest, indent=2)}\n!=\n{json.dumps(expected, indent=2)}")
 

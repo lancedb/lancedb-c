@@ -6,7 +6,7 @@ import os
 project = 'LanceDB C API'
 copyright = '2025, The LanceDB Authors'
 author = 'The LanceDB Authors'
-release = '0.1.0'
+release = '0.34.0-preview.1'
 
 # -- General configuration ---------------------------------------------------
 extensions = [

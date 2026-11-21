@@ -1,7 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.22)
-project(lancedb-c VERSION 0.21.2)
+
+# Cargo.toml is the source of truth for the binding version. CMake's project
+# version only accepts numeric components, so use its numeric prefix there and
+# keep the complete semantic version for pkg-config and status output.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" LANCEDB_CARGO_VERSION_LINE
+  REGEX "^version = \"[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?\"$"
+  LIMIT_COUNT 1
+)
+if(NOT LANCEDB_CARGO_VERSION_LINE)
+  message(FATAL_ERROR "Could not read the lancedb-c package version from Cargo.toml")
+endif()
+string(REGEX REPLACE "^version = \"([^\"]+)\"$" "\\1" LANCEDB_VERSION "${LANCEDB_CARGO_VERSION_LINE}")
+string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" LANCEDB_PROJECT_VERSION "${LANCEDB_VERSION}")
+project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -741,6 +754,7 @@ install(DIRECTORY include/ DESTINATION include)
 install(FILES "${CMAKE_BINARY_DIR}/lancedb.pc" DESTINATION lib/pkgconfig)
 
 message(STATUS "=== LanceDB C/C++ Bindings Configuration ===")
+message(STATUS "Version: ${LANCEDB_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 if(BUILD_SHARED_LIBS)
   message(STATUS "Library type: Shared")
