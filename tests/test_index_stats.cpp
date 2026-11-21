@@ -120,6 +120,23 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index Statistics", "[index]") {
     REQUIRE(error_message != nullptr);
     CHECK(stats == nullptr);
     lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // A NULL index name is rejected before any lookup
+    REQUIRE(lancedb_table_index_statistics(
+        table, nullptr, &stats, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    CHECK(stats == nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // An index name that is not valid UTF-8 is rejected, not looked up
+    const char invalid_utf8_name[] = {'b', 'a', 'd', '\xFF', 'n', 'a', 'm', 'e', '\0'};
+    REQUIRE(lancedb_table_index_statistics(
+        table, invalid_utf8_name, &stats, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    CHECK(stats == nullptr);
+    lancedb_free_string(error_message);
 
     lancedb_table_free(table);
   }

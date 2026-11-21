@@ -900,9 +900,8 @@ pub struct LanceDBIndexStatistics {
 impl Drop for LanceDBIndexStatistics {
     fn drop(&mut self) {
         unsafe {
-            if !self.index_type.is_null() {
-                drop(CString::from_raw(self.index_type));
-            }
+            // The index type is always set by the constructor; only the metric is optional.
+            drop(CString::from_raw(self.index_type));
             if !self.distance_type.is_null() {
                 drop(CString::from_raw(self.distance_type));
             }
@@ -955,19 +954,14 @@ pub unsafe extern "C" fn lancedb_table_index_statistics(
         Err(e) => return handle_error(&e, error_message),
     };
 
-    let Ok(index_type) = CString::new(stats.index_type.to_string()) else {
-        set_custom_error_message(error_message, "Index type name contains a NUL byte");
+    let index_type = CString::new(stats.index_type.to_string());
+    let distance_type = stats
+        .distance_type
+        .map(|distance_type| CString::new(distance_type.to_string()))
+        .transpose();
+    let (Ok(index_type), Ok(distance_type)) = (index_type, distance_type) else {
+        set_custom_error_message(error_message, "Index statistics text contains a NUL byte");
         return LanceDBError::Unknown;
-    };
-    let distance_type = match stats.distance_type {
-        Some(distance_type) => match CString::new(distance_type.to_string()) {
-            Ok(distance_type) => Some(distance_type),
-            Err(_) => {
-                set_custom_error_message(error_message, "Distance type name contains a NUL byte");
-                return LanceDBError::Unknown;
-            }
-        },
-        None => None,
     };
 
     *stats_out = Box::into_raw(Box::new(LanceDBIndexStatistics {
