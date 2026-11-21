@@ -16,6 +16,7 @@ use arrow_schema::ffi::FFI_ArrowSchema;
 use datafusion_common::DFSchema;
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{lit, ColumnarValue, Expr};
 use datafusion_physical_expr::create_physical_expr;
 
@@ -318,7 +319,12 @@ pub unsafe extern "C" fn lancedb_json_matches(
         }
     };
     let execution_props = ExecutionProps::new();
-    let physical_expr = match create_physical_expr(&filter_expr, &df_schema, &execution_props) {
+    let physical_expr = match create_physical_expr(
+        &filter_expr,
+        &df_schema,
+        &execution_props,
+        &PhysicalPlanningContext::default(),
+    ) {
         Ok(pe) => pe,
         Err(e) => {
             set_custom_error_message(error_message, &format!("{e}"));

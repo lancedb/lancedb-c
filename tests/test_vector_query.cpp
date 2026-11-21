@@ -867,7 +867,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Filter on non-existent 
 
   // Filter on a column that does not exist in the table
   error_message = nullptr;
-  result = lancedb_vector_query_where_filter(query, "key = \"key_42\" OR unknown = \"value\"", &error_message);
+  result = lancedb_vector_query_where_filter(query, "key = 'key_42' OR unknown = 'value'", &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
@@ -1493,6 +1493,27 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - explain plan", "[vector
     lancedb_free_string(plan);
 
     lancedb_vector_query_free(query);
+  }
+
+  SECTION("nprobes zero is rejected at execute and explain") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_nprobes(query, 0, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(query, false, &plan, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("nprobes must be greater than 0") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // execute consumes the query and reports the same failure by returning NULL
+    REQUIRE(lancedb_vector_query_execute(query) == nullptr);
   }
 
   SECTION("Explain plan reflects a DataFusion filter") {
