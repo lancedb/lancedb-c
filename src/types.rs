@@ -3,7 +3,7 @@
 
 //! Common types shared across LanceDB C bindings modules
 
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 
 use arrow_array::RecordBatchReader;
 use lancedb::DistanceType;
@@ -18,6 +18,19 @@ pub enum LanceDBDistanceType {
     Cosine = 1,
     Dot = 2,
     Hamming = 3,
+}
+
+impl LanceDBDistanceType {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    pub(crate) fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::L2),
+            1 => Some(Self::Cosine),
+            2 => Some(Self::Dot),
+            3 => Some(Self::Hamming),
+            _ => None,
+        }
+    }
 }
 
 impl From<LanceDBDistanceType> for DistanceType {
