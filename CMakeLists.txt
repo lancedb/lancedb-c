@@ -17,6 +17,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wtype-limits")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 
+# Keep configuration-time rustc probes in the source tree so rustup resolves
+# the repository toolchain file when the build directory is out of tree.
 if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
   # Map CMake compiler architecture and platform to the corresponding Rust target triple.
   # Note: CMAKE_C_COMPILER_ARCHITECTURE_ID requires CMake 3.10+, with expanded support in 4.1+.
@@ -59,6 +61,7 @@ if(RUST_TARGET_TRIPLE)
 else()
   execute_process(
     COMMAND rustc --print host-tuple
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     OUTPUT_VARIABLE RUST_TARGET_TRIPLE
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
@@ -99,8 +102,18 @@ if(BUILD_COVERAGE)
   endif()
 
   # Find llvm-profdata and llvm-cov via rustc sysroot or system PATH
-  execute_process(COMMAND rustc --print sysroot OUTPUT_VARIABLE RUST_SYSROOT OUTPUT_STRIP_TRAILING_WHITESPACE)
-  execute_process(COMMAND rustc -vV OUTPUT_VARIABLE RUSTC_VERSION_INFO OUTPUT_STRIP_TRAILING_WHITESPACE)
+  execute_process(
+    COMMAND rustc --print sysroot
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE RUST_SYSROOT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND rustc -vV
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE RUSTC_VERSION_INFO
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
   string(REGEX MATCH "host: ([a-zA-Z0-9_-]+)" _match "${RUSTC_VERSION_INFO}")
   set(RUST_HOST_TRIPLE "${CMAKE_MATCH_1}")
   find_program(_profdata llvm-profdata HINTS "${RUST_SYSROOT}/lib/rustlib/${RUST_HOST_TRIPLE}/bin" NO_DEFAULT_PATH)

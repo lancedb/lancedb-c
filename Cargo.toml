@@ -44,5 +44,5 @@ chrono = "0"
 
 [profile.release]
 opt-level = 3
-strip = "symbols"
+strip = "debuginfo"
 panic = "unwind"
