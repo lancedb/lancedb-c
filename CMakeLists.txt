@@ -691,7 +691,7 @@ if(BUILD_TESTS)
     add_custom_target(coverage
       # Run tests via ctest with profiling output directed to profraw dir
       COMMAND ${TEST_ENV_PREFIX}
-        ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} -j --output-on-failure
+        ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} -j
       # Merge profiling data
       COMMAND sh -c "${LLVM_PROFDATA} merge -sparse ${PROFRAW_DIR}/*.profraw -o ${PROFDATA_FILE}"
       # Print coverage summary

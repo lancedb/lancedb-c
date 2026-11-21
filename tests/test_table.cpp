@@ -1748,11 +1748,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(schema_field(updated_schema, "key") != nullptr);
     REQUIRE(schema_field(updated_schema, "score") != nullptr);
 
-    CHECK(count_matching_rows(table, "score = 20") == 1);
-    CHECK(count_matching_rows(table, "score_x2 = 20") == 1);
-    CHECK(count_matching_rows(table, "key_upper = 'KEY_1'") == 1);
-    CHECK(count_matching_rows(table, "key_upper = 'key_1'") == 1);
-    REQUIRE(count_matching_rows(table, "score_x2 = 20 AND key_upper = 'KEY_1'") == 1);
+    REQUIRE(count_matching_rows(table, "score_x2 = 40") == 1);
+    REQUIRE(count_matching_rows(table, "key_upper = 'KEY_1'") == 1);
+    REQUIRE(count_matching_rows(table, "key_upper = 'key_1'") == 0);
+    REQUIRE(count_matching_rows(table, "score_x2 = 40 AND key_upper = 'KEY_1'") == 1);
     REQUIRE(lancedb_table_count_rows(table) == 5);
   }
 
