@@ -287,14 +287,16 @@ pub unsafe extern "C" fn lancedb_query_where_filter(
 
 /// Set full-text search for query
 ///
-/// The table must have a full-text search index on the text column. If it does
-/// not, execution fails.
+/// LanceDB applies the filter and projection in the same query and adds its
+/// score column. If no limit is set, LanceDB's default top-K applies. A NULL
+/// or empty column uses automatic discovery; an explicit text column can also
+/// be scanned without an index by embedded LanceDB.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_query_new`
 /// - `text` must be a valid null-terminated UTF-8 string
-/// - `column` may be NULL or an empty string to let LanceDB use the indexed
-///   text column, or a valid null-terminated UTF-8 string naming the column
+/// - `column` may be NULL or an empty string for automatic discovery, or a
+///   valid null-terminated UTF-8 string naming the text column
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_query_full_text_search(
@@ -489,14 +491,17 @@ pub unsafe extern "C" fn lancedb_vector_query_where_filter(
 /// Set full-text search for vector query
 ///
 /// This turns the vector query into a hybrid nearest-neighbour plus full-text
-/// search. The table must have a full-text search index on the text column.
-/// LanceDB fuses the two result sets with its default reranker.
+/// search. Embedded LanceDB executes it as two searches and fuses the result
+/// sets. A NULL or empty column uses automatic discovery; an explicit text
+/// column can also be scanned without an index by embedded LanceDB. Embedded
+/// LanceDB rejects `lancedb_vector_query_explain_plan` for this hybrid query;
+/// execution is supported.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
 /// - `text` must be a valid null-terminated UTF-8 string
-/// - `column` may be NULL or an empty string to let LanceDB use the indexed
-///   text column, or a valid null-terminated UTF-8 string naming the column
+/// - `column` may be NULL or an empty string for automatic discovery, or a
+///   valid null-terminated UTF-8 string naming the text column
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
