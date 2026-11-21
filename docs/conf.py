@@ -6,7 +6,9 @@ import os
 project = 'LanceDB C API'
 copyright = '2025, The LanceDB Authors'
 author = 'The LanceDB Authors'
-release = '0.34.0-preview.1'
+# CMake passes the tag-derived binding version. Standalone builds default to
+# the development version because the C version does not come from Cargo.
+release = os.environ.get('LANCEDB_VERSION', '0.0.0-dev')
 
 # -- General configuration ---------------------------------------------------
 extensions = [

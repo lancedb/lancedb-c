@@ -2,7 +2,7 @@
 
 [package]
 name = "lancedb-c"
-version = "0.34.0-preview.1"
+version = "0.0.0"
 edition = "2021"
 description = "C bindings for LanceDB"
 license = "Apache-2.0"

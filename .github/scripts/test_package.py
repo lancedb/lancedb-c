@@ -11,6 +11,7 @@ import io
 import json
 import os
 import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -32,10 +33,6 @@ class PackageFixture(unittest.TestCase):
         (self.repo / "include").mkdir(parents=True)
         (self.repo / "LICENSE").write_text("license\n", encoding="utf-8")
         (self.repo / "include" / "lancedb.h").write_text("header\n", encoding="utf-8")
-        (self.repo / "Cargo.toml").write_text(
-            '[package]\nname = "lancedb-c"\nversion = "0.34.0-preview.1"\n',
-            encoding="utf-8",
-        )
         self.library_dir = self.root / "library"
         self.library_dir.mkdir()
         (self.library_dir / "liblancedb.so").write_bytes(b"fake shared library")
@@ -53,9 +50,66 @@ class PackageFixture(unittest.TestCase):
             output_dir=str(output),
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            package.create_package(args)
+            with mock.patch.dict(os.environ, {"LANCEDB_VERSION": "0.1.0-preview.1"}):
+                package.create_package(args)
         archive = output / "lancedb-c-abc123-linux-amd64.tar.gz"
         return archive, Path(f"{archive}.sha256")
+
+
+class VersionTests(PackageFixture):
+    def init_repo(self, name: str) -> Path:
+        repo = self.root / name
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.name", "Test"], check=True
+        )
+        (repo / "tracked").write_text("one\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "one"], check=True)
+        return repo
+
+    def test_package_version_uses_exact_annotated_tag(self) -> None:
+        repo = self.init_repo("tagged")
+        subprocess.run(
+            ["git", "-C", str(repo), "tag", "-a", "v0.1.0-preview.1", "-m", "release"],
+            check=True,
+        )
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LANCEDB_VERSION", None)
+            self.assertEqual(package.package_version(repo), "0.1.0-preview.1")
+
+            (repo / "tracked").write_text("two\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-qam", "two"], check=True
+            )
+            self.assertEqual(package.package_version(repo), package.DEV_VERSION)
+
+            os.environ["LANCEDB_VERSION"] = "0.2.0-preview.3"
+            self.assertEqual(package.package_version(repo), "0.2.0-preview.3")
+
+    def test_package_version_ignores_parent_repository_tag(self) -> None:
+        parent = self.init_repo("parent")
+        subprocess.run(
+            ["git", "-C", str(parent), "tag", "-a", "v9.9.9", "-m", "parent"],
+            check=True,
+        )
+        source = parent / "source"
+        source.mkdir()
+
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LANCEDB_VERSION", None)
+            self.assertEqual(package.package_version(source), package.DEV_VERSION)
+
+    def test_package_version_rejects_invalid_override(self) -> None:
+        with mock.patch.dict(os.environ, {"LANCEDB_VERSION": "v1"}):
+            with self.assertRaises(SystemExit):
+                package.package_version(self.repo)
 
 
 class PackageArchiveTests(PackageFixture):
@@ -111,16 +165,12 @@ class PackageArchiveTests(PackageFixture):
                 )
             )
 
-        self.assertEqual(manifest["version"], "0.34.0-preview.1")
+        self.assertEqual(manifest["version"], "0.1.0-preview.1")
 
-    def test_cargo_package_version_uses_package_section(self) -> None:
-        (self.repo / "Cargo.toml").write_text(
-            '[dependencies]\nfoo = { version = "9.9.9" }\n\n'
-            '[package]\nname = "lancedb-c"\nversion = "1.2.3-preview.4"\n',
-            encoding="utf-8",
-        )
-
-        self.assertEqual(package.cargo_package_version(self.repo), "1.2.3-preview.4")
+    def test_package_version_defaults_to_dev_without_git(self) -> None:
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LANCEDB_VERSION", None)
+            self.assertEqual(package.package_version(self.repo), package.DEV_VERSION)
 
     def test_archive_checksum_is_required_and_matches(self) -> None:
         archive, checksum = self.create("package")

@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "lancedb-c"
-version = "0.34.0-preview.1"
+version = "0.0.0"
 dependencies = [
  "arrow-array",
  "arrow-data",

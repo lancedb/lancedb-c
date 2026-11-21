@@ -14,7 +14,7 @@ The package layout is the contract the later pure-Go loader consumes:
       SHA256SUMS
 
 `target` uses the Go toolchain's GOOS-GOARCH names. The manifest records the
-Cargo package version, commit and packaged files.
+Git-tag-derived binding version, commit and packaged files.
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 PACKAGE_NAME = "lancedb-c"
+DEV_VERSION = "0.0.0-dev"
+SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -98,22 +100,43 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def cargo_package_version(repo_root: Path) -> str:
-    cargo_toml = repo_root / "Cargo.toml"
-    in_package = False
-    for raw_line in cargo_toml.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if line.startswith("["):
-            if line == "[package]":
-                in_package = True
-            elif in_package:
-                break
-            continue
-        if in_package:
-            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
-            if match:
-                return match.group(1)
-    raise SystemExit(f"missing package version in {cargo_toml}")
+def package_version(repo_root: Path) -> str:
+    version = os.environ.get("LANCEDB_VERSION", "").strip()
+    if version.startswith("v"):
+        version = version[1:]
+    if version:
+        if not SEMVER_PATTERN.fullmatch(version):
+            raise SystemExit(f"invalid LANCEDB_VERSION: {version!r}")
+        return version
+
+    if not (repo_root / ".git").exists():
+        return DEV_VERSION
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "describe",
+                "--tags",
+                "--exact-match",
+                "--match",
+                "v[0-9]*",
+                "HEAD",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return DEV_VERSION
+
+    if result.returncode == 0:
+        tag = result.stdout.strip().removeprefix("v")
+        if SEMVER_PATTERN.fullmatch(tag):
+            return tag
+    return DEV_VERSION
 
 
 def set_github_output(**values: str) -> None:
@@ -208,7 +231,7 @@ def create_package(args: argparse.Namespace) -> None:
             raise SystemExit(f"missing build output: {library}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    version = cargo_package_version(repo_root)
+    version = package_version(repo_root)
     package_root_name = f"{PACKAGE_NAME}-{args.commit}-{target.name}"
     with tempfile.TemporaryDirectory(prefix="lancedb-c-package-") as temp:
         package_root = Path(temp) / package_root_name
@@ -511,7 +534,7 @@ def verify_package(args: argparse.Namespace) -> None:
         if not manifest_path.is_file():
             raise SystemExit("package has no manifest.json")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        expected = package_manifest(target, args.commit, cargo_package_version(repo_root))
+        expected = package_manifest(target, args.commit, package_version(repo_root))
         if manifest != expected:
             raise SystemExit(f"manifest mismatch:\n{json.dumps(manifest, indent=2)}\n!=\n{json.dumps(expected, indent=2)}")
 

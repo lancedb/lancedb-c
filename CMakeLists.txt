@@ -2,18 +2,7 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-# Cargo.toml is the source of truth for the binding version. CMake's project
-# version only accepts numeric components, so use its numeric prefix there and
-# keep the complete semantic version for pkg-config and status output.
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" LANCEDB_CARGO_VERSION_LINE
-  REGEX "^version = \"[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?\"$"
-  LIMIT_COUNT 1
-)
-if(NOT LANCEDB_CARGO_VERSION_LINE)
-  message(FATAL_ERROR "Could not read the lancedb-c package version from Cargo.toml")
-endif()
-string(REGEX REPLACE "^version = \"([^\"]+)\"$" "\\1" LANCEDB_VERSION "${LANCEDB_CARGO_VERSION_LINE}")
-string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" LANCEDB_PROJECT_VERSION "${LANCEDB_VERSION}")
+include(cmake/LanceDBVersion.cmake)
 project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
 set(CMAKE_CXX_STANDARD 20)
@@ -333,6 +322,7 @@ if(BUILD_DOCS)
 
   add_custom_target(docs
     COMMAND ${CMAKE_COMMAND} -E env DOXYGEN_XML_DIR=${DOXYGEN_OUTPUT_DIR}
+      LANCEDB_VERSION=${LANCEDB_VERSION}
       ${SPHINX_EXECUTABLE} -b html
       -W --keep-going
       ${SPHINX_SOURCE} ${SPHINX_BUILD}
