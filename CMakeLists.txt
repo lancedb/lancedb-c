@@ -320,9 +320,10 @@ if(BUILD_DOCS)
   set(SPHINX_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/docs)
   set(SPHINX_BUILD ${CMAKE_CURRENT_BINARY_DIR}/docs/html)
 
+  # Sphinx resolves the same tag or explicit override itself. Do not forward
+  # CMake's internal 0.0.0-dev fallback as a public LANCEDB_VERSION override.
   add_custom_target(docs
     COMMAND ${CMAKE_COMMAND} -E env DOXYGEN_XML_DIR=${DOXYGEN_OUTPUT_DIR}
-      LANCEDB_VERSION=${LANCEDB_VERSION}
       ${SPHINX_EXECUTABLE} -b html
       -W --keep-going
       ${SPHINX_SOURCE} ${SPHINX_BUILD}
