@@ -32,4 +32,3 @@ pub extern "C" fn external_object_store_provider_create() -> *mut LanceDBObjectS
         inner: Some(provider),
     }))
 }
-

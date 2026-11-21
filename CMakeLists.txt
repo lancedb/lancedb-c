@@ -133,7 +133,7 @@ include(cmake/ProbeRustNativeLibs.cmake)
 configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
 # rust-lib target
-  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
+  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --target-dir "${CMAKE_BINARY_DIR}/target")
 if(BUILD_COVERAGE)
   set(PROFRAW_DIR "${CMAKE_BINARY_DIR}/profraw")
   set(BUILD_PROFRAW_DIR "${PROFRAW_DIR}/build")
@@ -218,7 +218,7 @@ if(BUILD_EXAMPLES)
   )
 
   # external_provider helper crate (provides external_object_store_provider_create)
-  set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
+  set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${CMAKE_BINARY_DIR}/target")
   if(BUILD_COVERAGE)
     set(EXT_PROVIDER_CARGO_CMD ${CMAKE_COMMAND} -E env "CARGO_ENCODED_RUSTFLAGS=-Cinstrument-coverage" "${BUILD_PROFRAW_ENV}" ${EXT_PROVIDER_CARGO_CMD})
   endif()
@@ -235,7 +235,7 @@ if(BUILD_EXAMPLES)
   endif()
   add_custom_target(external-provider-lib
     COMMAND ${EXT_PROVIDER_CARGO_CMD}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/examples/external_provider
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Building external provider Rust crate..."
     BYPRODUCTS ${EXT_PROVIDER_LIB_PATHS}
   )
