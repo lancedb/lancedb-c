@@ -365,7 +365,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - DataFusion Expr Filter", "[que
 
     // SQL filter: key = "key_10" (would return 1 row)
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_10\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_10'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
