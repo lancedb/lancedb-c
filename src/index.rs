@@ -206,31 +206,14 @@ pub extern "C" fn lancedb_index_options_default() -> LanceDBIndexOptions {
     LanceDBIndexOptions::default()
 }
 
-/// Convert a raw C index type value, rejecting anything outside the public header
-fn index_type_from_c_int(value: c_int) -> Option<LanceDBIndexType> {
-    match value {
-        0 => Some(LanceDBIndexType::Auto),
-        1 => Some(LanceDBIndexType::BTree),
-        2 => Some(LanceDBIndexType::Bitmap),
-        3 => Some(LanceDBIndexType::LabelList),
-        4 => Some(LanceDBIndexType::FTS),
-        5 => Some(LanceDBIndexType::IvfFlat),
-        6 => Some(LanceDBIndexType::IvfPq),
-        7 => Some(LanceDBIndexType::IvfHnswPq),
-        8 => Some(LanceDBIndexType::IvfHnswSq),
-        _ => None,
+/// Convert a raw C distance type value, preserving -1 as the unset marker
+fn optional_distance_type(value: c_int) -> Result<Option<LanceDBDistanceType>, String> {
+    if value == -1 {
+        return Ok(None);
     }
-}
-
-/// Convert a raw C distance type value, rejecting anything outside the public header
-fn distance_type_from_c_int(value: c_int) -> Result<Option<LanceDBDistanceType>, String> {
-    match value {
-        -1 => Ok(None),
-        0 => Ok(Some(LanceDBDistanceType::L2)),
-        1 => Ok(Some(LanceDBDistanceType::Cosine)),
-        2 => Ok(Some(LanceDBDistanceType::Dot)),
-        3 => Ok(Some(LanceDBDistanceType::Hamming)),
-        _ => Err(format!(
+    match LanceDBDistanceType::from_c_int(value) {
+        Some(distance_type) => Ok(Some(distance_type)),
+        None => Err(format!(
             "distance_type must be -1 to leave it unset or a LanceDBDistanceType value, got {value}"
         )),
     }
@@ -302,7 +285,7 @@ unsafe fn build_index_from_options(
             {
                 builder = builder.target_partition_size(value);
             }
-            if let Some(distance_type) = distance_type_from_c_int(options.distance_type)? {
+            if let Some(distance_type) = optional_distance_type(options.distance_type)? {
                 builder = builder.distance_type(distance_type.into());
             }
             builder
@@ -433,7 +416,7 @@ pub unsafe extern "C" fn lancedb_table_create_index(
         return LanceDBError::InvalidArgument;
     }
 
-    let Some(index_type) = index_type_from_c_int(index_type) else {
+    let Some(index_type) = LanceDBIndexType::from_c_int(index_type) else {
         set_custom_error_message(error_message, "index_type is not a LanceDBIndexType value");
         return LanceDBError::InvalidArgument;
     };

@@ -61,6 +61,16 @@ LanceDBError lancedb_test_create_vector_index_with_distance_type(
       table, columns, num_columns, LANCEDB_INDEX_IVF_FLAT, &config, error_message);
 }
 
+LanceDBError lancedb_test_create_index_with_index_type(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    int index_type,
+    char** error_message) {
+  return lancedb_table_create_index(
+      table, columns, num_columns, (LanceDBIndexType)index_type, NULL, error_message);
+}
+
 LanceDBError lancedb_test_create_scalar_index_with_index_type(
     const LanceDBTable* table,
     const char* const* columns,

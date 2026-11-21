@@ -920,6 +920,22 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB C enum inputs are validated", "[index]
     }
   }
 
+  SECTION("Generic create rejects an out-of-range index type") {
+    for (const int index_type : invalid_index_types) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_create_index_with_index_type(
+          table, scalar_columns, 1, index_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    }
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(count == 0);
+    lancedb_free_index_list(indices, count);
+  }
+
   SECTION("Optimize rejects an out-of-range type without changing the table") {
     const auto version_before = lancedb_table_version(table);
     for (const int optimize_type : invalid_optimize_types) {
