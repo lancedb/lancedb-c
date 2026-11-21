@@ -213,9 +213,11 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LanceDBUpdateResult {
-    /// Number of rows changed by the update.
+    /// Number of rows changed by the update. A legacy remote empty response
+    /// can leave this at zero, which then means unknown rather than no rows.
     pub rows_updated: u64,
-    /// Table version committed by the update.
+    /// Table version committed by the update. A legacy remote empty response
+    /// can leave this at zero, which then means unknown.
     pub version: u64,
 }
 
@@ -224,7 +226,9 @@ pub struct LanceDBUpdateResult {
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
 /// - `columns` and `expressions` must point to arrays of `num_assignments` valid
-///   null-terminated C strings, with `columns[i]` assigned the value of `expressions[i]`
+///   null-terminated C strings, with `columns[i]` assigned the value of `expressions[i]`.
+///   The inputs are paired by index; the SDK evaluates every expression against the
+///   original row, so assignments do not observe each other
 /// - `num_assignments` must be greater than zero
 /// - `predicate`, when not NULL, must be a valid null-terminated C string containing an SQL
 ///   predicate. An empty predicate updates all rows
@@ -302,6 +306,8 @@ pub unsafe extern "C" fn lancedb_table_update(
             builder = builder.only_if(predicate);
         }
         for (column, expression) in assignments {
+            // The input order only preserves the caller's column/expression pairing.
+            // The SDK evaluates every expression against the original row.
             builder = builder.column(column, expression);
         }
         builder.execute().await
