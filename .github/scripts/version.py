@@ -37,12 +37,22 @@ def parse_tag(tag: str) -> str | None:
 
 
 def parse_override(value: str) -> str:
-    if value.startswith("v"):
-        raise ValueError("LANCEDB_VERSION must not include the v tag prefix")
+    return _validate_release(value, "LANCEDB_VERSION")
+
+
+def parse_resolved(value: str) -> str:
     if value == DEV_VERSION:
-        raise ValueError(f"LANCEDB_VERSION {DEV_VERSION} is reserved for untagged builds")
+        return value
+    return _validate_release(value, "LANCEDB_RESOLVED_VERSION")
+
+
+def _validate_release(value: str, source: str) -> str:
+    if value.startswith("v"):
+        raise ValueError(f"{source} must not include the v tag prefix")
+    if value == DEV_VERSION:
+        raise ValueError(f"{source} {DEV_VERSION} is reserved for untagged builds")
     if not _VERSION_PATTERN.fullmatch(value):
-        raise ValueError(f"LANCEDB_VERSION is not strict SemVer: {value!r}")
+        raise ValueError(f"{source} is not strict SemVer: {value!r}")
     return value
 
 
@@ -82,6 +92,13 @@ def _head_commit(repo_root: Path) -> str | None:
 
 
 def resolve_version(repo_root: Path) -> str:
+    # CMake passes its configure-time result to the docs target through this
+    # private variable. It takes precedence so a later build-time public
+    # override cannot change the already-configured version.
+    resolved = os.environ.get("LANCEDB_RESOLVED_VERSION", "").strip()
+    if resolved:
+        return parse_resolved(resolved)
+
     override = os.environ.get("LANCEDB_VERSION", "").strip()
     if override:
         return parse_override(override)

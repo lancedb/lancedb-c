@@ -161,6 +161,26 @@ class VersionTests(PackageFixture):
             os.environ.pop("LANCEDB_VERSION", None)
             self.assertEqual(package.package_version(repo), "0.1.0")
 
+    def test_private_resolved_version_precedes_public_override(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LANCEDB_RESOLVED_VERSION": "0.1.0-preview.1",
+                "LANCEDB_VERSION": "0.9.0",
+            },
+        ):
+            self.assertEqual(package.package_version(self.repo), "0.1.0-preview.1")
+
+    def test_private_resolved_dev_is_allowed(self) -> None:
+        with mock.patch.dict(os.environ, {"LANCEDB_RESOLVED_VERSION": package.DEV_VERSION}):
+            self.assertEqual(package.package_version(self.repo), package.DEV_VERSION)
+
+    def test_private_resolved_version_rejects_invalid(self) -> None:
+        for value in ("v0.1.0", "01.2.3", "0.1.0-preview.01"):
+            with mock.patch.dict(os.environ, {"LANCEDB_RESOLVED_VERSION": value}):
+                with self.assertRaises(SystemExit):
+                    package.package_version(self.repo)
+
     def test_package_version_ignores_parent_repository_tag(self) -> None:
         parent = self.init_repo("parent")
         subprocess.run(

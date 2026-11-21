@@ -103,7 +103,9 @@ uses the tag version for the build, package manifest and consumer verification.
 A tag on a parent or another branch is rejected. The workflow does not create
 tags or publish releases itself. CMake reads the tag when it configures, so
 after creating or moving a tag in an existing build directory, rerun the CMake
-configuration step before building.
+configuration step before building. CMake passes its configure-time version to
+the docs target through a private variable, so a different build-time
+`LANCEDB_VERSION` does not change an already configured docs build.
 
 These archives are currently CI artifacts, not published releases. The
 `target` names match Go's `GOOS-GOARCH` spelling and the manifest is the
