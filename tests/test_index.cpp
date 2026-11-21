@@ -514,6 +514,249 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB FTS Index", "[index]") {
   }
 }
 
+// A string that is not valid UTF-8, to exercise the string conversion failures
+static const char* const INVALID_UTF8 = "\xff\xfe";
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Create Index Options", "[index]") {
+  const std::string table_name = "create_index_options_test";
+
+  SECTION("Scalar index uses a name distinct from the column and explicit replace") {
+    LanceDBTable* table = create_table_with_data(table_name, 100, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.name = "key_lookup";
+    options.replace = 0;
+    options.wait_timeout_ms = 1000;
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(indices[0]) == "key_lookup");
+    lancedb_free_index_list(indices, count);
+
+    // replace = 0 is an explicit false, not the SDK default true.
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.replace = 1;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("FTS index forwards tuning options and custom name") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.name = "key_text";
+    options.replace = 0;
+    options.wait_timeout_ms = 1000;
+    options.fts_base_tokenizer = "simple";
+    options.fts_language = "English";
+    options.fts_max_token_length = 64;
+    options.fts_lower_case = 0; // explicit false, not the SDK default
+    options.fts_stem = 1;
+    options.fts_remove_stop_words = 1;
+    options.fts_ascii_folding = 1;
+    options.fts_with_position = 1;
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_FTS, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(indices[0]) == "key_text");
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("FTS ngram options are forwarded") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.name = "key_ngram";
+    options.fts_base_tokenizer = "ngram";
+    options.fts_ngram_min_length = 2;
+    options.fts_ngram_max_length = 4;
+    options.fts_ngram_prefix_only = 1;
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_FTS, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("NULL options use the SDK defaults") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Auto index type uses the SDK Auto index") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_AUTO, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Bitmap index type creates a bitmap index") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.name = "key_bitmap";
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BITMAP, &options, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(indices[0]) == "key_bitmap");
+    lancedb_free_index_list(indices, count);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("FTS rejects an unknown language through the generic path") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    options.fts_language = "Klingon";
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_FTS, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Invalid options are rejected before the SDK call") {
+    LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+    REQUIRE(table != nullptr);
+
+    const char* columns[] = {"key"};
+    const char* null_columns[] = {nullptr};
+    const char* invalid_columns[] = {INVALID_UTF8};
+    LanceDBIndexOptions options = lancedb_index_options_default();
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_create_index(
+        nullptr, columns, 1, LANCEDB_INDEX_BTREE, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_create_index(
+        table, nullptr, 1, LANCEDB_INDEX_BTREE, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 0, LANCEDB_INDEX_BTREE, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_create_index(
+        table, null_columns, 1, LANCEDB_INDEX_BTREE, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_create_index(
+        table, invalid_columns, 1, LANCEDB_INDEX_BTREE, &options, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    options.replace = 2;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = lancedb_index_options_default();
+    options.distance_type = 99;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = lancedb_index_options_default();
+    options.num_partitions = -2;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = lancedb_index_options_default();
+    options.num_partitions = static_cast<int64_t>(UINT32_MAX) + 1;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_IVF_FLAT, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = lancedb_index_options_default();
+    options.fts_lower_case = 2;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_FTS, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = lancedb_index_options_default();
+    options.name = INVALID_UTF8;
+    REQUIRE(lancedb_table_create_index(
+        table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
   const std::string table_name = "optimize_test";
 
@@ -557,6 +800,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
     }
   }
 }
+
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize With Action", "[index]") {
   const std::string table_name = "optimize_action_test";
@@ -855,8 +1099,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize With Action", "[index]"
   }
 }
 
-// A string that is not valid UTF-8, to exercise the string conversion failures
-static const char* const INVALID_UTF8 = "\xff\xfe";
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]") {
   const std::string table_name = "index_invalid_args_test";
@@ -975,6 +1217,22 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB C enum inputs are validated", "[index]
       REQUIRE(error_message != nullptr);
       lancedb_free_string(error_message);
     }
+  }
+
+  SECTION("Generic create rejects an out-of-range index type") {
+    for (const int index_type : invalid_index_types) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_create_index_with_index_type(
+          table, scalar_columns, 1, index_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    }
+
+    char** indices = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_list_indices(table, &indices, &count, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(count == 0);
+    lancedb_free_index_list(indices, count);
   }
 
   SECTION("Optimize rejects an out-of-range type without changing the table") {

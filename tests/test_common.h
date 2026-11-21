@@ -29,6 +29,12 @@ LanceDBError lancedb_test_create_vector_index_with_distance_type(
     size_t num_columns,
     int distance_type,
     char** error_message);
+LanceDBError lancedb_test_create_index_with_index_type(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    int index_type,
+    char** error_message);
 LanceDBError lancedb_test_create_scalar_index_with_index_type(
     const LanceDBTable* table,
     const char* const* columns,
