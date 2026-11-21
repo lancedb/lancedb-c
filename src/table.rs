@@ -15,6 +15,7 @@ use arrow_schema::{ArrowError, Schema};
 use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::{ColumnAlteration, NewColumnTransform};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
@@ -1721,5 +1722,235 @@ pub unsafe extern "C" fn lancedb_free_metadata(
             }
         }
         libc::free(values as *mut libc::c_void);
+    }
+}
+
+/* ========== SCHEMA EVOLUTION ========== */
+
+/// One column alteration for `lancedb_table_alter_columns`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBColumnAlteration {
+    /// Existing column to alter.
+    pub path: *const c_char,
+    /// New column name, or NULL to leave the name unchanged.
+    pub rename: *const c_char,
+    /// 0 leaves nullability unchanged, 1 applies `nullable`.
+    pub set_nullable: i32,
+    /// New nullability when `set_nullable` is 1: 0 for NOT NULL, non-zero for NULL.
+    pub nullable: i32,
+}
+
+/// Read a required C string as UTF-8, reporting an invalid argument on failure.
+unsafe fn required_c_string<'a>(
+    value: *const c_char,
+    error_message: *mut *mut c_char,
+) -> Option<&'a str> {
+    if value.is_null() {
+        set_invalid_argument_message(error_message);
+        return None;
+    }
+
+    match CStr::from_ptr(value).to_str() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            set_invalid_argument_message(error_message);
+            None
+        }
+    }
+}
+
+/// Add new columns using SQL expressions
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `names` and `expressions` must point to arrays of `num_columns` valid
+///   null-terminated C strings, with `names[i]` assigned the value of `expressions[i]`
+/// - `num_columns` must be greater than zero
+/// - `version_out` must be a valid pointer to receive the commit version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_add_columns(
+    table: *const LanceDBTable,
+    names: *const *const c_char,
+    expressions: *const *const c_char,
+    num_columns: usize,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null()
+        || names.is_null()
+        || expressions.is_null()
+        || num_columns == 0
+        || version_out.is_null()
+    {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let mut transforms = Vec::with_capacity(num_columns);
+    for i in 0..num_columns {
+        let Some(name) = required_c_string(*names.add(i), error_message) else {
+            return LanceDBError::InvalidArgument;
+        };
+        let Some(expression) = required_c_string(*expressions.add(i), error_message) else {
+            return LanceDBError::InvalidArgument;
+        };
+        if name.trim().is_empty() || expression.trim().is_empty() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+        transforms.push((name.to_string(), expression.to_string()));
+    }
+
+    let tbl = &(*table).inner;
+    let result = get_runtime().block_on(
+        tbl.base_table()
+            .add_columns(NewColumnTransform::SqlExpressions(transforms), None),
+    );
+
+    match result {
+        Ok(result) => {
+            *version_out = result.version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Alter column names and nullability
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `alterations` must point to an array of `num_alterations` entries
+/// - Each `path` must be a valid null-terminated C string naming an existing column
+/// - Each `rename`, when not NULL, must be a valid null-terminated C string
+/// - Each entry must change the name or nullability
+/// - `version_out` must be a valid pointer to receive the commit version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_alter_columns(
+    table: *const LanceDBTable,
+    alterations: *const LanceDBColumnAlteration,
+    num_alterations: usize,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || alterations.is_null() || num_alterations == 0 || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let mut parsed_alterations = Vec::with_capacity(num_alterations);
+    for i in 0..num_alterations {
+        let alteration = &*alterations.add(i);
+        let Some(path) = required_c_string(alteration.path, error_message) else {
+            return LanceDBError::InvalidArgument;
+        };
+        if path.trim().is_empty() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        let rename = if alteration.rename.is_null() {
+            None
+        } else {
+            let Some(rename) = required_c_string(alteration.rename, error_message) else {
+                return LanceDBError::InvalidArgument;
+            };
+            if rename.trim().is_empty() {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            }
+            Some(rename.to_string())
+        };
+
+        let nullable = match alteration.set_nullable {
+            0 => None,
+            1 => Some(alteration.nullable != 0),
+            _ => {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            }
+        };
+
+        if rename.is_none() && nullable.is_none() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        let mut column = ColumnAlteration::new(path.to_string());
+        if let Some(rename) = rename {
+            column = column.rename(rename);
+        }
+        if let Some(nullable) = nullable {
+            column = column.set_nullable(nullable);
+        }
+        parsed_alterations.push(column);
+    }
+
+    let tbl = &(*table).inner;
+    let result = get_runtime().block_on(tbl.base_table().alter_columns(&parsed_alterations));
+
+    match result {
+        Ok(result) => {
+            *version_out = result.version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Drop columns from a table
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` must point to an array of `num_columns` valid null-terminated C strings
+/// - `num_columns` must be greater than zero and every name must be non-empty
+/// - `version_out` must be a valid pointer to receive the commit version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_drop_columns(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    num_columns: usize,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || columns.is_null() || num_columns == 0 || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let mut column_names = Vec::with_capacity(num_columns);
+    for i in 0..num_columns {
+        let Some(name) = required_c_string(*columns.add(i), error_message) else {
+            return LanceDBError::InvalidArgument;
+        };
+        if name.trim().is_empty() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+        column_names.push(name);
+    }
+
+    let tbl = &(*table).inner;
+    let result = get_runtime().block_on(tbl.base_table().drop_columns(&column_names));
+
+    match result {
+        Ok(result) => {
+            *version_out = result.version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
     }
 }
