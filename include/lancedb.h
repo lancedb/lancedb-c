@@ -1145,13 +1145,17 @@ LanceDBError lancedb_query_where_filter(
 /**
  * Set full-text search for query
  *
- * The table must have a full-text search index on the searched text column.
  * LanceDB applies the filter and projection in the same query and adds its
  * score column. If no limit is set, LanceDB's default top-K applies.
  *
+ * If `column` is NULL or empty, LanceDB discovers the text columns itself and
+ * searches every column that has a full-text index. An explicit column selects
+ * that text column; embedded LanceDB can also scan it without an index, while
+ * an index is recommended for larger tables.
+ *
  * @param query - pointer to LanceDBQuery
  * @param text - full-text query string
- * @param column - text column name, or NULL/empty to use the indexed text column
+ * @param column - text column name, or NULL/empty for automatic discovery
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
@@ -1276,14 +1280,21 @@ LanceDBError lancedb_vector_query_where_filter(
  * Set full-text search for vector query
  *
  * This turns the vector query into a hybrid nearest-neighbour plus full-text
- * search. The table must have a full-text search index on the searched text
- * column. LanceDB applies the vector, filter, projection and limit settings to
- * both searches, fuses the result sets with its default reranker and adds its
- * relevance score column.
+ * search. Embedded LanceDB executes it as two searches and fuses the result
+ * sets. LanceDB applies the vector, filter, projection and limit settings to
+ * both searches and adds its relevance score column.
+ *
+ * If `column` is NULL or empty, LanceDB discovers the text columns itself and
+ * searches every column that has a full-text index. An explicit column selects
+ * that text column; embedded LanceDB can also scan it without an index, while
+ * an index is recommended for larger tables.
+ *
+ * Embedded LanceDB does not support lancedb_vector_query_explain_plan() for a
+ * query with both nearest and full-text search. Execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
- * @param column - text column name, or NULL/empty to use the indexed text column
+ * @param column - text column name, or NULL/empty for automatic discovery
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
@@ -1482,6 +1493,10 @@ LanceDBError lancedb_query_explain_plan(
  * Returns a human-readable string describing what steps will be taken
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
+ *
+ * Embedded LanceDB rejects a plan for a query that has both nearest and
+ * full-text search because one scanner cannot combine them. Execution of the
+ * same hybrid query is supported.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
  * @param verbose - if true, include additional detail in the plan

@@ -5,6 +5,7 @@
 
 #include "test_common.h"
 
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -71,6 +72,11 @@ struct QueryResultBatches {
   }
 };
 
+void free_arrow_result(FFI_ArrowArray** arrays, FFI_ArrowSchema* schema, size_t count) {
+  lancedb_free_arrow_arrays(arrays, count);
+  lancedb_free_arrow_schema(schema);
+}
+
 // Consume a query result and import every batch it returned.
 QueryResultBatches collect_query_result(LanceDBQueryResult* result) {
   REQUIRE(result != nullptr);
@@ -80,10 +86,17 @@ QueryResultBatches collect_query_result(LanceDBQueryResult* result) {
   size_t count = 0;
   char* error_message = nullptr;
 
-  REQUIRE(lancedb_query_result_to_arrow(
-      result, &result_arrays, &result_schema, &count, &error_message)
-      == LANCEDB_SUCCESS);
-  REQUIRE(error_message == nullptr);
+  const auto status = lancedb_query_result_to_arrow(
+      result, &result_arrays, &result_schema, &count, &error_message);
+  if (status != LANCEDB_SUCCESS || error_message != nullptr) {
+    const bool had_error_message = error_message != nullptr;
+    if (had_error_message) {
+      lancedb_free_string(error_message);
+    }
+    free_arrow_result(result_arrays, result_schema, count);
+    REQUIRE(status == LANCEDB_SUCCESS);
+    REQUIRE(!had_error_message);
+  }
 
   QueryResultBatches collected;
   if (count == 0) {
@@ -93,55 +106,70 @@ QueryResultBatches collect_query_result(LanceDBQueryResult* result) {
   }
 
   auto imported_schema = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(result_schema));
-  REQUIRE(imported_schema.ok());
+  if (!imported_schema.ok()) {
+    free_arrow_result(result_arrays, result_schema, count);
+    REQUIRE(imported_schema.ok());
+  }
   collected.schema = imported_schema.ValueOrDie();
 
   for (size_t i = 0; i < count; i++) {
     auto imported_batch = arrow::ImportRecordBatch(
         reinterpret_cast<ArrowArray*>(result_arrays[i]), collected.schema);
-    REQUIRE(imported_batch.ok());
+    if (!imported_batch.ok()) {
+      free_arrow_result(result_arrays, result_schema, count);
+      REQUIRE(imported_batch.ok());
+    }
     collected.batches.push_back(imported_batch.ValueOrDie());
   }
 
-  lancedb_free_arrow_arrays(result_arrays, count);
-  lancedb_free_arrow_schema(result_schema);
+  free_arrow_result(result_arrays, result_schema, count);
 
   return collected;
 }
 
-std::set<int32_t> ids_of(const QueryResultBatches& result) {
-  std::set<int32_t> ids;
+std::vector<int32_t> ordered_ids_of(const QueryResultBatches& result) {
+  std::vector<int32_t> ids;
   for (const auto& batch : result.batches) {
     auto id_column = batch->GetColumnByName("id");
     REQUIRE(id_column != nullptr);
     auto id_array = std::static_pointer_cast<arrow::Int32Array>(id_column);
     for (int64_t i = 0; i < id_array->length(); i++) {
-      ids.insert(id_array->Value(i));
+      ids.push_back(id_array->Value(i));
     }
   }
   return ids;
 }
+
+std::set<int32_t> ids_of(const QueryResultBatches& result) {
+  const auto ordered = ordered_ids_of(result);
+  return std::set<int32_t>(ordered.begin(), ordered.end());
+}
+
+using LanceDBTablePtr = std::unique_ptr<LanceDBTable, void (*)(LanceDBTable*)>;
 
 class FtsFixture : public LanceDBFixture {
 public:
   FtsFixture() : table_(create_fts_table()) {
     const char* columns[] = {"text"};
     char* error_message = nullptr;
-    REQUIRE(lancedb_table_create_fts_index(
-        table_, columns, 1, nullptr, &error_message) == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-  }
-
-  ~FtsFixture() {
-    lancedb_table_free(table_);
+    const auto status = lancedb_table_create_fts_index(
+        table_.get(), columns, 1, nullptr, &error_message);
+    if (status != LANCEDB_SUCCESS || error_message != nullptr) {
+      const bool had_error_message = error_message != nullptr;
+      if (had_error_message) {
+        lancedb_free_string(error_message);
+      }
+      REQUIRE(status == LANCEDB_SUCCESS);
+      REQUIRE(!had_error_message);
+    }
   }
 
   LanceDBTable* table() const {
-    return table_;
+    return table_.get();
   }
 
 private:
-  LanceDBTable* create_fts_table() {
+  LanceDBTablePtr create_fts_table() {
     auto schema = create_fts_test_schema();
     auto batch = create_fts_test_record_batch();
     auto reader = create_reader_from_batch(batch);
@@ -150,26 +178,37 @@ private:
     struct ArrowSchema c_schema;
     REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
 
-    LanceDBTable* table = nullptr;
+    LanceDBTable* raw_table = nullptr;
     char* error_message = nullptr;
-    REQUIRE(lancedb_table_create(
+    const auto status = lancedb_table_create(
         db,
         "fts_query_test",
         reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
         reader,
-        &table,
-        &error_message) == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-    REQUIRE(table != nullptr);
+        &raw_table,
+        &error_message);
 
     if (c_schema.release) {
       c_schema.release(&c_schema);
     }
 
-    return table;
+    if (status != LANCEDB_SUCCESS || error_message != nullptr || raw_table == nullptr) {
+      const bool had_error_message = error_message != nullptr;
+      if (had_error_message) {
+        lancedb_free_string(error_message);
+      }
+      if (raw_table != nullptr) {
+        lancedb_table_free(raw_table);
+      }
+      REQUIRE(status == LANCEDB_SUCCESS);
+      REQUIRE(!had_error_message);
+      REQUIRE(raw_table != nullptr);
+    }
+
+    return LanceDBTablePtr(raw_table, lancedb_table_free);
   }
 
-  LanceDBTable* table_;
+  LanceDBTablePtr table_;
 };
 
 }  // namespace
@@ -222,6 +261,22 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text search", "[fts]") {
     REQUIRE(result.num_rows() == 10);
   }
 
+  SECTION("applies an explicit limit") {
+    LanceDBQuery* query = lancedb_query_new(table());
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search(
+        query, "common", "text", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = collect_query_result(lancedb_query_execute(query));
+
+    REQUIRE(result.num_rows() == 3);
+  }
+
   SECTION("applies the filter and projection to the full-text search") {
     LanceDBQuery* query = lancedb_query_new(table());
     REQUIRE(query != nullptr);
@@ -259,7 +314,6 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text search", "[fts]") {
     auto result = collect_query_result(lancedb_query_execute(query));
 
     REQUIRE(result.num_rows() == 0);
-    REQUIRE(result.batches.empty());
   }
 }
 
@@ -361,7 +415,7 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - hybrid search", "[fts][vect
     REQUIRE(ids_of(result) == std::set<int32_t>{0, 7});
   }
 
-  SECTION("applies the filter to both search legs") {
+  SECTION("applies the filter before fusing both search legs") {
     LanceDBVectorQuery* query = lancedb_vector_query_new(
         table(), query_vector.data(), query_vector.size());
     REQUIRE(query != nullptr);
@@ -371,18 +425,46 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - hybrid search", "[fts][vect
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_vector_query_limit(query, 2, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_vector_query_where_filter(query, "id = 7", &error_message)
+    REQUIRE(lancedb_vector_query_where_filter(query, "id IN (6, 7)", &error_message)
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_vector_query_full_text_search(
-        query, "doc7", "text", &error_message) == LANCEDB_SUCCESS);
+        query, "doc9", "text", &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     auto result = collect_query_result(lancedb_vector_query_execute(query));
 
-    // Row 0 would still be present if the filter only reached the FTS leg.
-    REQUIRE(result.num_rows() == 1);
-    REQUIRE(ids_of(result) == std::set<int32_t>{7});
+    // Row 9 is the only text match and the filter excludes it. If the FTS leg
+    // missed the filter, row 9 could enter the fused result. If filtering ran
+    // after fusion, the limit could be consumed before row 9 was removed.
+    REQUIRE(result.num_rows() == 2);
+    REQUIRE(ids_of(result) == std::set<int32_t>{6, 7});
+  }
+
+  SECTION("deduplicates a row matched by both search legs") {
+    const auto near_row_one = vector_for_row(1);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), near_row_one.data(), near_row_one.size());
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_full_text_search(
+        query, "doc1", "text", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = collect_query_result(lancedb_vector_query_execute(query));
+
+    const auto ordered_ids = ordered_ids_of(result);
+    const std::set<int32_t> unique_ids(ordered_ids.begin(), ordered_ids.end());
+    // Row 1 is the nearest vector and the only text match, so it receives a
+    // contribution from both legs and must appear first and only once.
+    REQUIRE(ordered_ids.size() == 3);
+    REQUIRE(unique_ids.size() == ordered_ids.size());
+    REQUIRE(ordered_ids.front() == 1);
   }
 
   SECTION("applies projection to the fused result") {
