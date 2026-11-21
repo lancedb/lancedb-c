@@ -638,3 +638,59 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Index - invalid arguments", "[index]")
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB C enum inputs are validated", "[index]") {
+  const std::string table_name = "c_enum_validation_test";
+  LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+  REQUIRE(table != nullptr);
+
+  const char* scalar_columns[] = {"key"};
+  const char* vector_columns[] = {"data"};
+  const int invalid_index_types[] = {-1, 42};
+  const int invalid_distance_types[] = {-1, 4};
+  const int invalid_optimize_types[] = {-1, 4};
+
+  SECTION("Scalar index rejects an out-of-range index type") {
+    for (const int index_type : invalid_index_types) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_create_scalar_index_with_index_type(
+          table, scalar_columns, 1, index_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    }
+  }
+
+  SECTION("Vector index rejects an out-of-range index type") {
+    for (const int index_type : invalid_index_types) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_create_vector_index_with_index_type(
+          table, vector_columns, 1, index_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    }
+  }
+
+  SECTION("Vector index rejects an out-of-range distance type") {
+    for (const int distance_type : invalid_distance_types) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_create_vector_index_with_distance_type(
+          table, vector_columns, 1, distance_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    }
+  }
+
+  SECTION("Optimize rejects an out-of-range type without changing the table") {
+    const auto version_before = lancedb_table_version(table);
+    for (const int optimize_type : invalid_optimize_types) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_optimize_with_type(
+          table, optimize_type, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    }
+    REQUIRE(lancedb_table_version(table) == version_before);
+  }
+
+  lancedb_table_free(table);
+}

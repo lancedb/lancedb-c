@@ -6,7 +6,7 @@
 //! This module provides complete query operations with proper Arrow integration
 
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_float};
+use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
 use std::sync::Arc;
 
@@ -441,7 +441,7 @@ pub unsafe extern "C" fn lancedb_vector_query_df_filter(
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_vector_query_distance_type(
     query: *mut LanceDBVectorQuery,
-    distance_type: LanceDBDistanceType,
+    distance_type: c_int,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if query.is_null() {
@@ -449,7 +449,11 @@ pub unsafe extern "C" fn lancedb_vector_query_distance_type(
         return LanceDBError::InvalidArgument;
     }
 
-    let _ = error_message; // No errors possible in this function
+    let Some(distance_type) = LanceDBDistanceType::from_c_int(distance_type) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
     (*query).distance_type = Some(distance_type.into());
     LanceDBError::Success
 }

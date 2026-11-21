@@ -347,6 +347,12 @@ if(BUILD_TESTS)
 
   set(TEST_TARGETS "")
 
+  # The C enum regression helper is a C consumer of the public header.
+  set_source_files_properties(tests/test_c_enum_inputs.c PROPERTIES
+    C_STANDARD 17
+    C_STANDARD_REQUIRED ON
+  )
+
   # Add test executable for connection tests (runs with valgrind)
   add_executable(lancedb_connection_tests
     tests/test_main.cpp
@@ -423,6 +429,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_index_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_index.cpp
   )
   target_link_libraries(lancedb_index_tests
@@ -495,6 +502,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_df_query_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_df_query.cpp
   )
   target_link_libraries(lancedb_df_query_tests
@@ -542,6 +550,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_vector_query_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_vector_query.cpp
   )
   target_link_libraries(lancedb_vector_query_tests

@@ -1361,6 +1361,15 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Expr - builders and invalid arguments"
     }
   }
 
+  SECTION("Invalid binary operator values return no expression") {
+    const int invalid_ops[] = {-1, 13};
+
+    for (const int op : invalid_ops) {
+      REQUIRE(lancedb_test_expr_binary(
+          lancedb_expr_column("value"), op, lancedb_expr_literal_i64(1)) == nullptr);
+    }
+  }
+
   SECTION("Null checks build expressions") {
     LanceDBExpr* is_null = lancedb_expr_is_null(lancedb_expr_column("key"));
     REQUIRE(is_null != nullptr);
