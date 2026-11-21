@@ -4651,6 +4651,7 @@ version = "0.33.0"
 dependencies = [
  "arrow-array",
  "arrow-data",
+ "arrow-ipc",
  "arrow-schema",
  "chrono",
  "datafusion-common",
