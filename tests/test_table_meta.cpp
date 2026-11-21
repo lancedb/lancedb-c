@@ -133,6 +133,255 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table List Versions", "[table]") {
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table History", "[table]") {
+  auto add_rows = [](LanceDBTable* table, int num_rows, int start_index) {
+    auto batch = create_test_record_batch(num_rows, start_index);
+    auto reader = create_reader_from_batch(batch);
+    REQUIRE(reader != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  };
+
+  auto find_tag = [](const LanceDBTag* tags, size_t count, const std::string& name) -> const LanceDBTag* {
+    for (size_t i = 0; i < count; i++) {
+      if (tags[i].name != nullptr && name == tags[i].name) {
+        return &tags[i];
+      }
+    }
+    return nullptr;
+  };
+
+  SECTION("Checkout by version reads a snapshot and rejects mutations") {
+    LanceDBTable* table = create_table_with_data("history_checkout_version", 10, 0);
+    REQUIRE(table != nullptr);
+    add_rows(table, 5, 10);
+    REQUIRE(lancedb_table_count_rows(table) == 15);
+    REQUIRE(lancedb_table_version(table) == 2);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_checkout(table, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_version(table) == 1);
+
+    // Writes are rejected while the table is pinned to a historical version.
+    auto pinned_batch = create_test_record_batch(1, 20);
+    auto pinned_reader = create_reader_from_batch(pinned_batch);
+    REQUIRE(pinned_reader != nullptr);
+    REQUIRE(lancedb_table_add(table, pinned_reader, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+
+    REQUIRE(lancedb_table_checkout_latest(table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 15);
+    REQUIRE(lancedb_table_version(table) == 2);
+
+    // Returning to latest makes the table writable again.
+    add_rows(table, 5, 20);
+    REQUIRE(lancedb_table_count_rows(table) == 20);
+    REQUIRE(lancedb_table_version(table) == 3);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Checkout by tag reads the tagged snapshot") {
+    LanceDBTable* table = create_table_with_data("history_checkout_tag", 10, 0);
+    REQUIRE(table != nullptr);
+    add_rows(table, 5, 10);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_create_tag(table, "first", 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(lancedb_table_checkout_tag(table, "first", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_version(table) == 1);
+
+    REQUIRE(lancedb_table_checkout_tag(table, "missing", &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+
+    REQUIRE(lancedb_table_checkout_latest(table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 15);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Restore promotes the checked out version to latest") {
+    LanceDBTable* table = create_table_with_data("history_restore", 10, 0);
+    REQUIRE(table != nullptr);
+    add_rows(table, 5, 10);
+    add_rows(table, 5, 15);
+    REQUIRE(lancedb_table_count_rows(table) == 20);
+    REQUIRE(lancedb_table_version(table) == 3);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_checkout(table, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+
+    REQUIRE(lancedb_table_restore(table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_version(table) == 4);
+
+    // The table is no longer pinned after restore.
+    REQUIRE(lancedb_table_checkout_latest(table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    add_rows(table, 5, 20);
+    REQUIRE(lancedb_table_count_rows(table) == 15);
+    REQUIRE(lancedb_table_version(table) == 5);
+
+    // A latest handle was never checked out, so restore must fail.
+    LanceDBTable* latest = open_table("history_restore");
+    REQUIRE(lancedb_table_restore(latest, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    lancedb_table_free(latest);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Tag lifecycle") {
+    LanceDBTable* table = create_table_with_data("history_tags", 10, 0);
+    REQUIRE(table != nullptr);
+    add_rows(table, 5, 10);
+
+    const LanceDBTag* tags = nullptr;
+    size_t count = 123;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_list_tags(table, &tags, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(tags == nullptr);
+
+    REQUIRE(lancedb_table_create_tag(table, "v1", 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_create_tag(table, "v2", 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(lancedb_table_create_tag(table, "v1", 2, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_list_tags(table, &tags, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 2);
+    REQUIRE(tags != nullptr);
+
+    const LanceDBTag* tag = find_tag(tags, count, "v1");
+    REQUIRE(tag != nullptr);
+    REQUIRE(tag->version == 1);
+    REQUIRE(tag->manifest_size > 0);
+    REQUIRE(tag->branch == nullptr);
+
+    tag = find_tag(tags, count, "v2");
+    REQUIRE(tag != nullptr);
+    REQUIRE(tag->version == 2);
+
+    uint64_t resolved_version = 0;
+    REQUIRE(lancedb_table_get_tag_version(table, "v2", &resolved_version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(resolved_version == 2);
+
+    REQUIRE(lancedb_table_create_tag(table, "unknown_version", 999, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_checkout_tag(table, "v1", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_checkout_latest(table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 15);
+
+    REQUIRE(lancedb_table_update_tag(table, "v1", 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    resolved_version = 0;
+    REQUIRE(lancedb_table_get_tag_version(table, "v1", &resolved_version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(resolved_version == 2);
+
+    REQUIRE(lancedb_table_update_tag(table, "missing", 2, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_delete_tag(table, "v1", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    resolved_version = 42;
+    REQUIRE(lancedb_table_get_tag_version(table, "v1", &resolved_version, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(resolved_version == 42);
+
+    REQUIRE(lancedb_table_delete_tag(table, "v1", &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    lancedb_free_tags(tags, count);
+    tags = nullptr;
+    count = 0;
+    REQUIRE(lancedb_table_list_tags(table, &tags, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(find_tag(tags, count, "v2") != nullptr);
+    lancedb_free_tags(tags, count);
+
+    lancedb_free_tags(nullptr, 0);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Invalid arguments are rejected") {
+    LanceDBTable* table = create_table_with_data("history_invalid_args", 5, 0);
+    REQUIRE(table != nullptr);
+
+    const char invalid_utf8[] = {'\xff', '\0'};
+    const LanceDBTag* tags = nullptr;
+    size_t count = 7;
+    uint64_t resolved_version = 42;
+
+    REQUIRE(lancedb_table_checkout(nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_checkout_tag(nullptr, "tag", nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_checkout_tag(table, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_checkout_tag(table, invalid_utf8, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_checkout_latest(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_restore(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    REQUIRE(lancedb_table_list_tags(nullptr, &tags, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_list_tags(table, nullptr, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_list_tags(table, &tags, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(count == 7);
+
+    REQUIRE(lancedb_table_get_tag_version(table, nullptr, &resolved_version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_tag_version(table, "tag", nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_get_tag_version(table, invalid_utf8, &resolved_version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(resolved_version == 42);
+
+    REQUIRE(lancedb_table_create_tag(table, nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_delete_tag(table, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_tag(table, nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    lancedb_free_tags(nullptr, 0);
+    lancedb_table_free(table);
+  }
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema", "[table]") {
   SECTION("Get schema from table") {
     constexpr auto row_num = 5;

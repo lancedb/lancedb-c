@@ -6,17 +6,17 @@ on:
   pull_request:
     branches: [main]
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+# Pull requests build independently and cancel superseded runs for the same PR.
+# Pushes to main share the "pages" group so deployments keep their current order
+# and an in-progress deployment is never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pages-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The build only reads the repository. Pages and OIDC permissions belong to the
+# deployment job.
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
   build-docs:
@@ -33,11 +33,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake wget doxygen
-          wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-          sudo apt-get install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
-          sudo apt-get update
-          sudo apt-get install -y libarrow-dev
+          sudo apt-get install -y cmake doxygen
 
       - name: Install Python dependencies
         run: |
@@ -62,17 +58,30 @@ jobs:
           path: build/docs/html
           retention-days: 7
 
-      - name: Setup Pages
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/configure-pages@v4
-
       - name: Upload artifact to Pages
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: build/docs/html
 
+  # Deploy in a separate job, as recommended by actions/deploy-pages. This lets
+  # the uploaded Pages artifact finish propagating before deployment reads it;
+  # running deployment in the upload job can observe zero artifacts.
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-docs
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
       - name: Deploy to GitHub Pages
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         id: deployment
         uses: actions/deploy-pages@v4

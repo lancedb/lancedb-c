@@ -314,6 +314,20 @@ typedef struct {
 } LanceDBVersionMetadata;
 
 /**
+ * Tag information for a table
+ *
+ * The array and its strings are read-only and owned by the library. Callers
+ * must not modify or free them individually. The strings remain valid until
+ * lancedb_free_tags() is called with the same array and count.
+ */
+typedef struct {
+    const char* name;            // Read-only tag name
+    uint64_t version;            // Version referenced by the tag
+    uint64_t manifest_size;      // Manifest size in bytes at the referenced version
+    const char* branch;          // Read-only optional branch name (NULL when the tag has no branch)
+} LanceDBTag;
+
+/**
  * Create a ConnectBuilder for the given URI
  *
  * @param uri - null-terminated C string containing the database URI
@@ -1095,6 +1109,105 @@ LanceDBError lancedb_table_df_delete(
 );
 
 /**
+ * One column alteration for lancedb_table_alter_columns
+ *
+ * `path` names the existing column. `rename`, when non-NULL, sets the new
+ * column name. `set_nullable` distinguishes "leave nullability unchanged"
+ * (0) from applying `nullable` (1), so an explicit nullable=false request is
+ * not mistaken for an omitted one. `nullable` is 0 for NOT NULL and non-zero
+ * for NULL.
+ */
+typedef struct {
+    const char* path;
+    const char* rename;
+    int set_nullable;
+    int nullable;
+} LanceDBColumnAlteration;
+
+/**
+ * Add new columns using SQL expressions
+ *
+ * @param table - pointer to LanceDBTable
+ * @param names - array of new column names
+ * @param expressions - array of SQL expressions, one per new column
+ * @param num_columns - number of entries in names and expressions (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The arrays and their strings are borrowed for the duration of the call. They
+ * are not consumed and remain owned by the caller. Names and expressions must
+ * be non-empty. On success, version_out is the operation's own commit version;
+ * it may be 0 for legacy remote servers that do not report a version. On
+ * failure, version_out is left unchanged. No separate table version lookup is
+ * performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_add_columns(
+    const LanceDBTable* table,
+    const char* const* names,
+    const char* const* expressions,
+    size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Alter column names and nullability
+ *
+ * @param table - pointer to LanceDBTable
+ * @param alterations - array of column alterations
+ * @param num_alterations - number of entries in alterations (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Each entry must set a non-empty path and change at least the name or the
+ * nullability. Rename and nullability are independent: a NULL rename keeps the
+ * current name, and set_nullable=0 keeps the current nullability. The array and
+ * its strings are borrowed for the duration of the call.
+ * On success, version_out is the operation's own commit version; it may be 0
+ * for legacy remote servers that do not report a version. On failure,
+ * version_out is left unchanged. No separate table version lookup is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_alter_columns(
+    const LanceDBTable* table,
+    const LanceDBColumnAlteration* alterations,
+    size_t num_alterations,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Drop columns from a table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns - array of column names to drop
+ * @param num_columns - number of entries in columns (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Names must be non-empty. The array and its strings are borrowed for the
+ * duration of the call. On success, version_out is the operation's own commit
+ * version; it may be 0 for legacy remote servers that do not report a version.
+ * On failure, version_out is left unchanged. No separate table version lookup
+ * is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_drop_columns(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
  * Create a new query for the given table
  *
  * @param table - pointer to LanceDBTable
@@ -1312,6 +1425,30 @@ LanceDBError lancedb_vector_query_where_filter(
 LanceDBError lancedb_vector_query_df_filter(
     LanceDBVectorQuery* query,
     LanceDBExpr* expr,
+    char** error_message
+);
+
+/**
+ * Make the vector query filter run after the vector search
+ *
+ * By default, the filter set with lancedb_vector_query_where_filter() or
+ * lancedb_vector_query_df_filter() is applied before the vector search.
+ * Calling this function applies the filter to the vector search results instead,
+ * matching the Rust SDK's postfilter().
+ *
+ * This only affects queries that also set a filter. Post-filtering can return
+ * fewer than `limit` rows, or no rows, when the nearest vectors do not match
+ * the filter. Setting a refine_factor can help recover some results.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_postfilter(
+    LanceDBVectorQuery* query,
     char** error_message
 );
 
@@ -1861,6 +1998,55 @@ void lancedb_free_arrow_arrays(
 );
 
 /**
+ * Information about one index on a table
+ *
+ * The strings and arrays are owned by the result and are valid until it is freed
+ * with lancedb_free_index_info().
+ */
+typedef struct {
+    const char* const name;           // Name of the index as assigned by LanceDB
+    const char* const* const columns; // Ordered column names covered by the index
+    const size_t num_columns;         // Number of entries in columns
+    const char* const index_type;     // SDK index type, for example "IVF_PQ", "BTREE" or "FTS"
+} LanceDBIndexInfo;
+
+/**
+ * List every index on the table with its name, columns and index type
+ *
+ * Unlike lancedb_table_list_indices(), which returns only the names, this entry
+ * point returns the metadata required by callers that inspect the indices. The
+ * index type is the SDK's type name and is preserved for types this library does
+ * not know about.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param indices_out - pointer to receive the array of index information
+ * @param count_out - pointer to receive the number of indices
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success with no indices, count_out is 0 and indices_out is NULL.
+ * The caller must free the returned array using lancedb_free_index_info().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_indices_info(
+    const LanceDBTable* table,
+    const LanceDBIndexInfo** indices_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free index information array returned by lancedb_table_list_indices_info
+ *
+ * @param indices - array of LanceDBIndexInfo structs returned by lancedb_table_list_indices_info
+ * @param count - number of entries in the array
+ *
+ * Safe to call with a NULL pointer.
+ */
+void lancedb_free_index_info(const LanceDBIndexInfo* indices, size_t count);
+
+/**
  * List all versions of the table
  *
  * @param table - pointer to LanceDBTable
@@ -1883,6 +2069,187 @@ LanceDBError lancedb_table_list_versions(
     LanceDBVersion** versions_out,
     LanceDBVersionMetadata** metadata_out,
     size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Check out a specific version of the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param version - version number to check out
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The table becomes a read-only view of the requested version until
+ * lancedb_table_checkout_latest() or lancedb_table_restore() is called.
+ * Other table handles are not affected.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_checkout(
+    const LanceDBTable* table,
+    uint64_t version,
+    char** error_message
+);
+
+/**
+ * Check out the version referenced by a tag
+ *
+ * @param table - pointer to LanceDBTable
+ * @param tag - null-terminated C string containing the tag name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The table becomes a read-only view of the tagged version until
+ * lancedb_table_checkout_latest() or lancedb_table_restore() is called.
+ * Other table handles are not affected.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_checkout_tag(
+    const LanceDBTable* table,
+    const char* tag,
+    char** error_message
+);
+
+/**
+ * Return the table to the latest version
+ *
+ * @param table - pointer to LanceDBTable
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This drops any version or tag checkout and resumes tracking the latest
+ * table version.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_checkout_latest(
+    const LanceDBTable* table,
+    char** error_message
+);
+
+/**
+ * Restore the table to the currently checked out version
+ *
+ * @param table - pointer to LanceDBTable
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This promotes the checked out version to the latest version. It fails when
+ * the table has not been checked out. On success the table tracks the latest
+ * version again.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_restore(
+    const LanceDBTable* table,
+    char** error_message
+);
+
+/**
+ * List all tags of the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param tags_out - pointer to receive the read-only array of LanceDBTag structs
+ * @param count_out - pointer to receive the number of tags
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, tags_out points to a read-only array of LanceDBTag structs and
+ * count_out receives its length. An empty result sets tags_out to NULL and
+ * count_out to zero. The array and its strings are owned by the library and
+ * must not be modified or freed individually. Free the whole array with
+ * lancedb_free_tags() using the returned count.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_tags(
+    const LanceDBTable* table,
+    const LanceDBTag** tags_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Get the version referenced by a tag
+ *
+ * @param table - pointer to LanceDBTable
+ * @param tag - null-terminated C string containing the tag name
+ * @param version_out - pointer to receive the tag's version
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, version_out is set to the version referenced by the tag. On
+ * failure, version_out is left unchanged.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_get_tag_version(
+    const LanceDBTable* table,
+    const char* tag,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Create a tag for a table version
+ *
+ * @param table - pointer to LanceDBTable
+ * @param tag - null-terminated C string containing the tag name
+ * @param version - version number the tag references
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Tag creation is metadata-only and does not create a new table version.
+ * The operation fails when the tag already exists or the version is unknown.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_create_tag(
+    const LanceDBTable* table,
+    const char* tag,
+    uint64_t version,
+    char** error_message
+);
+
+/**
+ * Delete a tag from the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param tag - null-terminated C string containing the tag name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Tag deletion is metadata-only and does not create a new table version.
+ * The operation fails when the tag does not exist.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_delete_tag(
+    const LanceDBTable* table,
+    const char* tag,
+    char** error_message
+);
+
+/**
+ * Update an existing tag to reference another table version
+ *
+ * @param table - pointer to LanceDBTable
+ * @param tag - null-terminated C string containing the tag name
+ * @param version - version number the tag should reference
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Tag updates are metadata-only and do not create a new table version.
+ * The operation fails when the tag does not exist or the version is unknown.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_update_tag(
+    const LanceDBTable* table,
+    const char* tag,
+    uint64_t version,
     char** error_message
 );
 
@@ -1977,6 +2344,18 @@ void lancedb_free_versions(LanceDBVersion* versions, size_t count);
  * Safe to call with NULL pointer.
  */
 void lancedb_free_version_metadata(LanceDBVersionMetadata* metadata, size_t count);
+
+/**
+ * Free tag array returned by lancedb_table_list_tags
+ *
+ * @param tags - read-only array of LanceDBTag structs returned by lancedb_table_list_tags
+ * @param count - number of entries, exactly as returned by lancedb_table_list_tags
+ *
+ * The library owns the array and every string in it. Callers must not modify
+ * entries or free them individually, and must pass the count returned with the
+ * array. Safe to call with NULL pointer.
+ */
+void lancedb_free_tags(const LanceDBTag* tags, size_t count);
 
 /**
  * Free metadata arrays returned by lancedb_table_get_metadata
