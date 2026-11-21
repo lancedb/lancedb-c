@@ -146,11 +146,32 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
 
     // Filter by key = 42 select
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_42\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_42'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
     // Execute query
+    LanceDBQueryResult* query_result = lancedb_query_execute(query);
+    REQUIRE(query_result != nullptr);
+
+    verify_query_result(query_result, 1);
+  }
+
+  SECTION("Filter with a double-quoted identifier") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key", "data"};
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_query_select(query, columns, 2, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // SQL-standard double quotes delimit identifiers, not string values.
+    result = lancedb_query_where_filter(query, "\"key\" = 'key_42'", &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
     LanceDBQueryResult* query_result = lancedb_query_execute(query);
     REQUIRE(query_result != nullptr);
 
@@ -164,7 +185,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
 
     // Filter by key IN (10, 20, 30, 40, 50)
     char* error_message = nullptr;
-    LanceDBError result = lancedb_query_where_filter(query, "key IN (\"key_10\", \"key_20\", \"key_30\", \"key_40\", \"key_50\")", &error_message);
+    LanceDBError result = lancedb_query_where_filter(query, "key IN ('key_10', 'key_20', 'key_30', 'key_40', 'key_50')", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -206,7 +227,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
 
     // Filter by key = 42 select
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_42\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_42'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -224,7 +245,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
 
     // Filter by key IN (10, 20, 30, 40, 50)
     char* error_message = nullptr;
-    LanceDBError result = lancedb_query_where_filter(query, "key IN (\"key_10\", \"key_20\", \"key_30\", \"key_40\", \"key_50\")", &error_message);
+    LanceDBError result = lancedb_query_where_filter(query, "key IN ('key_10', 'key_20', 'key_30', 'key_40', 'key_50')", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -256,7 +277,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
 
     // Filter by a key that doesn't exist (table has key_0 to key_99)
     error_message = nullptr;
-    result = lancedb_query_where_filter(query, "key = \"key_999\"", &error_message);
+    result = lancedb_query_where_filter(query, "key = 'key_999'", &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
@@ -302,7 +323,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Filter on non-existent column"
 
   // Filter on a column that does not exist in the table
   error_message = nullptr;
-  result = lancedb_query_where_filter(query, "key = \"key_42\" OR unknown = \"value\"", &error_message);
+  result = lancedb_query_where_filter(query, "key = 'key_42' OR unknown = 'value'", &error_message);
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
@@ -340,7 +361,7 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
     LanceDBQuery* query = lancedb_query_new(table);
     REQUIRE(query != nullptr);
 
-    const std::string filter = "key = \"key_" + std::to_string(i % total_rows) + "\"";
+    const std::string filter = "key = 'key_" + std::to_string(i % total_rows) + "'";
     result = lancedb_query_where_filter(query, filter.c_str(), &error_message);
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -503,6 +524,45 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - explain plan", "[query][explai
     REQUIRE(plan != nullptr);
     REQUIRE(std::string(plan).length() > 0);
     lancedb_free_string(plan);
+
+    lancedb_query_free(query);
+  }
+
+  SECTION("Explain plan reflects a SQL filter") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_query_where_filter(query, "key = 'key_42'", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    // The filter literal only appears in the plan when the SQL predicate is applied.
+    REQUIRE(std::string(plan).find("key_42") != std::string::npos);
+    lancedb_free_string(plan);
+
+    lancedb_query_free(query);
+  }
+
+  SECTION("Explain plan rejects a SQL filter on a missing column") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_where_filter(query, "unknown = 'value'", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    LanceDBError result = lancedb_query_explain_plan(query, true, &plan, &error_message);
+    REQUIRE(result != LANCEDB_SUCCESS);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
 
     lancedb_query_free(query);
   }

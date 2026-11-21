@@ -235,6 +235,89 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Creation", "[table]") {
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - status-returning count and version", "[table]") {
+  const std::string table_name = "test_table_status_getters";
+  create_empty_table(table_name);
+  LanceDBTable* table = open_table(table_name);
+
+  SECTION("Empty table count succeeds with zero rows") {
+    size_t count = 42;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_with_status(table, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 0);
+
+    // The old getter keeps its zero sentinel for an empty table.
+    REQUIRE(lancedb_table_count_rows(table) == 0);
+  }
+
+  SECTION("Version succeeds and matches the old getter") {
+    uint64_t version = 0;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_version_with_status(table, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == lancedb_table_version(table));
+    REQUIRE(version == 1);
+  }
+
+  SECTION("Count and version reflect a write") {
+    constexpr auto row_num = 4;
+    auto reader = create_reader_from_batch(create_test_record_batch(row_num, 0));
+    REQUIRE(reader != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    size_t count = 0;
+    REQUIRE(lancedb_table_count_rows_with_status(table, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == row_num);
+
+    uint64_t version = 0;
+    REQUIRE(lancedb_table_version_with_status(table, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == 2);
+    REQUIRE(version == lancedb_table_version(table));
+  }
+
+  SECTION("Failures are reported and leave the output unchanged") {
+    size_t count = 42;
+    uint64_t version = 42;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_with_status(nullptr, &count, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(count == 42);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_version_with_status(nullptr, &version, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(version == 42);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // A missing output pointer is rejected instead of writing through it.
+    REQUIRE(lancedb_table_count_rows_with_status(table, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_version_with_status(table, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // The old getters keep their zero sentinel for a rejected call.
+    REQUIRE(lancedb_table_count_rows(nullptr) == 0);
+    REQUIRE(lancedb_table_version(nullptr) == 0);
+  }
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
   // Create a test table
   const std::string table_name = "test_add_table";
