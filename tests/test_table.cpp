@@ -1989,6 +1989,25 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
     lancedb_free_arrow_schema(c_schema);
     lancedb_record_batch_reader_free(reader);
 
+    // The same file works when only one of the two outputs is requested
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        dictionary_file.data(), dictionary_file.size(), &reader, nullptr, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+    lancedb_record_batch_reader_free(reader);
+
+    c_schema = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        dictionary_file.data(), dictionary_file.size(), nullptr, &c_schema, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(c_schema != nullptr);
+    lancedb_free_arrow_schema(c_schema);
+
     // A schema the Arrow C ABI cannot carry is a normal invalid-input error, and
     // neither requested output is handed over
     const auto unrepresentable = write_ipc_file_with_unrepresentable_field_name();
