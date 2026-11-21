@@ -11,8 +11,10 @@ import io
 import os
 import struct
 import sys
+import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -52,16 +54,47 @@ class PackageFixture(unittest.TestCase):
 
 
 class PackageArchiveTests(PackageFixture):
+    def create_with_umask(self, output_name: str, umask: int, timestamp: int) -> tuple[Path, Path]:
+        previous_umask = os.umask(umask)
+        try:
+            for path in (
+                self.repo / "LICENSE",
+                self.repo / "include" / "lancedb.h",
+                self.library_dir / "liblancedb.so",
+            ):
+                os.utime(path, (timestamp, timestamp))
+            with mock.patch("time.time", return_value=timestamp):
+                return self.create(output_name)
+        finally:
+            os.umask(previous_umask)
+
     def test_identical_inputs_produce_identical_archives(self) -> None:
-        first, first_checksum = self.create("first")
-        os.utime(self.library_dir / "liblancedb.so", (1, 1))
-        second, second_checksum = self.create("second")
+        first, first_checksum = self.create_with_umask("first", 0o022, 1_000_000_000)
+        second, second_checksum = self.create_with_umask("second", 0o077, 1_700_000_000)
 
         self.assertEqual(first.read_bytes(), second.read_bytes())
         self.assertEqual(
             first_checksum.read_text(encoding="utf-8"),
             second_checksum.read_text(encoding="utf-8"),
         )
+
+        gzip_header = first.read_bytes()[:10]
+        self.assertEqual(gzip_header[:2], b"\x1f\x8b")
+        self.assertEqual(int.from_bytes(gzip_header[4:8], "little"), 0)
+
+        with tarfile.open(first, "r:gz") as tar:
+            modes = {
+                member.name.split("/", 1)[1]: member.mode
+                for member in tar.getmembers()
+                if "/" in member.name
+            }
+        self.assertEqual(modes["include"], 0o755)
+        self.assertEqual(modes["lib"], 0o755)
+        self.assertEqual(modes["LICENSE"], 0o644)
+        self.assertEqual(modes["include/lancedb.h"], 0o644)
+        self.assertEqual(modes["lib/liblancedb.so"], 0o755)
+        self.assertEqual(modes["manifest.json"], 0o644)
+        self.assertEqual(modes["SHA256SUMS"], 0o644)
 
     def test_archive_checksum_is_required_and_matches(self) -> None:
         archive, checksum = self.create("package")
@@ -99,18 +132,25 @@ class PackageArchiveTests(PackageFixture):
 
             checksum_file = package_root / "SHA256SUMS"
             original = checksum_file.read_text(encoding="utf-8")
-            checksum_file.write_text(original + original.splitlines()[0] + "\n", encoding="utf-8")
-            with self.assertRaises(SystemExit):
+            lines = original.splitlines()
+
+            checksum_file.write_text(original + lines[0] + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "more than once"):
                 package.read_checksum_inventory(package_root)
 
-            checksum_file.write_text(original.replace("manifest.json", "missing.json"), encoding="utf-8")
-            with self.assertRaises(SystemExit):
+            checksum_file.write_text(
+                "\n".join(line for line in lines if not line.endswith("  manifest.json")) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SystemExit, "SHA256SUMS is missing: manifest\\.json"):
                 package.verify_checksums(package_root)
 
             checksum_file.write_text(
                 original + f"{'0' * 64}  unexpected.txt\n", encoding="utf-8"
             )
-            with self.assertRaises(SystemExit):
+            with self.assertRaisesRegex(
+                SystemExit, "SHA256SUMS lists unexpected entries: unexpected\\.txt"
+            ):
                 package.verify_checksums(package_root)
 
 

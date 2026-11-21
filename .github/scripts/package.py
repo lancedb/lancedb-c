@@ -116,7 +116,9 @@ def copy_file(source: Path, destination: Path, mode: int) -> None:
     destination.chmod(mode)
 
 
-def write_deterministic_tar(source_root: Path, archive: Path) -> None:
+def write_deterministic_tar(
+    source_root: Path, archive: Path, file_modes: dict[str, int]
+) -> None:
     """Write a tar.gz with stable metadata so identical inputs give identical bytes."""
     with archive.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
@@ -124,18 +126,24 @@ def write_deterministic_tar(source_root: Path, archive: Path) -> None:
                 fileobj=compressed, mode="w", format=tarfile.GNU_FORMAT
             ) as tar:
                 for path in sorted(source_root.rglob("*")):
-                    arcname = f"{source_root.name}/{path.relative_to(source_root).as_posix()}"
+                    relative = path.relative_to(source_root).as_posix()
+                    arcname = f"{source_root.name}/{relative}"
                     info = tar.gettarinfo(str(path), arcname=arcname)
                     info.uid = 0
                     info.gid = 0
                     info.uname = ""
                     info.gname = ""
                     info.mtime = 0
-                    if path.is_file():
+                    if path.is_dir():
+                        # Do not take directory modes from the caller's umask.
+                        info.mode = 0o755
+                        tar.addfile(info)
+                    else:
+                        if relative not in file_modes:
+                            raise SystemExit(f"no deterministic mode for package member: {relative}")
+                        info.mode = file_modes[relative]
                         with path.open("rb") as file:
                             tar.addfile(info, file)
-                    else:
-                        tar.addfile(info)
 
 
 def extract_tar(archive: Path, destination: Path) -> None:
@@ -213,8 +221,18 @@ def create_package(args: argparse.Namespace) -> None:
             "\n".join(checksum_lines) + "\n", encoding="utf-8"
         )
 
+        file_modes = {
+            "LICENSE": 0o644,
+            "include/lancedb.h": 0o644,
+            "manifest.json": 0o644,
+            "SHA256SUMS": 0o644,
+            manifest["library"]: 0o755,
+        }
+        if manifest["importLibrary"]:
+            file_modes[manifest["importLibrary"]] = 0o644
+
         archive = output_dir / f"{package_root_name}.tar.gz"
-        write_deterministic_tar(package_root, archive)
+        write_deterministic_tar(package_root, archive, file_modes)
 
     digest = sha256_file(archive)
     checksum_file = output_dir / f"{archive.name}.sha256"
