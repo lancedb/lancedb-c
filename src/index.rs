@@ -602,6 +602,175 @@ pub unsafe extern "C" fn lancedb_free_index_list(indices: *mut *mut c_char, coun
     }
 }
 
+/// Information about one index on a table
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBIndexInfo {
+    pub name: *mut c_char,
+    pub columns: *mut *mut c_char,
+    pub num_columns: usize,
+    pub index_type: *mut c_char,
+}
+
+/// Free the allocations owned by one LanceDBIndexInfo
+unsafe fn free_index_info(info: &mut LanceDBIndexInfo) {
+    if !info.name.is_null() {
+        drop(CString::from_raw(info.name));
+        info.name = ptr::null_mut();
+    }
+
+    if !info.columns.is_null() {
+        for i in 0..info.num_columns {
+            let column = *info.columns.add(i);
+            if !column.is_null() {
+                drop(CString::from_raw(column));
+            }
+        }
+        libc::free(info.columns as *mut libc::c_void);
+        info.columns = ptr::null_mut();
+    }
+    info.num_columns = 0;
+
+    if !info.index_type.is_null() {
+        drop(CString::from_raw(info.index_type));
+        info.index_type = ptr::null_mut();
+    }
+}
+
+/// Fill one C index description from the SDK's index configuration
+///
+/// On failure the destination stays zeroed, so the caller can pass it to
+/// free_index_info without tracking which fields were allocated.
+unsafe fn fill_index_info(
+    dest: *mut LanceDBIndexInfo,
+    index: lancedb::index::IndexConfig,
+) -> Result<(), ()> {
+    let mut info = LanceDBIndexInfo {
+        name: ptr::null_mut(),
+        columns: ptr::null_mut(),
+        num_columns: 0,
+        index_type: ptr::null_mut(),
+    };
+
+    let allocated = (|| -> Result<(), ()> {
+        info.name = CString::new(index.name).map_err(|_| ())?.into_raw();
+        info.index_type = CString::new(index.index_type.to_string())
+            .map_err(|_| ())?
+            .into_raw();
+
+        let num_columns = index.columns.len();
+        if num_columns > 0 {
+            // calloc keeps every entry null until it is filled, so a failure in
+            // the middle of the loop leaves a safely freeable array behind
+            let columns =
+                libc::calloc(num_columns, std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+            if columns.is_null() {
+                return Err(());
+            }
+            info.columns = columns;
+            info.num_columns = num_columns;
+
+            for (i, column) in index.columns.into_iter().enumerate() {
+                let column = CString::new(column).map_err(|_| ())?;
+                *info.columns.add(i) = column.into_raw();
+            }
+        }
+
+        Ok(())
+    })();
+
+    if allocated.is_err() {
+        free_index_info(&mut info);
+        return Err(());
+    }
+
+    *dest = info;
+    Ok(())
+}
+
+/// List every index on the table with its name, columns and SDK index type
+///
+/// The names-only lancedb_table_list_indices remains available for callers that
+/// only need the names.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `indices_out` must be a valid pointer to receive the array of index information
+/// - `count_out` must be a valid pointer to receive the count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_list_indices_info(
+    table: *const LanceDBTable,
+    indices_out: *mut *mut LanceDBIndexInfo,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || indices_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    *indices_out = ptr::null_mut();
+    *count_out = 0;
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.list_indices()) {
+        Ok(indices) => {
+            if indices.is_empty() {
+                return LanceDBError::Success;
+            }
+
+            let count = indices.len();
+            let info_array = libc::calloc(count, std::mem::size_of::<LanceDBIndexInfo>())
+                as *mut LanceDBIndexInfo;
+            if info_array.is_null() {
+                set_unknown_error_message(error_message);
+                return LanceDBError::Unknown;
+            }
+
+            for (i, index) in indices.into_iter().enumerate() {
+                if fill_index_info(info_array.add(i), index).is_err() {
+                    // calloc zeroed every entry, including the one that failed
+                    for j in 0..=i {
+                        free_index_info(&mut *info_array.add(j));
+                    }
+                    libc::free(info_array as *mut libc::c_void);
+                    set_unknown_error_message(error_message);
+                    return LanceDBError::Unknown;
+                }
+            }
+
+            *indices_out = info_array;
+            *count_out = count;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Free index information array returned by lancedb_table_list_indices_info
+///
+/// # Safety
+/// - `indices` must be a pointer returned by `lancedb_table_list_indices_info`
+/// - `count` must match the count returned by `lancedb_table_list_indices_info`
+/// - Safe to call with a NULL pointer
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_index_info(indices: *mut LanceDBIndexInfo, count: usize) {
+    if indices.is_null() {
+        return;
+    }
+
+    for i in 0..count {
+        free_index_info(&mut *indices.add(i));
+    }
+    libc::free(indices as *mut libc::c_void);
+}
+
 /// Index statistics returned by lancedb_table_index_stats
 #[repr(C)]
 #[derive(Debug)]

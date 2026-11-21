@@ -1690,6 +1690,55 @@ void lancedb_free_arrow_arrays(
 );
 
 /**
+ * Information about one index on a table
+ *
+ * The strings and arrays are owned by the result and are valid until it is freed
+ * with lancedb_free_index_info().
+ */
+typedef struct {
+    char* name;          // Name of the index as assigned by LanceDB
+    char** columns;      // Ordered column names covered by the index
+    size_t num_columns;  // Number of entries in columns
+    char* index_type;    // SDK index type, for example "IVF_PQ", "BTREE" or "FTS"
+} LanceDBIndexInfo;
+
+/**
+ * List every index on the table with its name, columns and index type
+ *
+ * Unlike lancedb_table_list_indices(), which returns only the names, this entry
+ * point returns the metadata required by callers that inspect the indices. The
+ * index type is the SDK's type name and is preserved for types this library does
+ * not know about.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param indices_out - pointer to receive the array of index information
+ * @param count_out - pointer to receive the number of indices
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success with no indices, count_out is 0 and indices_out is NULL.
+ * The caller must free the returned array using lancedb_free_index_info().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_indices_info(
+    const LanceDBTable* table,
+    LanceDBIndexInfo** indices_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free index information array returned by lancedb_table_list_indices_info
+ *
+ * @param indices - array of LanceDBIndexInfo structs returned by lancedb_table_list_indices_info
+ * @param count - number of entries in the array
+ *
+ * Safe to call with a NULL pointer.
+ */
+void lancedb_free_index_info(LanceDBIndexInfo* indices, size_t count);
+
+/**
  * List all versions of the table
  *
  * @param table - pointer to LanceDBTable
