@@ -995,6 +995,105 @@ LanceDBError lancedb_table_df_delete(
 );
 
 /**
+ * One column alteration for lancedb_table_alter_columns
+ *
+ * `path` names the existing column. `rename`, when non-NULL, sets the new
+ * column name. `set_nullable` distinguishes "leave nullability unchanged"
+ * (0) from applying `nullable` (1), so an explicit nullable=false request is
+ * not mistaken for an omitted one. `nullable` is 0 for NOT NULL and non-zero
+ * for NULL.
+ */
+typedef struct {
+    const char* path;
+    const char* rename;
+    int set_nullable;
+    int nullable;
+} LanceDBColumnAlteration;
+
+/**
+ * Add new columns using SQL expressions
+ *
+ * @param table - pointer to LanceDBTable
+ * @param names - array of new column names
+ * @param expressions - array of SQL expressions, one per new column
+ * @param num_columns - number of entries in names and expressions (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The arrays and their strings are borrowed for the duration of the call. They
+ * are not consumed and remain owned by the caller. Names and expressions must
+ * be non-empty. On success, version_out is the operation's own commit version;
+ * it may be 0 for legacy remote servers that do not report a version. On
+ * failure, version_out is left unchanged. No separate table version lookup is
+ * performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_add_columns(
+    const LanceDBTable* table,
+    const char* const* names,
+    const char* const* expressions,
+    size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Alter column names and nullability
+ *
+ * @param table - pointer to LanceDBTable
+ * @param alterations - array of column alterations
+ * @param num_alterations - number of entries in alterations (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Each entry must set a non-empty path and change at least the name or the
+ * nullability. Rename and nullability are independent: a NULL rename keeps the
+ * current name, and set_nullable=0 keeps the current nullability. The array and
+ * its strings are borrowed for the duration of the call.
+ * On success, version_out is the operation's own commit version; it may be 0
+ * for legacy remote servers that do not report a version. On failure,
+ * version_out is left unchanged. No separate table version lookup is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_alter_columns(
+    const LanceDBTable* table,
+    const LanceDBColumnAlteration* alterations,
+    size_t num_alterations,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Drop columns from a table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns - array of column names to drop
+ * @param num_columns - number of entries in columns (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Names must be non-empty. The array and its strings are borrowed for the
+ * duration of the call. On success, version_out is the operation's own commit
+ * version; it may be 0 for legacy remote servers that do not report a version.
+ * On failure, version_out is left unchanged. No separate table version lookup
+ * is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_drop_columns(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
  * Create a new query for the given table
  *
  * @param table - pointer to LanceDBTable
