@@ -1734,6 +1734,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
     REQUIRE(buffer.len == 0);
     // Freeing an already freed buffer is a no-op
     lancedb_ipc_buffer_free(&buffer);
+    // Freeing no buffer at all is a no-op too
+    lancedb_ipc_buffer_free(nullptr);
 
     LanceDBTable* created = nullptr;
     REQUIRE(lancedb_table_create(
@@ -1882,11 +1884,20 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
 
+    // Bytes that cannot hold the footer their own last ten bytes announce are
+    // rejected before the decoder reads or allocates from them
+    auto oversized_footer = valid;
+    const uint32_t announced_footer = static_cast<uint32_t>(oversized_footer.size()) + 1;
+    std::memcpy(oversized_footer.data() + oversized_footer.size() - 10, &announced_footer,
+                sizeof(announced_footer));
+
     // Bytes without an IPC file are input errors, reported with a decoding message
     const std::vector<std::vector<uint8_t>> rejected = {
-        std::vector<uint8_t>(valid.begin(), valid.end() - 40),  // truncated
-        stream,                                                 // stream, not a file
-        corrupt,                                                // second batch corrupt
+        std::vector<uint8_t>{'A', 'R', 'R', 'O', 'W', '1', 0, 0},  // too short for a footer
+        std::vector<uint8_t>(valid.begin(), valid.end() - 40),      // truncated
+        stream,                                                    // stream, not a file
+        corrupt,                                                   // second batch corrupt
+        oversized_footer,                                          // footer does not fit
     };
     for (const auto& bytes : rejected) {
       reader = nullptr;
@@ -1903,6 +1914,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
       lancedb_free_string(error_message);
     }
 
+    // The announced footer is checked against the input before decoding
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        oversized_footer.data(), oversized_footer.size(), &reader, nullptr, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("does not fit") != std::string::npos);
+    lancedb_free_string(error_message);
+
     // An empty input is rejected without reading any byte
     reader = nullptr;
     error_message = nullptr;
@@ -1910,6 +1932,16 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc
         valid.data(), 0, &reader, nullptr, &error_message) == LANCEDB_INVALID_INPUT);
     REQUIRE(reader == nullptr);
     REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // A size that cannot describe a buffer is rejected before any pointer is read
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        valid.data(), SIZE_MAX, &reader, nullptr, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("too large") != std::string::npos);
     lancedb_free_string(error_message);
 
     // A valid file still decodes

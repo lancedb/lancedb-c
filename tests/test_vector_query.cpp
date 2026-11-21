@@ -1447,7 +1447,21 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Arrow IPC output", "[ve
     REQUIRE(lancedb_vector_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
+    // A missing result pointer is rejected and the builder is still consumed
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_execute_with_status(query, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    query = lancedb_vector_query_new(table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_limit(query, 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_vector_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+
     LanceDBQueryResult* result = nullptr;
+    error_message = nullptr;
     REQUIRE(lancedb_vector_query_execute_with_status(query, &result, &error_message)
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -1481,7 +1495,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Arrow IPC output", "[ve
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
+    // A null builder is rejected without a query
     LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(1);
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_execute_with_status(nullptr, &result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(result == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    result = reinterpret_cast<LanceDBQueryResult*>(1);
+    error_message = nullptr;
     const LanceDBError status =
         lancedb_vector_query_execute_with_status(query, &result, &error_message);
     // The SDK reports the unresolved column, not a NULL pointer and a lost error

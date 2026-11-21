@@ -704,15 +704,24 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Arrow IPC output", "[query][ip
   }
 
   SECTION("Converting without a result or without a buffer is rejected") {
-    LanceDBIpcBuffer buffer = {};
+    // A missing result pointer is rejected and the builder is still consumed
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
     char* error_message = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    LanceDBIpcBuffer buffer = {};
+    error_message = nullptr;
     REQUIRE(lancedb_query_result_to_ipc_file(nullptr, &buffer, &error_message)
         == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(buffer.data == nullptr);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
 
-    LanceDBQuery* query = lancedb_query_new(table);
+    query = lancedb_query_new(table);
     REQUIRE(query != nullptr);
     LanceDBQueryResult* result = nullptr;
     error_message = nullptr;
