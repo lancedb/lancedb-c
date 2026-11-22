@@ -3161,8 +3161,12 @@ LanceDBError lancedb_vector_query_where_filter(
  * that text column; embedded LanceDB can also scan it without an index, while
  * an index is recommended for larger tables.
  *
- * Embedded LanceDB does not support lancedb_vector_query_explain_plan() for a
- * query with both nearest and full-text search. Execute the query instead.
+ * Embedded LanceDB executes this hybrid query as two searches and fuses their
+ * results. EXPLAIN, output schema inspection, and ANALYZE need a single SDK
+ * plan, so lancedb_vector_query_explain_plan(),
+ * lancedb_vector_query_output_schema() and
+ * lancedb_vector_query_analyze_plan() may return the SDK's unsupported-shape
+ * error. Execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
@@ -3422,8 +3426,8 @@ LanceDBError lancedb_vector_query_ef(
  * The schema comes from the same configured query that
  * lancedb_query_execute() would run, so a dynamic projection's aliases, types
  * and order are visible before execution. The query is not consumed. The SDK
- * decides how a backend resolves the query plan; a remote backend can contact
- * its server while doing so.
+ * decides how a backend resolves the plan; an Enterprise table may send the
+ * SDK's `/query/` request and read the schema from the returned stream.
  *
  * On entry, *schema_out and the error message are cleared. On success,
  * *schema_out holds an owned Arrow C Data schema; release it with
@@ -3472,8 +3476,8 @@ LanceDBError lancedb_query_explain_plan(
 /**
  * Execute the query and return an analyzed plan with runtime metrics
  *
- * The SDK executes the query to collect the metrics included in the plan, so
- * this reads the same data and has the same side effects as execution while
+ * ANALYZE executes an analyzable query plan to collect runtime metrics. It
+ * reads the same data and has the same side effects as execution while
  * returning no rows. The query is not consumed and can still be executed.
  *
  * On entry, *plan_out and the error message are cleared. On success, *plan_out
@@ -3500,8 +3504,13 @@ LanceDBError lancedb_query_analyze_plan(
  * The schema comes from the same configured query that
  * lancedb_vector_query_execute() would run, so a dynamic projection's aliases,
  * types and order are visible before execution. The query is not consumed. The
- * SDK decides how a backend resolves the query plan; a remote backend can
- * contact its server while doing so.
+ * SDK decides how a backend resolves the plan; an Enterprise table may send the
+ * SDK's `/query/` request and read the schema from the returned stream.
+ *
+ * Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+ * two searches and fuses their results. Output schema inspection requires a
+ * single SDK plan, so it may return the same unsupported hybrid error as
+ * lancedb_vector_query_explain_plan().
  *
  * On entry, *schema_out and the error message are cleared. On success,
  * *schema_out holds an owned Arrow C Data schema; release it with
@@ -3530,9 +3539,10 @@ LanceDBError lancedb_vector_query_output_schema(
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
  *
- * Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
- * full-text search at plan time with the SDK's unsupported-shape error because
- * one scanner cannot combine them. That is an SDK limitation, not a C-side
+ * Embedded LanceDB executes a hybrid query that combines nearest-neighbour and
+ * full-text search as two searches and fuses their results. EXPLAIN requires a
+ * single SDK plan, so embedded LanceDB rejects that hybrid at plan time with
+ * the SDK's unsupported-shape error. That is an SDK limitation, not a C-side
  * argument error; execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
@@ -3555,9 +3565,14 @@ LanceDBError lancedb_vector_query_explain_plan(
 /**
  * Execute the vector query and return an analyzed plan with runtime metrics
  *
- * The SDK executes the query to collect the metrics included in the plan, so
- * this reads the same data and has the same side effects as execution while
+ * ANALYZE executes an analyzable query plan to collect runtime metrics. It
+ * reads the same data and has the same side effects as execution while
  * returning no rows. The query is not consumed and can still be executed.
+ *
+ * Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+ * two searches and fuses their results. ANALYZE requires one analyzable SDK
+ * plan, so it may return the same unsupported hybrid error as
+ * lancedb_vector_query_explain_plan().
  *
  * On entry, *plan_out and the error message are cleared. On success, *plan_out
  * holds a NUL-terminated plan string; release it with lancedb_free_string(). On

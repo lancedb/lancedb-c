@@ -1962,9 +1962,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - dynamic projection and 
     REQUIRE(error_message == nullptr);
 
     auto schema = output_schema_of(query);
-    REQUIRE(schema->num_fields() >= 2);
+    REQUIRE(schema->num_fields() == 3);
     REQUIRE(schema->field(0)->name() == "key");
     REQUIRE(schema->field(1)->name() == "data");
+    REQUIRE(schema->field(2)->name() == "_distance");
+    REQUIRE(schema->field(2)->type()->id() == arrow::Type::FLOAT);
     REQUIRE(schema->GetFieldByName("key_length") == nullptr);
 
     const char* key_column[] = {"key"};
@@ -1972,15 +1974,19 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - dynamic projection and 
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     schema = output_schema_of(query);
-    REQUIRE(schema->num_fields() >= 1);
+    REQUIRE(schema->num_fields() == 2);
     REQUIRE(schema->field(0)->name() == "key");
+    REQUIRE(schema->field(1)->name() == "_distance");
+    REQUIRE(schema->field(1)->type()->id() == arrow::Type::FLOAT);
+    REQUIRE(schema->GetFieldByName("data") == nullptr);
 
     REQUIRE(lancedb_vector_query_select_all(query, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     schema = output_schema_of(query);
-    REQUIRE(schema->num_fields() >= 2);
+    REQUIRE(schema->num_fields() == 3);
     REQUIRE(schema->field(0)->name() == "key");
     REQUIRE(schema->field(1)->name() == "data");
+    REQUIRE(schema->field(2)->name() == "_distance");
 
     lancedb_vector_query_free(query);
   }
@@ -1988,7 +1994,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - dynamic projection and 
   SECTION("Analyze plan reflects the configured query and executes it") {
     LanceDBVectorQuery* query = query_with_dynamic_projection();
     char* error_message = nullptr;
-    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_3'", &error_message)
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_7'", &error_message)
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_vector_query_limit(query, 1, &error_message) == LANCEDB_SUCCESS);
@@ -1996,17 +2002,22 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - dynamic projection and 
 
     auto plan = analyze_plan_of(query);
     REQUIRE(plan.length() > 0);
-    REQUIRE(plan.find("key_3") != std::string::npos);
-    // The SDK executes the query to collect metrics for an analyzed plan.
-    REQUIRE(plan.find("elapsed=") != std::string::npos);
+    // key_7 only appears in the predicate; the projection uses key_3.
+    REQUIRE(plan.find("key_7") != std::string::npos);
+    REQUIRE(plan.find("metrics=[output_rows=") != std::string::npos);
 
     // analyze_plan does not consume the query.
     auto rows = collect_query_rows(lancedb_vector_query_execute(query));
     REQUIRE(rows.num_rows() == 1);
-    auto key_copy = std::static_pointer_cast<arrow::StringArray>(
-        rows.batches.front()->GetColumnByName("key_copy"));
+    auto batch = rows.batches.front();
+    auto key_copy =
+        std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("key_copy"));
     REQUIRE(key_copy != nullptr);
-    REQUIRE(key_copy->GetString(0) == "key_3");
+    REQUIRE(key_copy->GetString(0) == "key_7");
+    auto is_key_three = std::static_pointer_cast<arrow::BooleanArray>(
+        batch->GetColumnByName("is_key_three"));
+    REQUIRE(is_key_three != nullptr);
+    REQUIRE(!is_key_three->Value(0));
   }
 
   SECTION("Inspection preserves SDK errors and clears outputs on failure") {

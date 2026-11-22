@@ -819,9 +819,9 @@ pub unsafe extern "C" fn lancedb_vector_query_where_filter(
 /// This turns the vector query into a hybrid nearest-neighbour plus full-text
 /// search. Embedded LanceDB executes it as two searches and fuses the result
 /// sets. A NULL or empty column uses automatic discovery; an explicit text
-/// column can also be scanned without an index by embedded LanceDB. Embedded
-/// LanceDB rejects `lancedb_vector_query_explain_plan` for this hybrid query;
-/// execution is supported.
+/// column can also be scanned without an index by embedded LanceDB. EXPLAIN,
+/// output schema inspection, and ANALYZE need a single SDK plan and may return
+/// the SDK's unsupported-shape error for this hybrid; execute the query instead.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -1230,9 +1230,11 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
 /// to execute the query. Does NOT consume the query — it can still be
 /// executed afterwards.
 ///
-/// Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
-/// full-text search at plan time with the SDK's unsupported-shape error. That is
-/// an SDK limitation, not a C-side argument error; execute the query instead.
+/// Embedded LanceDB executes a hybrid query that combines nearest-neighbour and
+/// full-text search as two searches and fuses their results. EXPLAIN requires a
+/// single SDK plan, so embedded LanceDB rejects that hybrid at plan time with
+/// the SDK's unsupported-shape error. That is an SDK limitation, not a C-side
+/// argument error; execute the query instead.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -1269,7 +1271,8 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
 /// The SDK derives the schema from the same configured query used by
 /// `lancedb_query_execute`, so a dynamic projection's names, types and order
 /// are visible before execution. The query is not consumed. The SDK decides
-/// how a backend resolves the plan, and a remote backend can contact it.
+/// how a backend resolves the plan; an Enterprise table may send the SDK's
+/// `/query/` request and read the schema from the returned stream.
 ///
 /// On entry, `*schema_out` and the error message are cleared. On success,
 /// `*schema_out` holds an owned Arrow C Data schema that the caller releases
@@ -1306,7 +1309,13 @@ pub unsafe extern "C" fn lancedb_query_output_schema(
 /// The SDK derives the schema from the same configured query used by
 /// `lancedb_vector_query_execute`, including a dynamic projection's names,
 /// types and order. The query is not consumed. The SDK decides how a backend
-/// resolves the plan, and a remote backend can contact it.
+/// resolves the plan; an Enterprise table may send the SDK's `/query/` request
+/// and read the schema from the returned stream.
+///
+/// Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+/// two searches and fuses their results. Output schema inspection requires a
+/// single SDK plan, so it may return the same unsupported hybrid error as
+/// `lancedb_vector_query_explain_plan`.
 ///
 /// On entry, `*schema_out` and the error message are cleared. On success,
 /// `*schema_out` holds an owned Arrow C Data schema that the caller releases
@@ -1345,9 +1354,10 @@ pub unsafe extern "C" fn lancedb_vector_query_output_schema(
 
 /// Execute the query and return an analyzed plan with runtime metrics
 ///
-/// The SDK executes the query to collect the metrics shown in the plan, so this
-/// has the same data and side effects as execution while returning no rows. The
-/// query handle is not consumed and can still be executed.
+/// ANALYZE executes an analyzable query plan to collect runtime metrics. It
+/// reads the same data and has the same side effects as execution while
+/// returning no rows. The query handle is not consumed and can still be
+/// executed.
 ///
 /// On entry, `*plan_out` and the error message are cleared. On success,
 /// `*plan_out` holds a NUL-terminated string that the caller releases with
@@ -1381,9 +1391,15 @@ pub unsafe extern "C" fn lancedb_query_analyze_plan(
 
 /// Execute the vector query and return an analyzed plan with runtime metrics
 ///
-/// The SDK executes the query to collect the metrics shown in the plan, so this
-/// has the same data and side effects as execution while returning no rows. The
-/// query handle is not consumed and can still be executed.
+/// ANALYZE executes an analyzable query plan to collect runtime metrics. It
+/// reads the same data and has the same side effects as execution while
+/// returning no rows. The query handle is not consumed and can still be
+/// executed.
+///
+/// Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+/// two searches and fuses their results. ANALYZE requires one analyzable SDK
+/// plan, so it may return the same unsupported hybrid error as
+/// `lancedb_vector_query_explain_plan`.
 ///
 /// On entry, `*plan_out` and the error message are cleared. On success,
 /// `*plan_out` holds a NUL-terminated string that the caller releases with
