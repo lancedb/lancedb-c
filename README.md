@@ -78,22 +78,33 @@ If you prefer to build manually:
 
 ### Cloud Storage and Native Features
 
-`lancedb-c` declares its own Cargo features and forwards them to the pinned
-`lancedb` SDK, so the backends a build contains do not depend on what the SDK's
-dependencies happen to enable. The public header and the error codes are the
-same for every combination; a feature only changes which backends the built
-library can reach.
+`lancedb-c` declares the SDK features it builds against and forwards them, so a
+build states what it asks the SDK for instead of inheriting it. These are
+forwarding declarations: the public header and the error codes are the same for
+every combination, and a feature only changes what the built library can reach.
 
-| C feature | Forwarded to | What it enables in the library |
+| C feature | Forwarded to | SDK-side wiring |
 |---|---|---|
-| `remote` | `lancedb/remote` | The `db://` remote client and the REST namespace |
-| `aws` | `lancedb/aws` | The SDK's AWS wiring and its `dir-aws` directory namespace |
-| `gcs` | `lancedb/gcs` | The SDK's GCS wiring and its `dir-gcp` directory namespace |
-| `azure` | `lancedb/azure` | `dir-azure` plus Azure namespace credential vending |
-| `dynamodb` | `lancedb/dynamodb` | The DynamoDB commit handler for `s3+ddb://`; also turns on the SDK's AWS support |
-| `oss` | `lancedb/oss` | The SDK's `dir-oss` directory namespace |
-| `geo` | `lancedb/geo` | Lance's native spatial index and geo functions |
-| `fp16kernels` | `lancedb/fp16kernels` | Native f16/bf16 SIMD kernels in `lance-linalg` |
+| `remote` | `lancedb/remote` | The `db://` client and the REST namespace |
+| `aws` | `lancedb/aws` | The SDK's AWS support and the `dir-aws` namespace |
+| `gcs` | `lancedb/gcs` | The SDK's GCS support and the `dir-gcp` namespace |
+| `azure` | `lancedb/azure` | The `dir-azure` namespace and Azure namespace credential vending |
+| `dynamodb` | `lancedb/dynamodb` | The DynamoDB commit handler for `s3+ddb://`; implies the SDK's `aws` |
+| `oss` | `lancedb/oss` | The `dir-oss` namespace |
+| `geo` | `lancedb/geo` | Lance's `geo` feature |
+| `fp16kernels` | `lancedb/fp16kernels` | Native f16/bf16 kernels in `lance-linalg` |
+
+Most of these backends are already reachable without the switches. An embedded
+connection opens a generic `dir` namespace whose root is resolved through the
+connection's object-store registry, and the direct `lance` and `lance-io`
+dependencies enable the Lance-side providers for S3, GCS, Azure, OSS, COS, TOS,
+GooseFS and Hugging Face as well as Lance's `geo`. What the forwarding changes is
+the SDK's own side of that wiring: the `dir-aws`/`dir-gcp`/`dir-azure`
+implementations, the SDK's `object_store` edges, Azure namespace credential
+vending and the DynamoDB commit handler. The last two are the capabilities a
+default build did not have before, and the `s3+ddb://` commit path with them.
+Selecting a named AWS profile for the DynamoDB client is not part of this and
+needs the upstream fix.
 
 The default set is `remote,aws,gcs,azure,dynamodb`, and it is what the prebuilt
 shared libraries contain. `oss`, `geo` and `fp16kernels` are opt-in for source
@@ -105,27 +116,33 @@ cargo build --release --locked -p lancedb-c --features geo,fp16kernels
 cargo build --release --locked -p lancedb-c --no-default-features --features remote,gcs
 ```
 
-Build the package with `-p lancedb-c`. A plain workspace build also builds
-`examples/external_provider`, which depends on this package and therefore turns
-its default features back on.
+Feature selection applies to the packages Cargo selects. A workspace build also
+selects `examples/external_provider`, which depends on this package with its
+default features, and feature unification then turns those defaults back on even
+when `--no-default-features` was passed. Use `-p lancedb-c` when the narrowing is
+meant to apply to the library.
 
-`--no-default-features` turns off these forwarding declarations only. The
-`lance`, `lance-io` and `lance-namespace` dependencies keep their own defaults,
-and those already register the Lance-side storage providers for S3, GCS, Azure,
-OSS, COS, TOS, GooseFS and Hugging Face. Narrowing the list therefore removes the
-SDK's directory namespaces, credential vending and commit handlers for the
-dropped backends, not the underlying Lance providers.
-
-Without `remote`, the library cannot produce `LANCEDB_HTTP` or `LANCEDB_RETRY`
-because the SDK omits those error variants; both codes keep their values for
+`--no-default-features` turns off these forwarding declarations only; the Lance
+defaults above still apply, so the Lance-side providers and `geo` remain. Without
+`remote` the library cannot produce `LANCEDB_HTTP` or `LANCEDB_RETRY`, because
+the SDK does not define those error variants; both codes keep their values for
 source compatibility.
 
 `geo` is what builds an RTree index natively; the C index-type enumeration has
 no RTree entry yet, so enabling `geo` alone does not expose that index type to C
-callers. `fp16kernels` compiles C kernels for the target: AVX2 and, when the
-compiler supports it, AVX-512 and AMX-FP16 on x86_64, NEON on arm64, and nothing
-on Windows, where the Lance build script warns and skips them. An x86_64 build
-needs Clang 6 or GCC 12 and newer.
+callers.
+
+`fp16kernels` compiles C kernels with the `cc` crate, per target:
+
+- Windows: no kernels. The Lance build script warns and skips them.
+- arm64: NEON only (`-march=armv8.2-a+fp16` on Linux, Apple Silicon tuning on
+  macOS).
+- Non-Windows x86_64: AVX2 always, plus AVX-512 and AMX-FP16 when the compiler
+  supports them. The AVX2 object needs `_Float16`, so the compiler baseline is
+  Clang 6 or GCC 12 and newer. GCC 11 rejects the AVX2 object with `'_Float16'
+  is not supported on this target` and does not know `-mavx512fp16`. Point `CC`
+  at a supported compiler when the default is older, for example
+  `CC=clang cargo build --release --locked -p lancedb-c --features fp16kernels`.
 
 ## Prebuilt Shared-Library Packages
 
