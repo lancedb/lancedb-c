@@ -303,6 +303,43 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[quer
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Arrow conversion keeps stream errors", "[query]") {
+  const std::string table_name = "query_arrow_stream_error_test";
+  LanceDBTable* table = create_table_with_data(table_name, 10, 0);
+  REQUIRE(table != nullptr);
+
+  LanceDBQuery* query = lancedb_query_new(table);
+  REQUIRE(query != nullptr);
+
+  // The cast is valid SQL and the table exists; it fails only while the stream
+  // evaluates the string keys as integers.
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_where_filter(query, "CAST(key AS INT) = 1", &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  LanceDBQueryResult* query_result = lancedb_query_execute(query);
+  REQUIRE(query_result != nullptr);
+
+  FFI_ArrowArray** result_arrays = reinterpret_cast<FFI_ArrowArray**>(uintptr_t{1});
+  FFI_ArrowSchema* result_schema = reinterpret_cast<FFI_ArrowSchema*>(uintptr_t{1});
+  size_t count = 42;
+
+  const LanceDBError result = lancedb_query_result_to_arrow(
+      query_result, &result_arrays, &result_schema, &count, &error_message);
+
+  // The SDK typed the drain error; it is not replaced with LANCEDB_UNKNOWN.
+  REQUIRE(result == LANCEDB_LANCE);
+  REQUIRE(error_message != nullptr);
+  REQUIRE(std::string(error_message).find("Cast error") != std::string::npos);
+  lancedb_free_string(error_message);
+  REQUIRE(result_arrays == nullptr);
+  REQUIRE(result_schema == nullptr);
+  REQUIRE(count == 0);
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Filter on non-existent column", "[query]") {
   const std::string table_name = "query_filter_nonexistent_column_test";
 
@@ -441,22 +478,61 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - invalid arguments", "[query]")
     LanceDBQueryResult* query_result = lancedb_query_execute(query);
     REQUIRE(query_result != nullptr);
 
-    FFI_ArrowArray** result_arrays = nullptr;
-    FFI_ArrowSchema* result_schema = nullptr;
-    size_t count = 0;
+    // Sentinel values prove that every non-NULL output slot is cleared on entry.
+    FFI_ArrowArray** result_arrays = reinterpret_cast<FFI_ArrowArray**>(uintptr_t{1});
+    FFI_ArrowSchema* result_schema = reinterpret_cast<FFI_ArrowSchema*>(uintptr_t{1});
+    size_t count = 42;
+    char* error_message = nullptr;
 
     REQUIRE(lancedb_query_result_to_arrow(
-        nullptr, &result_arrays, &result_schema, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
-    REQUIRE(lancedb_query_result_to_arrow(
-        query_result, nullptr, &result_schema, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
-    REQUIRE(lancedb_query_result_to_arrow(
-        query_result, &result_arrays, nullptr, &count, nullptr) == LANCEDB_INVALID_ARGUMENT);
-    REQUIRE(lancedb_query_result_to_arrow(
-        query_result, &result_arrays, &result_schema, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+        nullptr, &result_arrays, &result_schema, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(result_arrays == nullptr);
+    REQUIRE(result_schema == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
 
+    // A missing output pointer is rejected without consuming the result.
+    error_message = nullptr;
+    REQUIRE(lancedb_query_result_to_arrow(
+        query_result, nullptr, &result_schema, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(result_schema == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
 
-    // The result was not consumed by the rejected conversions
-    lancedb_query_result_free(query_result);
+    error_message = nullptr;
+    REQUIRE(lancedb_query_result_to_arrow(
+        query_result, &result_arrays, nullptr, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(result_arrays == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(result_arrays == nullptr);
+    REQUIRE(result_schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // The rejected calls left the result owned by the caller, so it can still
+    // be converted and then freed by releasing the returned arrays.
+    error_message = nullptr;
+    REQUIRE(lancedb_query_result_to_arrow(
+        query_result, &result_arrays, &result_schema, &count, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count > 0);
+    REQUIRE(result_arrays != nullptr);
+    REQUIRE(result_schema != nullptr);
+    lancedb_free_arrow_arrays(result_arrays, count);
+    lancedb_free_arrow_schema(result_schema);
   }
 
   lancedb_table_free(table);
