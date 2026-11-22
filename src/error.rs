@@ -221,6 +221,30 @@ pub(crate) unsafe fn handle_error(
     error_to_error_code(error)
 }
 
+/// Handle an error raised directly by a Lance blob-file operation.
+///
+/// `BlobFile` methods return `lance::Error` instead of `lancedb::Error`, so the
+/// error is wrapped in the SDK variant the binding already maps. The wrapper keeps
+/// the original message and the storage/not-found message mapping. `InvalidInput`
+/// is the SDK's contract for a rejected argument such as a closed handle or an
+/// invalid range, so it stays a distinct C error code instead of becoming a
+/// generic Lance failure.
+pub(crate) unsafe fn handle_blob_file_error(
+    error: lance::Error,
+    error_message_out: *mut *mut c_char,
+) -> LanceDBError {
+    let is_invalid_input = matches!(&error, lance::Error::InvalidInput { .. });
+    let error = lancedb::error::Error::Lance { source: error };
+    if !error_message_out.is_null() {
+        set_error_message(error_message_out, &error);
+    }
+    if is_invalid_input {
+        LanceDBError::InvalidInput
+    } else {
+        error_to_error_code(&error)
+    }
+}
+
 /// Clear an optional error message slot before an entry point reports a status
 ///
 /// Entry points that return a status instead of a handle clear the slot on

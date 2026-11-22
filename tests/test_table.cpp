@@ -3260,6 +3260,29 @@ static std::shared_ptr<arrow::RecordBatch> create_blob_input_batch(
       schema, static_cast<int64_t>(ids.size()), {id_array, image_array});
 }
 
+// Create a table with an id column and a Blob v2 image column, then add one row
+// per payload. A NULL payload becomes a NULL blob and an empty payload stays an
+// empty blob.
+static LanceDBTable* create_blob_table(
+    LanceDBConnection* db,
+    const std::string& table_name,
+    const std::vector<int64_t>& ids,
+    const std::vector<std::optional<std::string>>& payloads) {
+  auto schema = arrow::schema({
+      arrow::field("id", arrow::int64(), /*nullable=*/false),
+      blob_v2_field("image"),
+  });
+  LanceDBTable* table = create_table_with_schema(db, table_name, schema);
+  auto batch = create_blob_input_batch(ids, payloads);
+  auto reader = create_reader_from_batch(batch);
+  REQUIRE(reader != nullptr);
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(table) == ids.size());
+  return table;
+}
+
 // Return the table's id -> row id pairs so a blob test does not depend on
 // physical row positions or on the order a scan returns rows in.
 static std::vector<std::pair<int64_t, uint64_t>> query_id_row_ids(LanceDBTable* table) {
@@ -3369,6 +3392,50 @@ static std::shared_ptr<arrow::LargeBinaryArray> fetch_blob_range_array(
   auto imported = import_blob_array(array, schema);
   REQUIRE(imported->type()->Equals(arrow::large_binary()));
   return std::static_pointer_cast<arrow::LargeBinaryArray>(imported);
+}
+
+static std::string blob_buffer_to_string(const LanceDBBlobBuffer& buffer) {
+  if (buffer.data == nullptr) {
+    REQUIRE(buffer.len == 0);
+    return {};
+  }
+  REQUIRE(buffer.len > 0);
+  return std::string(reinterpret_cast<const char*>(buffer.data), buffer.len);
+}
+
+static std::string read_blob_file(const LanceDBBlobFile* file) {
+  LanceDBBlobBuffer buffer{};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_blob_file_read(file, &buffer, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  auto value = blob_buffer_to_string(buffer);
+  lancedb_blob_buffer_free(&buffer);
+  REQUIRE(buffer.data == nullptr);
+  REQUIRE(buffer.len == 0);
+  lancedb_blob_buffer_free(&buffer);  // freeing an empty buffer is a no-op
+  return value;
+}
+
+static std::string read_blob_file_range(
+    const LanceDBBlobFile* file, uint64_t offset, uint64_t length) {
+  LanceDBBlobBuffer buffer{};
+  char* error_message = nullptr;
+  REQUIRE(lancedb_blob_file_read_range(file, offset, length, &buffer, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  auto value = blob_buffer_to_string(buffer);
+  lancedb_blob_buffer_free(&buffer);
+  REQUIRE(buffer.data == nullptr);
+  REQUIRE(buffer.len == 0);
+  return value;
+}
+
+static uint64_t blob_file_size(const LanceDBBlobFile* file) {
+  uint64_t size = UINT64_MAX;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_blob_file_size(file, &size, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  return size;
 }
 
 static std::shared_ptr<arrow::Schema> read_table_schema(LanceDBTable* table) {
@@ -4470,19 +4537,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob Array Reading", "[table][bl
       std::string("pay\0load", 8),
   };
   auto make_blob_table = [&](const std::string& table_name) {
-    auto schema = arrow::schema({
-        arrow::field("id", arrow::int64(), /*nullable=*/false),
-        blob_v2_field("image"),
-    });
-    LanceDBTable* table = create_table_with_schema(db, table_name, schema);
-    auto batch = create_blob_input_batch(ids, payloads);
-    auto reader = create_reader_from_batch(batch);
-    REQUIRE(reader != nullptr);
-    char* error_message = nullptr;
-    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-    REQUIRE(lancedb_table_count_rows(table) == ids.size());
-    return table;
+    return create_blob_table(db, table_name, ids, payloads);
   };
 
   SECTION("blob_columns returns declaration order and owns its names") {
@@ -4736,6 +4791,424 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob Array Reading", "[table][bl
     lancedb_free_string(error_message);
     error_message = nullptr;
 
+    lancedb_table_free(table);
+  }
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob File Reading", "[table][blob][blob_file]") {
+  const std::vector<int64_t> ids = {1, 2, 3, 4};
+  const std::vector<std::optional<std::string>> payloads = {
+      std::string("alpha"),
+      std::nullopt,
+      std::string(),
+      std::string("pay\0load", 8),
+  };
+
+  auto fetch = [&](LanceDBTable* source, const std::string& column,
+                   const std::vector<uint64_t>& row_ids) {
+    LanceDBBlobFile** files = nullptr;
+    size_t count = 0;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_fetch_blob_files(
+        source, column.c_str(), row_ids.empty() ? nullptr : row_ids.data(),
+        row_ids.size(), &files, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return std::make_pair(files, count);
+  };
+
+  SECTION("fetch preserves optional handles, order and duplicates") {
+    LanceDBTable* table = create_blob_table(db, "blob_files_fetch", ids, payloads);
+    const auto pairs = query_id_row_ids(table);
+    const auto row_1 = row_id_for(pairs, 1);
+    const auto row_2 = row_id_for(pairs, 2);
+    const auto row_3 = row_id_for(pairs, 3);
+    const auto row_4 = row_id_for(pairs, 4);
+
+    auto [files, count] = fetch(table, "image", {row_4, row_1, row_2, row_3, row_1});
+    REQUIRE(count == 5);
+    REQUIRE(files != nullptr);
+    REQUIRE(files[0] != nullptr);
+    REQUIRE(files[1] != nullptr);
+    REQUIRE(files[2] == nullptr);
+    REQUIRE(files[3] != nullptr);
+    REQUIRE(files[4] != nullptr);
+    // Duplicate row ids produce independent handles.
+    REQUIRE(files[1] != files[4]);
+    REQUIRE(blob_file_size(files[0]) == 8);
+    REQUIRE(blob_file_size(files[1]) == 5);
+    REQUIRE(blob_file_size(files[3]) == 0);
+    REQUIRE(blob_file_size(files[4]) == 5);
+
+    LanceDBBlobFilePosition position{false, 0};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_blob_file_position(files[0], &position, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(position.has_position);
+
+    lancedb_free_blob_files(files, count);
+
+    auto [empty_files, empty_count] = fetch(table, "image", {});
+    REQUIRE(empty_files == nullptr);
+    REQUIRE(empty_count == 0);
+
+    // The SDK validates the column even when the request list is empty.
+    LanceDBBlobFile** missing_files = reinterpret_cast<LanceDBBlobFile**>(uintptr_t{1});
+    size_t missing_count = 99;
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "missing", nullptr, 0, &missing_files, &missing_count, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(missing_files == nullptr);
+    REQUIRE(missing_count == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no column named 'missing'") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("read, seek and range follow the SDK cursor") {
+    LanceDBTable* table = create_blob_table(db, "blob_files_cursor", ids, payloads);
+    const auto pairs = query_id_row_ids(table);
+    const auto row_1 = row_id_for(pairs, 1);
+    const auto row_3 = row_id_for(pairs, 3);
+
+    auto [files, count] = fetch(table, "image", {row_1, row_3, row_1});
+    REQUIRE(count == 3);
+    REQUIRE(blob_file_size(files[0]) == 5);
+    REQUIRE(blob_file_size(files[1]) == 0);
+    REQUIRE(blob_file_size(files[2]) == 5);
+
+    char* error_message = nullptr;
+    REQUIRE(read_blob_file(files[0]) == "alpha");
+    REQUIRE(read_blob_file(files[0]).empty());  // the first read moved the cursor to the end
+    REQUIRE(read_blob_file(files[2]) == "alpha");  // duplicate handle keeps its own cursor
+    REQUIRE(read_blob_file(files[1]).empty());   // empty blob reads as empty
+
+    REQUIRE(lancedb_blob_file_seek(files[0], 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(files[0]) == "lpha");
+
+    // The SDK accepts any cursor, including one past the end.
+    REQUIRE(lancedb_blob_file_seek(files[0], 5, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(files[0]).empty());
+    REQUIRE(lancedb_blob_file_seek(files[0], 99, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(files[0]).empty());
+
+    REQUIRE(lancedb_blob_file_seek(files[0], 0, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file_range(files[0], 0, 2) == "al");
+    REQUIRE(read_blob_file_range(files[0], 2, 3) == "pha");
+    REQUIRE(read_blob_file_range(files[0], 5, 0).empty());
+    REQUIRE(read_blob_file_range(files[0], 4, 1) == "a");
+    REQUIRE(read_blob_file(files[0]) == "alpha");  // range reads do not move the cursor
+    REQUIRE(read_blob_file_range(files[1], 0, 0).empty());
+
+    LanceDBBlobBuffer buffer{};
+    buffer.data = reinterpret_cast<const uint8_t*>(uintptr_t{1});
+    buffer.len = 7;
+    REQUIRE(lancedb_blob_file_read_range(files[0], 4, 2, &buffer, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("exceeds blob size") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_read_range(files[0], UINT64_MAX, 2, &buffer, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("overflowed") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // A zero-length range still has to end inside the blob.
+    REQUIRE(lancedb_blob_file_read_range(files[0], UINT64_MAX, 0, &buffer, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("exceeds blob size") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_read_range(files[1], 1, 0, &buffer, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("exceeds blob size") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    lancedb_free_blob_files(files, count);
+    lancedb_table_free(table);
+  }
+
+  SECTION("close is idempotent and terminal") {
+    LanceDBTable* table = create_blob_table(db, "blob_files_close", ids, payloads);
+    const auto pairs = query_id_row_ids(table);
+    const auto row_1 = row_id_for(pairs, 1);
+
+    auto [files, count] = fetch(table, "image", {row_1});
+    REQUIRE(count == 1);
+    REQUIRE(files[0] != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_blob_file_close(files[0], &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_blob_file_close(files[0], &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBBlobBuffer buffer{};
+    REQUIRE(lancedb_blob_file_read(files[0], &buffer, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("closed") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_read_range(files[0], 0, 1, &buffer, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("closed") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_seek(files[0], 0, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("closed") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // Size and position stay available after close.
+    REQUIRE(blob_file_size(files[0]) == 5);
+    LanceDBBlobFilePosition position{false, 0};
+    REQUIRE(lancedb_blob_file_position(files[0], &position, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(position.has_position);
+
+    lancedb_free_blob_files(files, count);
+    lancedb_table_free(table);
+  }
+
+  SECTION("handles and buffers outlive the table") {
+    LanceDBTable* table = create_blob_table(db, "blob_files_lifetime", ids, payloads);
+    const auto pairs = query_id_row_ids(table);
+    const auto row_1 = row_id_for(pairs, 1);
+    const auto row_4 = row_id_for(pairs, 4);
+
+    auto [files, count] = fetch(table, "image", {row_4, row_1});
+    REQUIRE(count == 2);
+
+    lancedb_table_free(table);
+    table = nullptr;
+
+    char* error_message = nullptr;
+    LanceDBBlobBuffer detached{};
+    REQUIRE(lancedb_blob_file_read(files[0], &detached, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The buffer owns its bytes after the handle that produced them is gone.
+    lancedb_blob_file_free(files[0]);
+    files[0] = nullptr;
+    REQUIRE(blob_buffer_to_string(detached) == std::string("pay\0load", 8));
+    lancedb_blob_buffer_free(&detached);
+
+    REQUIRE(read_blob_file(files[1]) == "alpha");
+    REQUIRE(blob_file_size(files[1]) == 5);
+    lancedb_free_blob_files(files, count);
+  }
+
+  SECTION("handles keep the fetched snapshot") {
+    LanceDBTable* table = create_blob_table(db, "blob_files_snapshot", ids, payloads);
+    auto pairs = query_id_row_ids(table);
+    const auto row_1 = row_id_for(pairs, 1);
+
+    auto [files, count] = fetch(table, "image", {row_1});
+
+    auto batch = create_blob_input_batch({5}, {std::string("newer")});
+    auto reader = create_reader_from_batch(batch);
+    REQUIRE(reader != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The open handle reads the value it was fetched from, not a later version.
+    REQUIRE(read_blob_file(files[0]) == "alpha");
+
+    pairs = query_id_row_ids(table);
+    const auto row_5 = row_id_for(pairs, 5);
+    auto [new_files, new_count] = fetch(table, "image", {row_5});
+    REQUIRE(new_count == 1);
+    REQUIRE(read_blob_file(new_files[0]) == "newer");
+
+    lancedb_free_blob_files(new_files, new_count);
+    lancedb_free_blob_files(files, count);
+    lancedb_table_free(table);
+  }
+
+  SECTION("errors preserve diagnostics and reject invalid arguments") {
+    LanceDBTable* table = create_blob_table(db, "blob_files_errors", ids, payloads);
+    const auto pairs = query_id_row_ids(table);
+    const auto row_1 = row_id_for(pairs, 1);
+
+    LanceDBBlobFile** files = reinterpret_cast<LanceDBBlobFile**>(uintptr_t{1});
+    size_t count = 99;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "missing", &row_1, 1, &files, &count, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(files == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no column named 'missing'") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "id", &row_1, 1, &files, &count, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(files == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("not a blob column") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const uint64_t missing_row = UINT64_MAX;
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "image", &missing_row, 1, &files, &count, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(files == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("do not exist") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "image", nullptr, 1, &files, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(files == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, nullptr, &row_1, 1, &files, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(files == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        nullptr, "image", &row_1, 1, &files, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(files == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "image", &row_1, 1, nullptr, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(count == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "image", &row_1, 1, &files, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(files == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    auto [valid_files, valid_count] = fetch(table, "image", {row_1});
+    uint64_t size = 123;
+    REQUIRE(lancedb_blob_file_size(nullptr, &size, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(size == 123);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_size(valid_files[0], nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    LanceDBBlobFilePosition position{true, 7};
+    REQUIRE(lancedb_blob_file_position(nullptr, &position, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(position.has_position);
+    REQUIRE(position.position == 7);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_position(valid_files[0], nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_seek(nullptr, 0, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    LanceDBBlobBuffer buffer{};
+    REQUIRE(lancedb_blob_file_read(nullptr, &buffer, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_read(valid_files[0], nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_read_range(nullptr, 0, 0, &buffer, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_read_range(valid_files[0], 0, 1, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_blob_file_close(nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_blob_file_free(nullptr);
+    lancedb_blob_buffer_free(nullptr);
+    lancedb_free_blob_files(nullptr, 0);
+    lancedb_free_blob_files(valid_files, valid_count);
     lancedb_table_free(table);
   }
 }

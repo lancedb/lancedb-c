@@ -169,6 +169,11 @@ typedef struct LanceDBTakeQuery LanceDBTakeQuery;
 typedef struct LanceDBTableDelta LanceDBTableDelta;
 
 /**
+ * Opaque seekable handle to one lazy blob file
+ */
+typedef struct LanceDBBlobFile LanceDBBlobFile;
+
+/**
  * Opaque handle to a LanceDB Session
  */
 typedef struct LanceDBSession LanceDBSession;
@@ -1857,6 +1862,32 @@ typedef struct {
 } LanceDBBlobRangeRequest;
 
 /**
+ * Bytes of one blob read owned by LanceDB
+ *
+ * A read that returned no bytes leaves both fields zeroed; a successful read of
+ * non-empty bytes sets `data` to the first byte and `len` to the byte count.
+ * `data` stays valid until lancedb_blob_buffer_free() is called, independently
+ * of the handle and of the table. The caller must not write to or free it, and
+ * keeps both fields unchanged until then.
+ */
+typedef struct {
+    const uint8_t* data;  /* Start of the blob bytes, NULL when the read returned no bytes */
+    size_t len;           /* Number of bytes in the read */
+} LanceDBBlobBuffer;
+
+/**
+ * Physical location of one blob inside its data file
+ *
+ * `has_position` is non-zero for embedded handles. Remote handles do not expose
+ * their storage layout and report it as zero with `position` zeroed. This is not
+ * the read cursor, which is moved by seek, read and read_range.
+ */
+typedef struct {
+    bool has_position;  /* Non-zero when the handle exposes a physical byte offset */
+    uint64_t position;  /* Physical byte offset when has_position is non-zero */
+} LanceDBBlobFilePosition;
+
+/**
  * Materialize blob bytes for borrowed row ids
  *
  * @param table - pointer to LanceDBTable
@@ -1922,6 +1953,201 @@ LanceDBError lancedb_table_fetch_blob_ranges(
     size_t num_requests,
     FFI_ArrowArray** array_out,
     FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
+ * Open lazy blob file handles for borrowed row ids
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param row_ids - borrowed row id array; NULL is allowed only when num_row_ids is 0
+ * @param num_row_ids - number of row ids
+ * @param files_out - pointer to receive the array of optional handles
+ * @param count_out - pointer to receive the number of array entries
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The array follows row_ids in length, order and duplicates. A NULL blob leaves
+ * the matching entry NULL; a valid empty blob yields a non-NULL handle whose
+ * size is zero. Bytes are not read until a handle is read. With a valid blob
+ * column, an empty input returns *files_out NULL and *count_out zero without
+ * opening handles. One missing or deleted row id rejects the whole request
+ * without partial handles. Handles keep their own cursor, buffers and snapshot;
+ * they do not depend on the table handle and remain usable after
+ * lancedb_table_free().
+ * On entry, both outputs and the error message are cleared. On success the
+ * caller frees the handles and array with lancedb_free_blob_files(). On failure
+ * both outputs stay clear. Blob availability and errors on remote tables are
+ * returned unchanged from the SDK. If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blob_files(
+    const LanceDBTable* table,
+    const char* column,
+    const uint64_t* row_ids,
+    size_t num_row_ids,
+    LanceDBBlobFile*** files_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free handles and the array returned by lancedb_table_fetch_blob_files
+ *
+ * @param files - array of optional handles returned by lancedb_table_fetch_blob_files
+ * @param count - number of entries in the array
+ *
+ * Frees every non-NULL handle and the array. Passing NULL is a no-op. A handle
+ * freed earlier with lancedb_blob_file_free() must have been set to NULL in the
+ * array before this call.
+ */
+void lancedb_free_blob_files(LanceDBBlobFile** files, size_t count);
+
+/**
+ * Free one blob file handle
+ *
+ * @param file - handle returned by lancedb_table_fetch_blob_files, or NULL
+ *
+ * The handle must not be used after this call. Freeing NULL is a no-op.
+ */
+void lancedb_blob_file_free(LanceDBBlobFile* file);
+
+/**
+ * Return the blob length in bytes
+ *
+ * @param file - blob file handle
+ * @param size_out - pointer to receive the length in bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The size stays available after the handle is closed. Zero is a valid size for
+ * an empty blob. On entry, the error message is cleared. On failure size_out is
+ * left unchanged. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_size(
+    const LanceDBBlobFile* file,
+    uint64_t* size_out,
+    char** error_message
+);
+
+/**
+ * Return the physical byte offset of the blob inside its data file
+ *
+ * @param file - blob file handle
+ * @param position_out - pointer to receive the position
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Embedded handles set has_position; remote handles do not expose their storage
+ * layout and report zero with position zeroed. This is not the read cursor, which
+ * is moved by seek, read and read_range. On entry, the error message is cleared.
+ * On failure position_out is left unchanged. If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_position(
+    const LanceDBBlobFile* file,
+    LanceDBBlobFilePosition* position_out,
+    char** error_message
+);
+
+/**
+ * Move the read cursor to a byte offset inside the blob
+ *
+ * @param file - blob file handle
+ * @param position - new byte offset from the beginning of the blob
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The SDK accepts an offset past the blob end; a later read then returns no
+ * bytes. Seeking a closed handle fails with LANCEDB_INVALID_INPUT. On entry, the
+ * error message is cleared. If error_message is provided and an error occurs,
+ * the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_seek(
+    const LanceDBBlobFile* file,
+    uint64_t position,
+    char** error_message
+);
+
+/**
+ * Read from the current cursor to the end of the blob
+ *
+ * @param file - blob file handle
+ * @param buffer_out - pointer to receive the owned bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * A successful read advances the cursor to the blob size. Reading at or past the
+ * end succeeds with an empty buffer. Reading a closed handle fails with
+ * LANCEDB_INVALID_INPUT. On entry, the buffer and error message are cleared. On
+ * success the caller owns the bytes and frees them with
+ * lancedb_blob_buffer_free(); they stay valid after the handle and table are
+ * freed. On failure the buffer stays clear. If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_read(
+    const LanceDBBlobFile* file,
+    LanceDBBlobBuffer* buffer_out,
+    char** error_message
+);
+
+/**
+ * Read a blob-local byte range without moving the cursor
+ *
+ * @param file - blob file handle
+ * @param offset - byte offset from the beginning of the blob value
+ * @param length - number of bytes to read
+ * @param buffer_out - pointer to receive the owned bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Empty ranges are allowed at or before the blob size. An end past the blob
+ * size, or an offset and length whose sum overflows uint64_t, is rejected.
+ * Reading a closed handle fails with LANCEDB_INVALID_INPUT. On entry, the buffer
+ * and error message are cleared. On success the caller owns the bytes and frees
+ * them with lancedb_blob_buffer_free(); they stay valid after the handle and
+ * table are freed. On failure the buffer stays clear. If error_message is
+ * provided and an error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_read_range(
+    const LanceDBBlobFile* file,
+    uint64_t offset,
+    uint64_t length,
+    LanceDBBlobBuffer* buffer_out,
+    char** error_message
+);
+
+/**
+ * Free the bytes of one blob read and reset the buffer
+ *
+ * @param buffer - buffer returned by lancedb_blob_file_read or
+ *                 lancedb_blob_file_read_range, or NULL
+ *
+ * Freeing an already freed or empty buffer is a no-op. The caller keeps the
+ * struct until the call; both fields are zeroed.
+ */
+void lancedb_blob_buffer_free(LanceDBBlobBuffer* buffer);
+
+/**
+ * Close the blob file and release its resources
+ *
+ * @param file - blob file handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Closing is idempotent. After a close, reads, range reads and seeks fail with
+ * LANCEDB_INVALID_INPUT, while size and position remain available. Reads already
+ * in flight may still complete. On entry, the error message is cleared. If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_close(
+    const LanceDBBlobFile* file,
     char** error_message
 );
 
