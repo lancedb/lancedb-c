@@ -11,7 +11,7 @@ use std::os::raw::c_char;
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
-use arrow_array::{Array, RecordBatch, StructArray};
+use arrow_array::{Array, RecordBatch};
 use arrow_schema::ffi::FFI_ArrowSchema;
 use lancedb::datafusion::common::DFSchema;
 use lancedb::datafusion::logical_expr::execution_props::ExecutionProps;
@@ -20,43 +20,9 @@ use lancedb::datafusion::logical_expr::physical_planning_context::PhysicalPlanni
 use lancedb::datafusion::logical_expr::{lit, Cast, ColumnarValue, Expr};
 use lancedb::datafusion::physical_expr::create_physical_expr;
 
+use crate::arrow_ffi::import_borrowed_struct_array;
 use crate::error::{set_custom_error_message, set_invalid_argument_message, LanceDBError};
 use crate::expr::LanceDBExpr;
-
-#[repr(C)]
-struct ArrowArrayRef {
-    length: i64,
-    null_count: i64,
-    offset: i64,
-    n_buffers: i64,
-    n_children: i64,
-    buffers: *mut *const std::ffi::c_void,
-    children: *mut *mut ArrowArrayRef,
-    dictionary: *mut ArrowArrayRef,
-    release: Option<unsafe extern "C" fn(*mut ArrowArrayRef)>,
-    private_data: *mut std::ffi::c_void,
-}
-
-// validate that ArrowArrayRef has the same layout as FFI_ArrowArray
-const _: () = assert!(
-    std::mem::size_of::<ArrowArrayRef>() == std::mem::size_of::<arrow_array::ffi::FFI_ArrowArray>()
-);
-const _: () = assert!(
-    std::mem::align_of::<ArrowArrayRef>()
-        == std::mem::align_of::<arrow_array::ffi::FFI_ArrowArray>()
-);
-
-unsafe fn non_owning_import(
-    array_ptr: *const arrow_array::ffi::FFI_ArrowArray,
-    schema_ptr: *const FFI_ArrowSchema,
-) -> Result<RecordBatch, arrow_schema::ArrowError> {
-    let mut raw: ArrowArrayRef = std::ptr::read(array_ptr as *const ArrowArrayRef);
-    raw.release = None;
-    let ffi_copy: arrow_array::ffi::FFI_ArrowArray = std::mem::transmute(raw);
-    let array_data = arrow_array::ffi::from_ffi(ffi_copy, &*schema_ptr)?;
-    let struct_array = StructArray::from(array_data);
-    Ok(RecordBatch::from(&struct_array))
-}
 
 unsafe fn build_json_udf_expr(
     udf: Arc<lancedb::datafusion::logical_expr::ScalarUDF>,
@@ -337,7 +303,7 @@ pub unsafe extern "C" fn lancedb_json_matches(
             set_custom_error_message(error_message, "Null array pointer in batch");
             return LanceDBError::InvalidArgument;
         }
-        let raw = &*(arr_ptr as *const ArrowArrayRef);
+        let raw = &*(arr_ptr);
         let batch_len = match usize::try_from(raw.length) {
             Ok(l) => l,
             Err(_) => {
@@ -368,8 +334,8 @@ pub unsafe extern "C" fn lancedb_json_matches(
 
     let mut offset: usize = 0;
     for i in 0..batch_count {
-        let batch = match non_owning_import(*arrays.add(i), schema) {
-            Ok(b) => b,
+        let batch = match import_borrowed_struct_array(*arrays.add(i), schema) {
+            Ok(struct_array) => RecordBatch::from(&struct_array),
             Err(e) => {
                 libc::free(out as *mut libc::c_void);
                 set_custom_error_message(error_message, &format!("{e}"));

@@ -3,6 +3,7 @@
  * SPDX-FileCopyrightText: Copyright The LanceDB Authors
  */
 
+#include <arrow/util/bit_util.h>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -3438,6 +3439,218 @@ static uint64_t blob_file_size(const LanceDBBlobFile* file) {
   return size;
 }
 
+// One synthetic row of the SDK SQL blob_descriptor struct. Optional fields
+// become Arrow NULL when unset, so the same builder can exercise required-field
+// validation as well as valid rows.
+struct BlobDescriptorRow {
+  std::optional<uint8_t> kind = uint8_t{0};
+  std::optional<uint64_t> position = uint64_t{0};
+  std::optional<uint64_t> size = uint64_t{0};
+  std::optional<uint32_t> blob_id = uint32_t{0};
+  std::optional<std::string> blob_uri = std::string();
+  std::optional<std::string> source_uri;
+  std::optional<uint64_t> source_version;
+  std::optional<uint64_t> committed_at_micros;
+  std::optional<std::string> source_branch;  // unset means the main branch
+  std::optional<std::string> source_column = std::string("image");
+  std::optional<uint64_t> row_reference;
+  std::optional<bool> row_is_address = false;
+  bool top_level_null = false;
+  bool source_null = false;
+};
+
+template <typename Builder, typename Value>
+static void append_descriptor_value(Builder& builder, const std::optional<Value>& value) {
+  if (value.has_value()) {
+    REQUIRE(builder.Append(*value).ok());
+  } else {
+    REQUIRE(builder.AppendNull().ok());
+  }
+}
+
+static std::shared_ptr<arrow::Array> finish_descriptor_array(arrow::ArrayBuilder* builder) {
+  std::shared_ptr<arrow::Array> array;
+  REQUIRE(builder->Finish(&array).ok());
+  return array;
+}
+
+static std::shared_ptr<arrow::Buffer> make_descriptor_validity(
+    const std::vector<bool>& valid, int64_t* null_count) {
+  auto bitmap = arrow::AllocateBitmap(static_cast<int64_t>(valid.size())).ValueOrDie();
+  *null_count = 0;
+  for (size_t index = 0; index < valid.size(); ++index) {
+    arrow::bit_util::SetBitTo(
+        bitmap->mutable_data(), static_cast<int64_t>(index), valid[index]);
+    if (!valid[index]) {
+      ++*null_count;
+    }
+  }
+  return bitmap;
+}
+
+// Build the exact struct shape produced by SQL blob_descriptor. The column is a
+// normal Arrow struct, not a Lance blob, so exporting it through the C Data
+// interface exercises the same path as a consumer that received it elsewhere.
+static std::shared_ptr<arrow::StructArray> make_descriptor_array(
+    const std::vector<BlobDescriptorRow>& rows) {
+  REQUIRE(!rows.empty());
+
+  arrow::UInt8Builder kind;
+  arrow::UInt64Builder position;
+  arrow::UInt64Builder size;
+  arrow::UInt32Builder blob_id;
+  arrow::StringBuilder blob_uri;
+  arrow::StringBuilder source_uri;
+  arrow::UInt64Builder source_version;
+  arrow::StringBuilder source_branch;
+  arrow::StringBuilder source_column;
+  arrow::UInt64Builder row_reference;
+  arrow::BooleanBuilder row_is_address;
+  arrow::UInt64Builder committed_at_micros;
+
+  std::vector<bool> source_valid;
+  std::vector<bool> top_level_valid;
+  for (const auto& row : rows) {
+    append_descriptor_value(kind, row.kind);
+    append_descriptor_value(position, row.position);
+    append_descriptor_value(size, row.size);
+    append_descriptor_value(blob_id, row.blob_id);
+    append_descriptor_value(blob_uri, row.blob_uri);
+    append_descriptor_value(source_uri, row.source_uri);
+    append_descriptor_value(source_version, row.source_version);
+    append_descriptor_value(source_branch, row.source_branch);
+    append_descriptor_value(source_column, row.source_column);
+    append_descriptor_value(row_reference, row.row_reference);
+    append_descriptor_value(row_is_address, row.row_is_address);
+    append_descriptor_value(committed_at_micros, row.committed_at_micros);
+    source_valid.push_back(!row.source_null);
+    top_level_valid.push_back(!row.top_level_null);
+  }
+
+  auto source_fields = arrow::FieldVector{
+      arrow::field("uri", arrow::utf8(), /*nullable=*/true),
+      arrow::field("version", arrow::uint64(), /*nullable=*/true),
+      arrow::field("branch", arrow::utf8(), /*nullable=*/true),
+      arrow::field("column", arrow::utf8(), /*nullable=*/true),
+      arrow::field("row_reference", arrow::uint64(), /*nullable=*/true),
+      arrow::field("row_is_address", arrow::boolean(), /*nullable=*/true),
+      arrow::field("committed_at_micros", arrow::uint64(), /*nullable=*/true),
+  };
+  int64_t source_null_count = 0;
+  auto source_validity = make_descriptor_validity(source_valid, &source_null_count);
+  auto source = arrow::StructArray::Make(
+      {finish_descriptor_array(&source_uri), finish_descriptor_array(&source_version),
+       finish_descriptor_array(&source_branch), finish_descriptor_array(&source_column),
+       finish_descriptor_array(&row_reference), finish_descriptor_array(&row_is_address),
+       finish_descriptor_array(&committed_at_micros)},
+      source_fields, source_validity, source_null_count)
+                    .ValueOrDie();
+
+  auto top_level_fields = arrow::FieldVector{
+      arrow::field("kind", arrow::uint8(), /*nullable=*/true),
+      arrow::field("position", arrow::uint64(), /*nullable=*/true),
+      arrow::field("size", arrow::uint64(), /*nullable=*/true),
+      arrow::field("blob_id", arrow::uint32(), /*nullable=*/true),
+      arrow::field("blob_uri", arrow::utf8(), /*nullable=*/true),
+      arrow::field("source", source->type(), /*nullable=*/true),
+  };
+  int64_t top_level_null_count = 0;
+  auto top_level_validity =
+      make_descriptor_validity(top_level_valid, &top_level_null_count);
+  return arrow::StructArray::Make(
+      {finish_descriptor_array(&kind), finish_descriptor_array(&position),
+       finish_descriptor_array(&size), finish_descriptor_array(&blob_id),
+       finish_descriptor_array(&blob_uri), source},
+      top_level_fields, top_level_validity, top_level_null_count)
+      .ValueOrDie();
+}
+
+// Drop the nested source field from a valid descriptor array so the binding
+// has to reject an incomplete schema before reading any row.
+static std::shared_ptr<arrow::StructArray> make_descriptor_without_source(
+    const std::shared_ptr<arrow::StructArray>& descriptor) {
+  auto struct_type = std::static_pointer_cast<arrow::StructType>(descriptor->type());
+  std::vector<std::shared_ptr<arrow::Array>> children;
+  arrow::FieldVector fields;
+  for (int index = 0; index < 5; ++index) {
+    children.push_back(descriptor->field(index));
+    fields.push_back(struct_type->field(index));
+  }
+  return arrow::StructArray::Make(children, fields).ValueOrDie();
+}
+
+// Export an Arrow array and keep the C Data structures alive until release().
+// The owner releases them explicitly after the binding returns, like any other
+// borrowed Arrow input.
+class ExportedArrowArray {
+ public:
+  explicit ExportedArrowArray(std::shared_ptr<arrow::Array> array)
+      : array_(std::move(array)) {
+    REQUIRE(arrow::ExportArray(*array_, &c_array_, &c_schema_).ok());
+  }
+
+  ~ExportedArrowArray() { release(); }
+
+  ExportedArrowArray(const ExportedArrowArray&) = delete;
+  ExportedArrowArray& operator=(const ExportedArrowArray&) = delete;
+
+  void release() {
+    if (c_array_.release != nullptr) {
+      c_array_.release(&c_array_);
+    }
+    if (c_schema_.release != nullptr) {
+      c_schema_.release(&c_schema_);
+    }
+  }
+
+  const FFI_ArrowArray* ffi_array() const {
+    return reinterpret_cast<const FFI_ArrowArray*>(&c_array_);
+  }
+
+  const FFI_ArrowSchema* ffi_schema() const {
+    return reinterpret_cast<const FFI_ArrowSchema*>(&c_schema_);
+  }
+
+ private:
+  std::shared_ptr<arrow::Array> array_;
+  struct ArrowArray c_array_{};
+  struct ArrowSchema c_schema_{};
+};
+
+static LanceDBError open_blob_descriptor(
+    const LanceDBTable* table,
+    const ExportedArrowArray& descriptor,
+    int64_t row_index,
+    LanceDBBlobFile** file_out,
+    char** error_message) {
+  return lancedb_table_open_blob_file(
+      table, descriptor.ffi_array(), descriptor.ffi_schema(), row_index, file_out,
+      error_message);
+}
+
+static uint64_t table_version_micros(LanceDBTable* table, uint64_t version) {
+  LanceDBVersion* versions = nullptr;
+  size_t count = 0;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_list_versions(
+      table, &versions, nullptr, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  uint64_t result = 0;
+  bool found = false;
+  for (size_t index = 0; index < count; ++index) {
+    if (versions[index].version == version) {
+      result = static_cast<uint64_t>(versions[index].timestamp_seconds) * 1000000ULL +
+               static_cast<uint64_t>(versions[index].timestamp_nanos) / 1000ULL;
+      found = true;
+      break;
+    }
+  }
+  lancedb_free_versions(versions, count);
+  REQUIRE(found);
+  return result;
+}
+
 static std::shared_ptr<arrow::Schema> read_table_schema(LanceDBTable* table) {
   FFI_ArrowSchema* schema_out = nullptr;
   char* error_message = nullptr;
@@ -5214,4 +5427,317 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob File Reading", "[table][blo
     lancedb_free_blob_files(valid_files, valid_count);
     lancedb_table_free(table);
   }
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob Descriptor Open", "[table][blob][blob_file]") {
+  const std::vector<int64_t> first_ids = {1, 2, 3};
+  const std::vector<std::optional<std::string>> first_payloads = {
+      std::string("alpha"), std::string(), std::nullopt};
+  const std::vector<int64_t> second_ids = {4, 5};
+  const std::vector<std::optional<std::string>> second_payloads = {
+      std::string("beta"), std::string("gamma")};
+  const std::vector<int64_t> all_ids = {1, 2, 3, 4, 5};
+  const std::string table_name = "blob_descriptor_open";
+  LanceDBTable* table = create_blob_table(db, table_name, first_ids, first_payloads);
+
+  // A second add creates a separate fragment. Both fragments belong to the
+  // same manifest, so descriptors can distinguish values from each of them.
+  auto second_batch = create_blob_input_batch(second_ids, second_payloads);
+  auto second_reader = create_reader_from_batch(second_batch);
+  char* setup_error = nullptr;
+  REQUIRE(lancedb_table_add(table, second_reader, &setup_error) == LANCEDB_SUCCESS);
+  REQUIRE(setup_error == nullptr);
+
+  const auto pairs = query_id_row_ids(table);
+  const uint64_t row_1 = row_id_for(pairs, 1);
+  const uint64_t row_2 = row_id_for(pairs, 2);
+  const uint64_t row_3 = row_id_for(pairs, 3);
+  const uint64_t row_4 = row_id_for(pairs, 4);
+  REQUIRE(row_1 != row_4);
+  const uint64_t version = lancedb_table_version(table);
+  const uint64_t committed_at = table_version_micros(table, version);
+  const std::string source_uri = uri + "/" + table_name + ".lance";
+
+  auto make_row = [&](uint64_t row_reference, uint64_t size) {
+    BlobDescriptorRow row;
+    row.size = size;
+    row.source_uri = source_uri;
+    row.source_version = version;
+    row.committed_at_micros = committed_at;
+    row.row_reference = row_reference;
+    return row;
+  };
+
+  SECTION("borrows the descriptor and outlives the table and input") {
+    auto row_1_descriptor = make_row(row_1, 5);
+    auto row_2_descriptor = make_row(row_2, 0);
+    auto null_descriptor = make_row(row_3, 0);
+    null_descriptor.top_level_null = true;
+    ExportedArrowArray descriptor(
+        make_descriptor_array({row_1_descriptor, row_2_descriptor, null_descriptor}));
+
+    char* error_message = nullptr;
+    LanceDBBlobFile* file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(open_blob_descriptor(table, descriptor, 0, &file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(file != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == all_ids.size());
+
+    LanceDBBlobFile* empty_file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(open_blob_descriptor(table, descriptor, 1, &empty_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(empty_file != nullptr);
+    REQUIRE(blob_file_size(empty_file) == 0);
+    REQUIRE(read_blob_file(empty_file).empty());
+    lancedb_blob_file_free(empty_file);
+
+    // A top-level NULL descriptor is a SQL NULL, not a zero-length blob.
+    LanceDBBlobFile* null_file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(open_blob_descriptor(table, descriptor, 2, &null_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(null_file == nullptr);
+
+    // The descriptor array and schema are borrowed, not consumed. Releasing
+    // them here is the caller's normal Arrow cleanup, and the handle still
+    // owns its SDK BlobFile after the table is gone.
+    descriptor.release();
+    lancedb_table_free(table);
+    table = nullptr;
+
+    REQUIRE(blob_file_size(file) == 5);
+    REQUIRE(read_blob_file(file) == "alpha");
+    REQUIRE(lancedb_blob_file_close(file, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(blob_file_size(file) == 5);
+    lancedb_blob_file_free(file);
+  }
+
+  SECTION("resolves source fragments and pinned commits") {
+    auto old_first_fragment = make_row(row_1, 5);
+    auto old_empty = make_row(row_2, 0);
+    auto old_second_fragment = make_row(row_4, 4);
+    ExportedArrowArray old_descriptor(make_descriptor_array(
+        {old_first_fragment, old_empty, old_second_fragment}));
+
+    char* error_message = nullptr;
+
+    // The two old values live in different fragments of the same manifest.
+    LanceDBBlobFile* old_first_file = nullptr;
+    REQUIRE(open_blob_descriptor(table, old_descriptor, 0, &old_first_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(old_first_file) == "alpha");
+    lancedb_blob_file_free(old_first_file);
+
+    LanceDBBlobFile* old_second_file = nullptr;
+    REQUIRE(open_blob_descriptor(table, old_descriptor, 2, &old_second_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(old_second_file) == "beta");
+    lancedb_blob_file_free(old_second_file);
+
+    LanceDBBlobFile* old_empty_file = nullptr;
+    REQUIRE(open_blob_descriptor(table, old_descriptor, 1, &old_empty_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(old_empty_file != nullptr);
+    REQUIRE(blob_file_size(old_empty_file) == 0);
+    lancedb_blob_file_free(old_empty_file);
+
+    REQUIRE(lancedb_table_delete(table, "id >= 1", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const std::vector<std::optional<std::string>> replacements = {
+        std::string("new-A"), std::string("new-B"), std::string("new-C"),
+        std::string("new-D"), std::string("new-E")};
+    auto new_batch = create_blob_input_batch(all_ids, replacements);
+    auto new_reader = create_reader_from_batch(new_batch);
+    REQUIRE(lancedb_table_add(table, new_reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const uint64_t new_version = lancedb_table_version(table);
+    REQUIRE(new_version > version);
+    const uint64_t new_committed_at = table_version_micros(table, new_version);
+    const auto new_pairs = query_id_row_ids(table);
+    const uint64_t new_row_1 = row_id_for(new_pairs, 1);
+
+    BlobDescriptorRow new_row;
+    new_row.size = 5;
+    new_row.source_uri = source_uri;
+    new_row.source_version = new_version;
+    new_row.committed_at_micros = new_committed_at;
+    new_row.row_reference = new_row_1;
+    ExportedArrowArray new_descriptor(make_descriptor_array({new_row}));
+
+    // The same source row id at the latest commit holds different bytes. The
+    // pinned source version still selects the value the descriptor came from.
+    LanceDBBlobFile* new_file = nullptr;
+    REQUIRE(open_blob_descriptor(table, new_descriptor, 0, &new_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(new_file) == "new-A");
+    lancedb_blob_file_free(new_file);
+
+    LanceDBBlobFile* pinned_file = nullptr;
+    REQUIRE(open_blob_descriptor(table, old_descriptor, 0, &pinned_file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(pinned_file) == "alpha");
+    lancedb_blob_file_free(pinned_file);
+
+    // Opening a descriptor does not move the caller's table off its version.
+    REQUIRE(lancedb_table_version(table) == new_version);
+  }
+
+  SECTION("honors Arrow slices and row indices") {
+    auto leading_null = make_row(row_1, 5);
+    leading_null.top_level_null = true;
+    auto row_1_descriptor = make_row(row_1, 5);
+    auto row_2_descriptor = make_row(row_2, 0);
+    auto full = make_descriptor_array(
+        {leading_null, row_1_descriptor, row_2_descriptor});
+    auto sliced = std::static_pointer_cast<arrow::StructArray>(full->Slice(1, 2));
+    ExportedArrowArray descriptor(sliced);
+
+    char* error_message = nullptr;
+    LanceDBBlobFile* file = nullptr;
+    REQUIRE(open_blob_descriptor(table, descriptor, 0, &file, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(file) == "alpha");
+    lancedb_blob_file_free(file);
+
+    LanceDBBlobFile* empty = nullptr;
+    REQUIRE(open_blob_descriptor(table, descriptor, 1, &empty, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(blob_file_size(empty) == 0);
+    lancedb_blob_file_free(empty);
+
+    LanceDBBlobFile* out_of_bounds = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(open_blob_descriptor(table, descriptor, 2, &out_of_bounds, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(out_of_bounds == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("out of bounds") != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("reports invalid arguments, layouts and SDK errors") {
+    auto valid_row = make_row(row_1, 5);
+    ExportedArrowArray descriptor(make_descriptor_array({valid_row}));
+    char* error_message = nullptr;
+
+    auto expect_error = [&](const ExportedArrowArray& input, int64_t row,
+                            LanceDBError expected, const std::string& message) {
+      LanceDBBlobFile* file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+      error_message = nullptr;
+      REQUIRE(open_blob_descriptor(table, input, row, &file, &error_message) == expected);
+      REQUIRE(file == nullptr);
+      REQUIRE(error_message != nullptr);
+      REQUIRE(std::string(error_message).find(message) != std::string::npos);
+      lancedb_free_string(error_message);
+      error_message = nullptr;
+    };
+
+    LanceDBBlobFile* file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(lancedb_table_open_blob_file(
+        nullptr, descriptor.ffi_array(), descriptor.ffi_schema(), 0, &file,
+        &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(file == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(lancedb_table_open_blob_file(
+        table, nullptr, descriptor.ffi_schema(), 0, &file, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(file == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    file = reinterpret_cast<LanceDBBlobFile*>(uintptr_t{1});
+    REQUIRE(lancedb_table_open_blob_file(
+        table, descriptor.ffi_array(), nullptr, 0, &file, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(file == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_open_blob_file(
+        table, descriptor.ffi_array(), descriptor.ffi_schema(), 0, nullptr,
+        &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    expect_error(descriptor, -1, LANCEDB_INVALID_ARGUMENT, "must not be negative");
+    expect_error(descriptor, 1, LANCEDB_INVALID_ARGUMENT, "out of bounds");
+
+    auto wrong_uri = valid_row;
+    wrong_uri.source_uri = uri + "/other.lance";
+    ExportedArrowArray wrong_uri_descriptor(make_descriptor_array({wrong_uri}));
+    expect_error(wrong_uri_descriptor, 0, LANCEDB_INVALID_INPUT, "different table");
+
+    auto wrong_commit = valid_row;
+    wrong_commit.committed_at_micros = committed_at + 1;
+    ExportedArrowArray wrong_commit_descriptor(make_descriptor_array({wrong_commit}));
+    expect_error(wrong_commit_descriptor, 0, LANCEDB_INVALID_INPUT,
+                 "source snapshot has been replaced");
+
+    auto bad_kind = valid_row;
+    bad_kind.kind = 6;
+    ExportedArrowArray bad_kind_descriptor(make_descriptor_array({bad_kind}));
+    expect_error(bad_kind_descriptor, 0, LANCEDB_INVALID_INPUT,
+                 "invalid stored blob descriptor");
+
+    ExportedArrowArray missing_source(
+        make_descriptor_without_source(make_descriptor_array({valid_row})));
+    expect_error(missing_source, 0, LANCEDB_INVALID_ARGUMENT,
+                 "missing required field 'source'");
+
+    auto null_source = valid_row;
+    null_source.source_null = true;
+    ExportedArrowArray null_source_descriptor(make_descriptor_array({null_source}));
+    expect_error(null_source_descriptor, 0, LANCEDB_INVALID_ARGUMENT,
+                 "field 'source' is NULL");
+
+    auto null_column = valid_row;
+    null_column.source_column = std::nullopt;
+    ExportedArrowArray null_column_descriptor(make_descriptor_array({null_column}));
+    expect_error(null_column_descriptor, 0, LANCEDB_INVALID_ARGUMENT,
+                 "field 'source.column' is NULL");
+
+    arrow::Int32Builder wrong_type_builder;
+    REQUIRE(wrong_type_builder.Append(0).ok());
+    auto wrong_type_array = arrow::StructArray::Make(
+        {finish_descriptor_array(&wrong_type_builder)},
+        {arrow::field("kind", arrow::int32(), /*nullable=*/true)}).ValueOrDie();
+    ExportedArrowArray wrong_type_descriptor(wrong_type_array);
+    expect_error(wrong_type_descriptor, 0, LANCEDB_INVALID_ARGUMENT,
+                 "must have type UInt8");
+
+    arrow::StringBuilder malformed_builder;
+    REQUIRE(malformed_builder.Append("not a descriptor").ok());
+    ExportedArrowArray malformed(finish_descriptor_array(&malformed_builder));
+    expect_error(malformed, 0, LANCEDB_ARROW, "Failed to import descriptor Arrow schema");
+
+    // Failures do not consume or damage the table, and the valid input still
+    // opens normally after them.
+    REQUIRE(lancedb_table_count_rows(table) == all_ids.size());
+    LanceDBBlobFile* recovered = nullptr;
+    REQUIRE(open_blob_descriptor(table, descriptor, 0, &recovered, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(read_blob_file(recovered) == "alpha");
+    lancedb_blob_file_free(recovered);
+  }
+
+  lancedb_table_free(table);
 }
