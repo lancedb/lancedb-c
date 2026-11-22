@@ -148,6 +148,250 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
   }
 }
 
+TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Settings", "[connection]") {
+  auto require_consistency = [](LanceDBConnection* connection,
+                                LanceDBReadConsistencyType expected_kind,
+                                uint64_t expected_interval_ms) {
+    LanceDBReadConsistency consistency{};
+    consistency.kind = LANCEDB_READ_CONSISTENCY_MANUAL;
+    consistency.interval_ms = 1;
+    char* error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_read_consistency(connection, &consistency, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(consistency.kind == expected_kind);
+    REQUIRE(consistency.interval_ms == expected_interval_ms);
+  };
+
+  SECTION("An unset interval reports manual consistency") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(connection != nullptr);
+    require_consistency(connection, LANCEDB_READ_CONSISTENCY_MANUAL, 0);
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("An explicit zero interval reports strong consistency") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 0);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(connection != nullptr);
+    require_consistency(connection, LANCEDB_READ_CONSISTENCY_STRONG, 0);
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("A positive interval reports eventual consistency") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 250);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(connection != nullptr);
+    require_consistency(connection, LANCEDB_READ_CONSISTENCY_EVENTUAL, 250);
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("Local connections accept every builder setting") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "ignored");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "ignored");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_host_override(builder, "http://127.0.0.1:1");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_sql_host_override(builder, "http://127.0.0.1:2");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_namespace_client_property(builder, "ignored", "value");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_manifest_enabled(builder, false);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 125);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(connection != nullptr);
+    require_consistency(connection, LANCEDB_READ_CONSISTENCY_EVENTUAL, 125);
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("Manifest-enabled local connections keep the read interval") {
+    LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_manifest_enabled(builder, true);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 75);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(connection != nullptr);
+    require_consistency(connection, LANCEDB_READ_CONSISTENCY_EVENTUAL, 75);
+
+    char** names = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_connection_table_names(connection, &names, &count, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(count == 0);
+    REQUIRE(names == nullptr);
+    lancedb_free_table_names(names, count);
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("A valid remote root applies settings without contacting the backend") {
+    // The root URI requires a host override. Without the API key reaching the
+    // SDK, execution fails while validating the remote options, before any
+    // network request. This is a local dummy host.
+    LanceDBConnectBuilder* builder = lancedb_connect("db://");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "test-api-key");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "us-east-1");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_host_override(builder, "http://127.0.0.1:1");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_sql_host_override(builder, "http://127.0.0.1:2");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 0);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(connection != nullptr);
+
+    LanceDBReadConsistency consistency{};
+    consistency.kind = LANCEDB_READ_CONSISTENCY_MANUAL;
+    consistency.interval_ms = 7;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connection_read_consistency(connection, &consistency, &error_message)
+        == LANCEDB_NOT_SUPPORTED);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("not yet supported") != std::string::npos);
+    REQUIRE(consistency.kind == LANCEDB_READ_CONSISTENCY_MANUAL);
+    REQUIRE(consistency.interval_ms == 7);
+    lancedb_free_string(error_message);
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("Malformed remote URIs keep SDK validation errors") {
+    LanceDBConnectBuilder* builder = lancedb_connect("db-not-a-uri");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "test-api-key");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "us-east-1");
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(connection == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("not a valid URL") != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Enterprise connections reject namespace client properties") {
+    LanceDBConnectBuilder* builder = lancedb_connect("db://test");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "test-api-key");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "us-east-1");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_namespace_client_property(builder, "key", "value");
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, &error_message)
+        == LANCEDB_NOT_SUPPORTED);
+    REQUIRE(connection == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("namespace_client_properties is not supported")
+        != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Enterprise connections reject manifest mode") {
+    LanceDBConnectBuilder* builder = lancedb_connect("db://test");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "test-api-key");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "us-east-1");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_manifest_enabled(builder, true);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, &error_message)
+        == LANCEDB_NOT_SUPPORTED);
+    REQUIRE(connection == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("manifest_enabled is not supported")
+        != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("New builder setters reject invalid strings") {
+    using StringSetter = LanceDBConnectBuilder* (*)(LanceDBConnectBuilder*, const char*);
+    const StringSetter string_setters[] = {
+        lancedb_connect_builder_api_key,
+        lancedb_connect_builder_region,
+        lancedb_connect_builder_host_override,
+        lancedb_connect_builder_sql_host_override,
+    };
+    for (const auto setter : string_setters) {
+      REQUIRE(setter(nullptr, "value") == nullptr);
+
+      LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, nullptr) == nullptr);
+
+      builder = lancedb_connect(uri.c_str());
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, NON_UTF8) == nullptr);
+    }
+
+    using KeyValueSetter = LanceDBConnectBuilder* (*)(LanceDBConnectBuilder*, const char*, const char*);
+    const KeyValueSetter key_value_setters[] = {
+        lancedb_connect_builder_storage_option,
+        lancedb_connect_builder_namespace_client_property,
+    };
+    for (const auto setter : key_value_setters) {
+      REQUIRE(setter(nullptr, "key", "value") == nullptr);
+
+      LanceDBConnectBuilder* builder = lancedb_connect(uri.c_str());
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, nullptr, "value") == nullptr);
+
+      builder = lancedb_connect(uri.c_str());
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, "key", nullptr) == nullptr);
+
+      builder = lancedb_connect(uri.c_str());
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, NON_UTF8, "value") == nullptr);
+
+      builder = lancedb_connect(uri.c_str());
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, "key", NON_UTF8) == nullptr);
+    }
+
+    REQUIRE(lancedb_connect_builder_read_consistency_interval_ms(nullptr, 1) == nullptr);
+    REQUIRE(lancedb_connect_builder_manifest_enabled(nullptr, true) == nullptr);
+  }
+}
+
 TEST_CASE_METHOD(BaseFixture, "LanceDB Session", "[connection]") {
   SECTION("Create and free default session") {
     LanceDBSession* session = lancedb_session_new(nullptr);
@@ -1704,6 +1948,19 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Connection - invalid strings and null 
 
     // Freeing an empty name list is safe
     lancedb_free_table_names(nullptr, 0);
+  }
+
+  SECTION("Reading consistency with invalid arguments should fail") {
+    LanceDBReadConsistency consistency{};
+    consistency.kind = LANCEDB_READ_CONSISTENCY_EVENTUAL;
+    consistency.interval_ms = 123;
+
+    REQUIRE(lancedb_connection_read_consistency(
+        nullptr, &consistency, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_connection_read_consistency(
+        db, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(consistency.kind == LANCEDB_READ_CONSISTENCY_EVENTUAL);
+    REQUIRE(consistency.interval_ms == 123);
   }
 
   SECTION("Table name builder with invalid arguments should fail") {
