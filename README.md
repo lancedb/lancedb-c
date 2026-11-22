@@ -155,12 +155,36 @@ the SDK's own side of that wiring: the `dir-aws`/`dir-gcp`/`dir-azure`
 implementations, the SDK's `object_store` edges, Azure namespace credential
 vending and the DynamoDB commit handler. The last two are the capabilities a
 default build did not have before, and the `s3+ddb://` commit path with them.
-Selecting a named AWS profile for the DynamoDB client is not part of this and
-needs the upstream fix.
 
-The default set is `remote,aws,gcs,azure,dynamodb`, and it is what the prebuilt
-shared libraries contain. `oss`, `geo` and `fp16kernels` are opt-in for source
-builds:
+On the default S3 backend and the DynamoDB commit handler, `aws_profile` is a
+storage option that selects the AWS shared profile per store, so one process
+can open connections under different profiles without changing `AWS_PROFILE`:
+
+```c
+LanceDBConnectBuilder* builder = lancedb_connect("s3+ddb://bucket/db?ddbTableName=commits");
+builder = lancedb_connect_builder_storage_option(builder, "aws_profile", "analytics");
+builder = lancedb_connect_builder_storage_option(builder, "aws_region", "eu-west-1");
+```
+
+On those two paths the option takes effect from LanceDB SDK `v0.42.0-beta.22`
+with its Lance `v15.0.0-beta.26`. A build pinned to the earlier
+`v0.42.0-beta.21`/`v15.0.0-beta.25` pair ignores `aws_profile` there and keeps
+both on the ambient chains; `Cargo.toml` records which pair a source build
+uses. The `v0.1.0-preview.1` release predates the `dynamodb` forwarding and the
+profile routing: it was built without the `dynamodb` feature, so `s3+ddb://` is
+unavailable there.
+
+`aws_region` is the explicit region and wins over both the environment and the
+profile. Without it, the default S3 backend takes `AWS_REGION` when it is set
+and then falls back to ordinary bucket-region discovery. Custom S3 endpoints
+and the DynamoDB client instead use the SDK-resolved region, or the applicable
+default chain. An explicit `aws_profile` still follows the AWS SDK's environment
+precedence: `AWS_REGION` and the standard credential variables take precedence
+over the profile's own region and keys.
+
+The default set is `remote,aws,gcs,azure,dynamodb`, and packages built from
+this revision with the default flags contain it. `oss`, `geo` and
+`fp16kernels` are opt-in for source builds:
 
 ```bash
 cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh
