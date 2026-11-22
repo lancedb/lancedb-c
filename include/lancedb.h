@@ -42,7 +42,7 @@ extern "C" {
 #define ARROW_FLAG_NULLABLE 2
 #define ARROW_FLAG_MAP_KEYS_SORTED 4
 
-typedef struct ArrowSchema {
+struct ArrowSchema {
     const char* format;
     const char* name;
     const char* metadata;
@@ -52,9 +52,13 @@ typedef struct ArrowSchema {
     struct ArrowSchema* dictionary;
     void (*release)(struct ArrowSchema*);
     void* private_data;
-} ArrowSchema;
+};
 
-typedef struct ArrowArray {
+/** @cond */
+typedef struct ArrowSchema ArrowSchema;
+/** @endcond */
+
+struct ArrowArray {
     int64_t length;
     int64_t null_count;
     int64_t offset;
@@ -65,7 +69,11 @@ typedef struct ArrowArray {
     struct ArrowArray* dictionary;
     void (*release)(struct ArrowArray*);
     void* private_data;
-} ArrowArray;
+};
+
+/** @cond */
+typedef struct ArrowArray ArrowArray;
+/** @endcond */
 
 #define ARROW_STATISTICS_KEY_AVERAGE_BYTE_WIDTH_EXACT "ARROW:average_byte_width:exact"
 #define ARROW_STATISTICS_KEY_AVERAGE_BYTE_WIDTH_APPROXIMATE "ARROW:average_byte_width:approximate"
@@ -87,13 +95,17 @@ typedef struct ArrowArray {
 #ifndef ARROW_C_STREAM_INTERFACE
 #define ARROW_C_STREAM_INTERFACE
 
-typedef struct ArrowArrayStream {
+struct ArrowArrayStream {
     int (*get_schema)(struct ArrowArrayStream*, struct ArrowSchema*);
     int (*get_next)(struct ArrowArrayStream*, struct ArrowArray*);
     const char* (*get_last_error)(struct ArrowArrayStream*);
     void (*release)(struct ArrowArrayStream*);
     void* private_data;
-} ArrowArrayStream;
+};
+
+/** @cond */
+typedef struct ArrowArrayStream ArrowArrayStream;
+/** @endcond */
 
 #endif /* ARROW_C_STREAM_INTERFACE */
 

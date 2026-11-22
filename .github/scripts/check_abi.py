@@ -232,8 +232,17 @@ def collect_declarations(ast_path: Path) -> Declarations:
             if node.get("kind") == "TypedefDecl" and node.get("name") and _main_location(node.get("loc", {})):
                 owned = None
                 for child in node.get("inner", []):
-                    if child.get("kind") == "ElaboratedType" and child.get("ownedTagDecl"):
+                    if child.get("kind") != "ElaboratedType":
+                        continue
+                    if child.get("ownedTagDecl"):
                         owned = child["ownedTagDecl"]["id"]
+                    else:
+                        # A typedef after a separate struct definition refers
+                        # to the earlier tag instead of owning it.
+                        for nested in child.get("inner", []):
+                            if nested.get("kind") == "RecordType" and nested.get("decl"):
+                                owned = nested["decl"]["id"]
+                                break
                 typedefs[node["name"]] = owned
             if (
                 node.get("kind") == "FunctionDecl"
@@ -661,7 +670,14 @@ def clang_ast(clang: Clang, header: Path, include_dir: Optional[Path], output: P
 
 
 def generate_bindings(cbindgen: str, repo: Path, output: Path, header_text: str) -> None:
-    opaque = re.findall(r"typedef\s+struct\s+(\w+)\s+\1\s*;", header_text)
+    # A typedef with a separate complete struct definition is not opaque. The
+    # Arrow C ABI declares its named struct first and keeps the typedef only
+    # for C callers, so cbindgen must still emit the struct members.
+    opaque = [
+        name
+        for name in re.findall(r"typedef\s+struct\s+(\w+)\s+\1\s*;", header_text)
+        if not re.search(r"(?:typedef\s+)?struct\s+{}\s*\{{".format(re.escape(name)), header_text)
+    ]
     # Enums used only through checked raw c_int parameters do not otherwise
     # appear in cbindgen's reachable declarations; ask for every public header
     # enum explicitly so their values are compared too.
