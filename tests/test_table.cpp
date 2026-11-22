@@ -89,9 +89,11 @@ static float first_data_value(LanceDBTable* table, const std::string& key) {
   return value;
 }
 
-// Create a reader with rows for keys "key_<start_index>" .. "key_<start_index + num_rows - 1>",
-// where all values of the "data" column are set to "value"
-static LanceDBRecordBatchReader* create_reader_with_value(int num_rows, int start_index, float value) {
+// Create a batch with rows for keys "key_<start_index>" ..
+// "key_<start_index + num_rows - 1>", where all values of the "data" column
+// are set to "value"
+static std::shared_ptr<arrow::RecordBatch> create_batch_with_value(
+    int num_rows, int start_index, float value) {
   auto schema = create_test_schema();
 
   arrow::StringBuilder key_builder;
@@ -111,8 +113,24 @@ static LanceDBRecordBatchReader* create_reader_with_value(int num_rows, int star
   REQUIRE(key_builder.Finish(&key_array).ok());
   REQUIRE(data_builder.Finish(&data_array).ok());
 
-  auto batch = arrow::RecordBatch::Make(schema, num_rows, {key_array, data_array});
-  return create_reader_from_batch(batch);
+  return arrow::RecordBatch::Make(schema, num_rows, {key_array, data_array});
+}
+
+// Create a reader with rows for keys "key_<start_index>" .. "key_<start_index + num_rows - 1>",
+// where all values of the "data" column are set to "value"
+static LanceDBRecordBatchReader* create_reader_with_value(int num_rows, int start_index, float value) {
+  return create_reader_from_batch(create_batch_with_value(num_rows, start_index, value));
+}
+
+// Create a reader over every batch of a valid Arrow IPC file
+static LanceDBRecordBatchReader* create_reader_from_ipc_file(const std::vector<uint8_t>& bytes) {
+  LanceDBRecordBatchReader* reader = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+      bytes.data(), bytes.size(), &reader, nullptr, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(reader != nullptr);
+  return reader;
 }
 
 extern "C" void sql_delete_on_stack(void* p) {
@@ -1126,6 +1144,318 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert with source conditi
     REQUIRE(version_value(table, "key_2") == 10);
     REQUIRE(version_value(table, "key_3") == 10);
     REQUIRE(version_value(table, "key_4") == 10);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Merge Insert with result", "[table][ipc]") {
+  const std::string table_name = "test_merge_insert_result_table";
+  create_empty_table(table_name);
+  LanceDBTable* table = open_table(table_name);
+
+  constexpr int row_num = 10;
+  auto initial_reader = create_reader_from_batch(create_test_record_batch(row_num, 0));
+  REQUIRE(initial_reader != nullptr);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_add(table, initial_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(table) == row_num);
+  REQUIRE(lancedb_table_version(table) == 2);
+
+  const char* on_columns[] = {"key"};
+  auto schema = create_test_schema();
+
+  SECTION("Updates matched rows and reports the commit") {
+    auto bytes = write_ipc_file(schema, {create_batch_with_value(5, 0, 888.0F)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 1,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 0,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = -1,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.version == 3);
+    REQUIRE(result.num_inserted_rows == 0);
+    REQUIRE(result.num_updated_rows == 5);
+    REQUIRE(result.num_deleted_rows == 0);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_version(table) == result.version);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(first_data_value(table, "key_0") == 888.0F);
+    REQUIRE(first_data_value(table, "key_4") == 888.0F);
+    REQUIRE(first_data_value(table, "key_5") == 50.0F);
+  }
+
+  SECTION("Inserts unmatched rows and reports the commit") {
+    auto bytes = write_ipc_file(schema, {create_test_record_batch(5, row_num)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 0,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 1,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = -1,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.version == 3);
+    REQUIRE(result.num_inserted_rows == 5);
+    REQUIRE(result.num_updated_rows == 0);
+    REQUIRE(result.num_deleted_rows == 0);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_version(table) == result.version);
+    REQUIRE(lancedb_table_count_rows(table) == row_num + 5);
+    REQUIRE(first_data_value(table, "key_10") == 100.0F);
+  }
+
+  SECTION("Applies the matched condition with an explicit index choice and timeout") {
+    auto bytes = write_ipc_file(schema, {create_batch_with_value(5, 0, 777.0F)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 1,
+      .when_matched_update_all_condition = "target.key = 'key_1'",
+      .when_not_matched_insert_all = 0,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = 0,
+      .timeout_ms = 60000,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.version == 3);
+    REQUIRE(result.num_updated_rows == 1);
+    REQUIRE(result.num_inserted_rows == 0);
+    REQUIRE(result.num_deleted_rows == 0);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(first_data_value(table, "key_0") == 0.0F);
+    REQUIRE(first_data_value(table, "key_1") == 777.0F);
+    REQUIRE(first_data_value(table, "key_2") == 20.0F);
+  }
+
+  SECTION("Merges every batch of one IPC file in a single commit") {
+    auto bytes = write_ipc_file(
+        schema,
+        {create_batch_with_value(2, 0, 555.0F), create_test_record_batch(2, row_num)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 1,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 1,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = 1,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.version == 3);
+    REQUIRE(result.num_inserted_rows == 2);
+    REQUIRE(result.num_updated_rows == 2);
+    REQUIRE(result.num_deleted_rows == 0);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_count_rows(table) == row_num + 2);
+    REQUIRE(first_data_value(table, "key_0") == 555.0F);
+    REQUIRE(first_data_value(table, "key_2") == 20.0F);
+    REQUIRE(first_data_value(table, "key_10") == 100.0F);
+  }
+
+  SECTION("Deletes unmatched target rows only where the source filter matches") {
+    auto bytes = write_ipc_file(schema, {create_test_record_batch(5, 0)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 0,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 0,
+      .when_not_matched_by_source_delete = 1,
+      .when_not_matched_by_source_delete_filter = "key = 'key_5' OR key = 'key_6'",
+      .use_index = -1,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.version == 3);
+    REQUIRE(result.num_inserted_rows == 0);
+    REQUIRE(result.num_updated_rows == 0);
+    REQUIRE(result.num_deleted_rows == 2);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_count_rows(table) == row_num - 2);
+    REQUIRE(first_data_value(table, "key_4") == 40.0F);
+    REQUIRE(first_data_value(table, "key_7") == 70.0F);
+  }
+
+  SECTION("Merges an empty source carrying the table schema") {
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_table_schema_ipc_file(table, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(buffer.data != nullptr);
+    std::vector<uint8_t> bytes(buffer.data, buffer.data + buffer.len);
+    lancedb_ipc_buffer_free(&buffer);
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 0,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 0,
+      .when_not_matched_by_source_delete = 1,
+      .when_not_matched_by_source_delete_filter = "key = 'key_9'",
+      .use_index = -1,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.version == 3);
+    REQUIRE(result.num_inserted_rows == 0);
+    REQUIRE(result.num_updated_rows == 0);
+    REQUIRE(result.num_deleted_rows == 1);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_version(table) == result.version);
+    REQUIRE(lancedb_table_count_rows(table) == row_num - 1);
+    REQUIRE(first_data_value(table, "key_0") == 0.0F);
+  }
+
+  SECTION("An empty source without delete actions changes nothing") {
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_table_schema_ipc_file(table, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    std::vector<uint8_t> bytes(buffer.data, buffer.data + buffer.len);
+    lancedb_ipc_buffer_free(&buffer);
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 1,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 1,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = -1,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    REQUIRE(result.num_inserted_rows == 0);
+    REQUIRE(result.num_updated_rows == 0);
+    REQUIRE(result.num_deleted_rows == 0);
+    REQUIRE(result.num_attempts == 1);
+    REQUIRE(lancedb_table_version(table) == result.version);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+  }
+
+  SECTION("Rejects an out-of-range use_index sentinel") {
+    auto bytes = write_ipc_file(schema, {create_test_record_batch(1, 0)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 1,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 0,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = 2,
+      .timeout_ms = -1,
+    };
+    LanceDBMergeInsertResult result = {};
+    result.version = 123;
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("use_index") != std::string::npos);
+    lancedb_free_string(error_message);
+    REQUIRE(result.version == 0);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_version(table) == 2);
+  }
+
+  SECTION("Rejects an out-of-range timeout sentinel") {
+    auto bytes = write_ipc_file(schema, {create_test_record_batch(1, 0)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    LanceDBMergeInsertOptions options = {
+      .when_matched_update_all = 1,
+      .when_matched_update_all_condition = nullptr,
+      .when_not_matched_insert_all = 0,
+      .when_not_matched_by_source_delete = 0,
+      .when_not_matched_by_source_delete_filter = nullptr,
+      .use_index = -1,
+      .timeout_ms = -2,
+    };
+    LanceDBMergeInsertResult result = {};
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, &options, &result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("timeout_ms") != std::string::npos);
+    lancedb_free_string(error_message);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_version(table) == 2);
+  }
+
+  SECTION("Rejects a missing result pointer and still consumes the reader") {
+    auto bytes = write_ipc_file(schema, {create_test_record_batch(1, 0)});
+    auto reader = create_reader_from_ipc_file(bytes);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_merge_insert_with_result(
+        table, reader, on_columns, 1, nullptr, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_version(table) == 2);
   }
 
   lancedb_table_free(table);

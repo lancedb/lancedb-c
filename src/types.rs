@@ -74,3 +74,45 @@ pub struct LanceDBMergeInsertConfig {
     /// Not consumed by `lancedb_table_merge_insert`, and mutually exclusive with the SQL condition
     pub when_matched_update_all_expr: *mut LanceDBExpr,
 }
+
+/// Options for `lancedb_table_merge_insert_with_result`
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBMergeInsertOptions {
+    /// Update every matched row, optionally limited by the condition below
+    pub when_matched_update_all: i32,
+    /// SQL condition limiting which matched records are updated (NULL for no condition)
+    pub when_matched_update_all_condition: *const c_char,
+    /// Insert every source row that has no match in the target
+    pub when_not_matched_insert_all: i32,
+    /// Delete every target row that has no match in the source, optionally filtered below
+    pub when_not_matched_by_source_delete: i32,
+    /// SQL filter on unmatched target rows, naming target columns directly (NULL for no filter)
+    pub when_not_matched_by_source_delete_filter: *const c_char,
+    /// -1 for the SDK default, 0 to disable indexed planning, 1 to allow it.
+    /// The embedded and remote backends interpret this as described in the public header
+    pub use_index: i32,
+    /// -1 for the SDK default, otherwise milliseconds. Embedded covers Lance merge execution
+    /// and retries; remote sends it as a per-request timeout header
+    pub timeout_ms: i64,
+}
+
+/// Result of `lancedb_table_merge_insert_with_result`
+///
+/// Fields are copied unchanged from the SDK result. A missing remote field defaults to zero,
+/// so zero can mean that the backend did not report it. RTE and legacy empty responses can
+/// return all fields zero.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LanceDBMergeInsertResult {
+    /// Reported commit version; 0 may mean not reported
+    pub version: u64,
+    /// Reported number of inserted rows; 0 may mean not reported
+    pub num_inserted_rows: u64,
+    /// Reported number of updated rows; 0 may mean not reported
+    pub num_updated_rows: u64,
+    /// Reported number of deleted rows; 0 may mean not reported
+    pub num_deleted_rows: u64,
+    /// Reported merge attempts; 0 may mean not reported
+    pub num_attempts: u32,
+}
