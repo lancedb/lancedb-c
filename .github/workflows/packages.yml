@@ -187,7 +187,7 @@ jobs:
           --checksum ${{ steps.package.outputs.checksum }}
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lancedb-c-${{ steps.release-tag.outputs.commit || github.sha }}-${{ matrix.target }}
           path: dist/
