@@ -152,6 +152,15 @@ static std::vector<CollectedQueryRow> query_rows_with_index(
   return collected;
 }
 
+static std::map<int32_t, std::string> first_key_by_query_index(
+    const CollectedQueryRows& rows) {
+  std::map<int32_t, std::string> first_keys;
+  for (const auto& row : query_rows_with_index(rows)) {
+    first_keys.emplace(row.query_index, row.key);
+  }
+  return first_keys;
+}
+
 static std::vector<float> distances_of(const CollectedQueryRows& rows) {
   std::vector<float> distances;
   for (const auto& batch : rows.batches) {
@@ -279,6 +288,10 @@ static LanceDBTable* create_multivector_table(
   };
   for (size_t i = 0; i < rows.size(); i++) {
     REQUIRE(key_builder.Append("doc_" + std::to_string(i)).ok());
+    // ListBuilder::Append starts a new list slot. The row's fixed-size vectors
+    // must be appended after it; appending the parent after the children shifts
+    // each row's vectors into the next row.
+    REQUIRE(vector_builder.Append().ok());
     auto* fixed_builder =
         static_cast<arrow::FixedSizeListBuilder*>(vector_builder.value_builder());
     auto* values = static_cast<arrow::FloatBuilder*>(fixed_builder->value_builder());
@@ -288,7 +301,6 @@ static LanceDBTable* create_multivector_table(
       }
       REQUIRE(fixed_builder->Append().ok());
     }
-    REQUIRE(vector_builder.Append().ok());
   }
 
   std::shared_ptr<arrow::Array> key_array, vector_array;
@@ -2454,12 +2466,32 @@ TEST_CASE_METHOD(
     auto rows = execute_vector_query(query);
     REQUIRE(rows.num_rows() == 2);
 
-    std::map<int32_t, std::string> first_key_by_query;
-    for (const auto& row : query_rows_with_index(rows)) {
-      first_key_by_query.emplace(row.query_index, row.key);
-    }
-    REQUIRE(first_key_by_query[0] == "key_2");
-    REQUIRE(first_key_by_query[1] == "key_5");
+    const auto first_keys = first_key_by_query_index(rows);
+    REQUIRE(first_keys.at(0) == "key_2");
+    REQUIRE(first_keys.at(1) == "key_5");
+  }
+
+  SECTION("A typed vector appends to the legacy f32 builder") {
+    auto first_vector = vector_for_row(1);
+    LanceDBVectorQuery* query =
+        lancedb_vector_query_new(table, first_vector.data(), first_vector.size());
+    REQUIRE(query != nullptr);
+
+    auto second_vector = f16_bits_for_row(5);
+    LanceDBQueryVector second{
+        LANCEDB_QUERY_VECTOR_F16, second_vector.data(), second_vector.size()};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_add_query_vector(query, &second, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    configure_key_projection_and_limit(query, 1);
+    auto rows = execute_vector_query(query);
+    REQUIRE(rows.num_rows() == 2);
+    REQUIRE(rows.schema->GetFieldByName("query_index") != nullptr);
+    const auto first_keys = first_key_by_query_index(rows);
+    REQUIRE(first_keys.at(0) == "key_1");
+    REQUIRE(first_keys.at(1) == "key_5");
   }
 
   SECTION("Multiple vectors run one batch with query_index and ordered rows") {
@@ -2516,12 +2548,9 @@ TEST_CASE_METHOD(
         binary_table, {vectors[0], vectors[1]}, 1, LANCEDB_DISTANCE_HAMMING);
     REQUIRE(batch_rows.num_rows() == 2);
     REQUIRE(batch_rows.schema->GetFieldByName("query_index") != nullptr);
-    std::map<int32_t, std::string> first_key_by_query;
-    for (const auto& row : query_rows_with_index(batch_rows)) {
-      first_key_by_query.emplace(row.query_index, row.key);
-    }
-    REQUIRE(first_key_by_query[0] == "bin_0");
-    REQUIRE(first_key_by_query[1] == "bin_1");
+    const auto first_keys = first_key_by_query_index(batch_rows);
+    REQUIRE(first_keys.at(0) == "bin_0");
+    REQUIRE(first_keys.at(1) == "bin_1");
 
     // Lance accepts Hamming only for UInt8 vectors; the SDK reports the
     // mismatch when the query is configured.
@@ -2555,12 +2584,19 @@ TEST_CASE_METHOD(
         {LANCEDB_QUERY_VECTOR_F32, second.data(), second.size()},
     };
 
+    auto single_rows = run_typed_query(multivector_table, {vectors[0]}, 2);
+    REQUIRE(single_rows.num_rows() == 2);
+    REQUIRE(single_rows.schema->GetFieldByName("query_index") == nullptr);
+    REQUIRE(keys_of(single_rows) == std::vector<std::string>{"doc_0", "doc_1"});
+    REQUIRE(distances_of(single_rows) == std::vector<float>{4.0F, 324.0F});
+
     auto rows = run_typed_query(multivector_table, {vectors[0], vectors[1]}, 2);
     REQUIRE(rows.num_rows() == 2);
     REQUIRE(rows.schema->GetFieldByName("query_index") == nullptr);
     REQUIRE(keys_of(rows) == std::vector<std::string>{"doc_0", "doc_1"});
-    const auto distances = distances_of(rows);
-    REQUIRE(distances[0] <= distances[1]);
+    // The first vector alone gives 4 and 324. The second adds 16 and 256, so
+    // these exact sums fail if the C layer forwards only one query vector.
+    REQUIRE(distances_of(rows) == std::vector<float>{20.0F, 580.0F});
 
     lancedb_table_free(multivector_table);
   }

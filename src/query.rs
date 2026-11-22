@@ -282,18 +282,46 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
 /// column. Against a `List<FixedSizeList<...>>` multivector column, multiple
 /// vectors form one multivector search and no `query_index` column is added. A
 /// UInt8 fixed-size vector column keeps one plan per vector and also adds
-/// `query_index`.
+/// `query_index`; Hamming is the only supported distance.
+///
+/// These batch contracts apply to an ordinary vector search, without a
+/// full-text query. `limit` and `offset` apply independently to each vector in
+/// a batch, and `query_index` is the zero-based position of that vector, not a
+/// rank. Rows for different indexes are not required to be grouped or ordered.
+/// On a multivector column, `limit` selects table rows in total and each row's
+/// `_distance` includes the contribution of every input vector.
+///
+/// The pinned SDK beta.23 and the beta.24 release do not support a hybrid query
+/// with more than one query vector on a fixed-size-list float column when the
+/// full-text leg returns matches: the SDK's RRF merge combines the batch
+/// `query_index` column with the full-text schema and returns an Arrow schema
+/// error. This binding forwards the configured SDK query; it does not split the
+/// batch, drop `query_index`, or run a C-side fusion. Use one query vector for
+/// that hybrid shape until the SDK supports it. A `List<FixedSizeList<...>>`
+/// multivector column adds no `query_index`, so it does not hit that merge
+/// shape.
+///
+/// A vector-only query is planned locally by the native table, including on a
+/// native namespace connection. On a namespace connection with QueryTable
+/// pushdown, only an eligible hybrid full-text leg can use the namespace
+/// QueryTable path; the vector batch remains a locally planned query. This
+/// binding does not choose a different route.
+///
+/// For a remote LanceDB, the SDK sends Float32 vectors. Enterprise server 0.2.0
+/// and later receive all input vectors in one request; older servers receive
+/// one request per vector and the SDK combines the responses with
+/// `query_index`. The server decides how it interprets the vector shape and
+/// distance and which schema it returns; this binding does not reshape or
+/// re-issue the result.
+///
+/// A table routed through the pinned MemWAL LSM scanner rejects multiple query
+/// vectors, hybrid search and binary (UInt8) vector search with
+/// `LANCEDB_NOT_SUPPORTED`. This binding exposes no route override.
 ///
 /// This constructor only copies and checks the description. Like
 /// `lancedb_vector_query_new`, the SDK reports non-finite values, F64 values
 /// that become non-finite after conversion, and mismatched dimensions when the
 /// query is executed or its plan or output schema is requested.
-///
-/// A native namespace connection forwards the SDK's Float32 query vectors in
-/// its QueryTable request when pushdown is selected. An Enterprise server 0.2.0
-/// or later receives all vectors in one request; older servers receive one
-/// request per vector. Binary column and distance handling on those backends is
-/// server-side.
 ///
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
@@ -352,7 +380,10 @@ pub unsafe extern "C" fn lancedb_vector_query_new_typed(
 /// The vector is borrowed for this call and copied before it returns. On
 /// success it is appended to the SDK query as a batch query vector, with the
 /// same result schema and validation timing as `lancedb_vector_query_new_typed`.
-/// The builder may come from either constructor.
+/// The builder may come from either constructor. Appending a second or later
+/// vector makes the query use the batch shape described there, including its
+/// ordinary-vector top-K/query_index contract and its hybrid and MemWAL
+/// limitations.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from a vector query constructor
@@ -1179,6 +1210,10 @@ pub unsafe extern "C" fn lancedb_vector_query_where_filter(
 /// output schema inspection, and ANALYZE need a single SDK plan and may return
 /// the SDK's unsupported-shape error for this hybrid; execute the query instead.
 ///
+/// If the builder has more than one query vector on a fixed-size-list float
+/// column, the pinned SDK beta.23 and beta.24 cannot merge a matching full-text
+/// leg; see `lancedb_vector_query_new_typed` for that batch limitation.
+///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
 /// - `text` must be a valid null-terminated UTF-8 string
@@ -1216,6 +1251,10 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
 /// making the builder a hybrid nearest-neighbour plus full-text search. The
 /// builder clones the handle's query, so the caller keeps ownership and may
 /// reuse or free the handle immediately.
+///
+/// If the builder has more than one query vector on a fixed-size-list float
+/// column, the pinned SDK beta.23 and beta.24 cannot merge a matching full-text
+/// leg; see `lancedb_vector_query_new_typed` for that batch limitation.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
