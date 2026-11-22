@@ -120,20 +120,35 @@ const OPEN_TABLE_ALL_FIELDS: u32 =
 /// Client configuration fields of `LanceDBClientConfig`
 ///
 /// These values mirror the `LanceDBClientConfigField` enumerators of the public header.
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_TIMEOUT: u32 = 1 << 0;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_CONNECT_TIMEOUT: u32 = 1 << 1;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_READ_TIMEOUT: u32 = 1 << 2;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_POOL_IDLE_TIMEOUT: u32 = 1 << 3;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_RETRIES: u32 = 1 << 4;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_CONNECT_RETRIES: u32 = 1 << 5;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_READ_RETRIES: u32 = 1 << 6;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_BACKOFF_FACTOR: u32 = 1 << 7;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_BACKOFF_JITTER: u32 = 1 << 8;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_RETRY_STATUSES: u32 = 1 << 9;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY: u32 = 1 << 10;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_MAX_BYTES_PER_REQUEST: u32 = 1 << 11;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_MAX_REQUEST_DURATION: u32 = 1 << 12;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_TLS_ASSERT_HOSTNAME: u32 = 1 << 13;
+#[cfg(feature = "remote")]
 const CLIENT_CONFIG_ALL_FIELDS: u32 = CLIENT_CONFIG_TIMEOUT
     | CLIENT_CONFIG_CONNECT_TIMEOUT
     | CLIENT_CONFIG_READ_TIMEOUT
@@ -863,18 +878,21 @@ unsafe fn client_config_from_c(
         || tls_ssl_ca_cert.is_some()
         || has_tls_assert_hostname
     {
-        let mut tls_config = lancedb::remote::TlsConfig::default();
-        tls_config.cert_file = tls_cert_file;
-        tls_config.key_file = tls_key_file;
-        tls_config.ssl_ca_cert = tls_ssl_ca_cert;
-        if has_tls_assert_hostname {
-            tls_config.assert_hostname = match config.tls_assert_hostname {
+        let assert_hostname = if has_tls_assert_hostname {
+            match config.tls_assert_hostname {
                 0 => false,
                 1 => true,
                 _ => return Err("tls_assert_hostname must be 0 or 1"),
-            };
-        }
-        result.tls_config = Some(tls_config);
+            }
+        } else {
+            true
+        };
+        result.tls_config = Some(lancedb::remote::TlsConfig {
+            cert_file: tls_cert_file,
+            key_file: tls_key_file,
+            ssl_ca_cert: tls_ssl_ca_cert,
+            assert_hostname,
+        });
     }
 
     if config.extra_header_count != 0 {
@@ -2975,19 +2993,21 @@ mod tests {
     #[cfg(feature = "remote")]
     #[test]
     fn client_config_keeps_explicit_zero_and_false() {
-        let mut config = LanceDBClientConfig::default();
-        config.set_fields = CLIENT_CONFIG_TIMEOUT
-            | CLIENT_CONFIG_RETRIES
-            | CLIENT_CONFIG_RETRY_STATUSES
-            | CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY
-            | CLIENT_CONFIG_TLS_ASSERT_HOSTNAME;
-        config.timeout_ms = 0;
-        config.retries = 0;
-        config.retry_status_count = 0;
-        config.blob_request_concurrency = 0;
-        config.tls_assert_hostname = 0;
+        let raw_config = LanceDBClientConfig {
+            set_fields: CLIENT_CONFIG_TIMEOUT
+                | CLIENT_CONFIG_RETRIES
+                | CLIENT_CONFIG_RETRY_STATUSES
+                | CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY
+                | CLIENT_CONFIG_TLS_ASSERT_HOSTNAME,
+            timeout_ms: 0,
+            retries: 0,
+            retry_status_count: 0,
+            blob_request_concurrency: 0,
+            tls_assert_hostname: 0,
+            ..LanceDBClientConfig::default()
+        };
 
-        let config = unsafe { client_config_from_c(&config) }.unwrap();
+        let config = unsafe { client_config_from_c(&raw_config) }.unwrap();
 
         assert_eq!(
             config.timeout_config.timeout,
