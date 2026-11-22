@@ -149,12 +149,33 @@ the SDK's own side of that wiring: the `dir-aws`/`dir-gcp`/`dir-azure`
 implementations, the SDK's `object_store` edges, Azure namespace credential
 vending and the DynamoDB commit handler. The last two are the capabilities a
 default build did not have before, and the `s3+ddb://` commit path with them.
-Selecting a named AWS profile for the DynamoDB client is not part of this and
-needs the upstream fix.
 
-The default set is `remote,aws,gcs,azure,dynamodb`, and it is what the prebuilt
-shared libraries contain. `oss`, `geo` and `fp16kernels` are opt-in for source
-builds:
+Named AWS profiles are selected per store with the `aws_profile` storage option,
+which covers the embedded S3 store and the DynamoDB commit handler behind
+`s3+ddb://`, so one process can use different profiles without changing
+`AWS_PROFILE`:
+
+```c
+LanceDBConnectBuilder* builder = lancedb_connect("s3+ddb://bucket/db?ddbTableName=commits");
+builder = lancedb_connect_builder_storage_option(builder, "aws_profile", "analytics");
+builder = lancedb_connect_builder_storage_option(builder, "aws_region", "eu-west-1");
+```
+
+Per-store profile selection needs LanceDB SDK `v0.42.0-beta.22` and its Lance
+`v15.0.0-beta.26`. A build pinned to the older
+`v0.42.0-beta.21`/`v15.0.0-beta.25` pair ignores `aws_profile` and leaves both
+the S3 store and the DynamoDB client on the ambient chain; `Cargo.toml` records
+which pair a source build uses. `aws_region` overrides the region for the S3
+requests and for the DynamoDB client. Without it, the S3 store resolves the
+bucket's region through the S3 API unless a custom endpoint is configured; then
+the profile's region applies when the profile sets one, otherwise the default
+region chain does. The DynamoDB client uses the profile's region and falls back
+to the default region chain. The `v0.1.0-preview.1` release predates both the
+`dynamodb` forwarding and the profile routing: it was built without the
+`dynamodb` feature, so `s3+ddb://` is unavailable there.
+
+The default set is `remote,aws,gcs,azure,dynamodb`, and the prebuilt packages
+build with it. `oss`, `geo` and `fp16kernels` are opt-in for source builds:
 
 ```bash
 cargo build --release --locked -p lancedb-c
