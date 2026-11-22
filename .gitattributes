@@ -1,0 +1,4 @@
+# The package manifest hashes these files. Keep their checked-out bytes stable
+# on Windows runners with core.autocrlf enabled.
+LICENSE text eol=lf
+include/lancedb.h text eol=lf

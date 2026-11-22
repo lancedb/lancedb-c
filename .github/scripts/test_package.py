@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -331,6 +332,75 @@ class PackageArchiveTests(PackageFixture):
             ):
                 package.verify_checksums(package_root)
 
+
+class PackageChecksumTests(PackageFixture):
+    def create_for_target(self, target_name: str, output_name: str):
+        target = package.target_for(target_name)
+        library_dir = self.root / f"library-{target.name}"
+        library_dir.mkdir()
+        (library_dir / target.library).write_bytes(
+            f"fake {target.name} library".encode()
+        )
+        if target.import_library:
+            (library_dir / target.import_library).write_text(
+                "import library\n", encoding="utf-8"
+            )
+        output = self.root / output_name
+        args = argparse.Namespace(
+            target=target_name,
+            commit="abc123",
+            repo_root=str(self.repo),
+            library_dir=str(library_dir),
+            output_dir=str(output),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.dict(os.environ, {"LANCEDB_VERSION": "0.1.0-preview.1"}):
+                package.create_package(args)
+        archive = output / f"lancedb-c-abc123-{target.name}.tar.gz"
+        return target, archive, output
+
+    @unittest.skipUnless(shutil.which("sha256sum"), "GNU sha256sum is required")
+    def test_windows_packages_have_canonical_checksums(self) -> None:
+        targets = ("windows-amd64", "windows-arm64")
+        for target_name in targets:
+            with self.subTest(target=target_name):
+                target, archive, output = self.create_for_target(
+                    target_name, f"package-{target_name}"
+                )
+                checksum = output / f"{archive.name}.sha256"
+                checksum_bytes = checksum.read_bytes()
+                self.assertNotIn(b"\r", checksum_bytes)
+                self.assertTrue(checksum_bytes.endswith(b"\n"))
+                self.assertEqual(checksum_bytes.count(b"\n"), 1)
+                subprocess.run(
+                    ["sha256sum", "-c", checksum.name],
+                    cwd=output,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+                with tempfile.TemporaryDirectory(
+                    prefix=f"lancedb-c-{target.name}-"
+                ) as temp:
+                    root = Path(temp)
+                    package.extract_tar(archive, root)
+                    package_root = root / f"lancedb-c-abc123-{target.name}"
+                    internal = (package_root / "SHA256SUMS").read_bytes()
+                    self.assertNotIn(b"\r", internal)
+                    self.assertTrue(internal.endswith(b"\n"))
+                    subprocess.run(
+                        ["sha256sum", "-c", "SHA256SUMS"],
+                        cwd=package_root,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    for relative in ("LICENSE", "include/lancedb.h"):
+                        self.assertEqual(
+                            (package_root / relative).read_bytes(),
+                            (self.repo / relative).read_bytes(),
+                        )
 
 class TargetPolicyTests(unittest.TestCase):
     def workflow(self) -> str:
