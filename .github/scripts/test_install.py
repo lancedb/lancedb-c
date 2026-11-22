@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from check_exports import verify_library
+
 
 def cache_value(build_dir: Path, name: str) -> str:
     cache = (build_dir / "CMakeCache.txt").read_text(encoding="utf-8")
@@ -179,6 +181,27 @@ def main() -> int:
     run([str(cxx_consumer), str(work_dir / "cxx-consumer-db")], env=env)
 
     version = installed_version(prefix)
+    if cache_value(build_dir, "BUILD_SHARED_LIBS").upper() in ("ON", "TRUE", "1"):
+        header_path = prefix / "include" / "lancedb.h"
+        if os.name == "nt":
+            library = installed_bindir / "lancedb.dll"
+            import_library = installed_libdir / "lancedb.dll.lib"
+            target_os = "windows"
+        elif sys.platform == "darwin":
+            library = installed_libdir / "liblancedb.dylib"
+            import_library = None
+            target_os = "darwin"
+        else:
+            library = installed_libdir / "liblancedb.so"
+            import_library = None
+            target_os = "linux"
+        verify_library(
+            library,
+            header_path,
+            target_os,
+            version,
+            import_library,
+        )
     configure_version_case(
         source_dir, work_dir, package_dir, generator, generator_platform, "", False, True
     )

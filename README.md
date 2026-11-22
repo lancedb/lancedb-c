@@ -203,6 +203,14 @@ public header, the license, the Windows import library when the platform needs
 one, and a `manifest.json` describing the paths. A `SHA256SUMS` file covers the
 package contents; the archive has a sibling `.sha256` file.
 
+The shared library exports exactly the functions declared in `include/lancedb.h`.
+Earlier preview packages also exposed incidental symbols from statically linked
+dependencies (CRC, BLAKE3, and AWS-LC jitterentropy). Those were never part of
+the C API and are no longer exported. No documented C function is removed and
+the public header is unchanged; a caller that resolved an implementation symbol
+by name must provide its own copy. The next preview notes should mention this
+export-surface change.
+
 The C binding has its own version line, independent of the Cargo package and
 the pinned SDK. The Cargo package version is fixed at `0.0.0`; the release
 version comes from the Git tag. Pull-request and untagged local builds report
