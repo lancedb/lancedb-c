@@ -1947,16 +1947,28 @@ LanceDBError lancedb_vector_query_execute_with_status(
 /**
  * Convert query result to Arrow RecordBatch arrays
  *
- * @param result - pointer to LanceDBQueryResult (consumed by this function)
+ * @param result - pointer to LanceDBQueryResult. When result, result_arrays,
+ *                 result_schema and count_out are all non-NULL, the result is
+ *                 consumed on every path, including failure. When any of the
+ *                 four is NULL, the call returns LANCEDB_INVALID_ARGUMENT and
+ *                 does not consume a non-NULL result, so the caller can retry
+ *                 it or free it with lancedb_query_result_free().
  * @param result_arrays - pointer to receive array of Arrow C ABI arrays
  * @param result_schema - pointer to receive single Arrow C ABI schema
  * @param count_out - pointer to receive number of result batches
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
- * @return Error code indicating success or failure
- *         Caller must free arrays with lancedb_free_arrow_arrays() and schema with lancedb_free_arrow_schema()
+ * @return LANCEDB_SUCCESS, the SDK error code when the stream fails, or
+ *         LANCEDB_ARROW when the result schema cannot be represented through
+ *         the Arrow C data interface
  *
- * If error_message is provided and an error occurs, the caller must free
- * the error message with lancedb_free_string().
+ * On entry, non-NULL output slots and the error message are cleared. On
+ * success, *count_out is the number of batches, and *result_arrays and
+ * *result_schema hold the batches and their schema. An empty result succeeds
+ * with both pointers NULL and *count_out zero. On failure, all three outputs
+ * stay clear. The caller must free returned arrays with
+ * lancedb_free_arrow_arrays() and the schema with lancedb_free_arrow_schema().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
  */
 LanceDBError lancedb_query_result_to_arrow(
     LanceDBQueryResult* result,

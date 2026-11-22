@@ -1035,11 +1035,27 @@ pub unsafe extern "C" fn lancedb_vector_query_execute_with_status(
 /// Convert query result to Arrow RecordBatch array
 ///
 /// # Safety
-/// - `result` must be a valid pointer returned from query execution functions
-/// - `batches_out`, `schema_out`, `count_out` must be valid pointers to receive results
+/// - `result` must be NULL or a valid pointer returned from query execution
+///   functions. When `result`, `batches_out`, `schema_out` and `count_out` are
+///   all non-NULL, the result is consumed on every path, including a stream or
+///   schema conversion failure. When any of the four is NULL, the call returns
+///   `LANCEDB_INVALID_ARGUMENT` without consuming a non-NULL result, so the
+///   caller may retry it or free it with `lancedb_query_result_free()`.
+/// - `batches_out`, `schema_out`, `count_out` must be writable when non-NULL
 /// - `error_message` can be NULL to ignore detailed error messages
-/// - This function consumes the result pointer; do not use it after calling
-/// - Caller must free returned arrays with `lancedb_free_arrow_arrays` and schema with `lancedb_free_arrow_schema`
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*count_out` set to the number of batches, and
+///   `*batches_out` and `*schema_out` holding the batches and their schema.
+///   An empty result succeeds with both pointers NULL and `*count_out` zero.
+/// - The SDK error code with the SDK error text in `*error_message` when the
+///   stream fails, or `LANCEDB_ARROW` with the conversion detail when the Arrow
+///   schema cannot be represented through the C data interface.
+///
+/// On entry, non-NULL output slots and the error message are cleared. A failure
+/// leaves all three outputs clear. Free returned arrays with
+/// `lancedb_free_arrow_arrays()` and a returned schema with
+/// `lancedb_free_arrow_schema()`.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_query_result_to_arrow(
     result: *mut LanceDBQueryResult,
@@ -1048,6 +1064,20 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
     count_out: *mut usize,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
+    if !batches_out.is_null() {
+        *batches_out = ptr::null_mut();
+    }
+    if !schema_out.is_null() {
+        *schema_out = ptr::null_mut();
+    }
+    if !count_out.is_null() {
+        *count_out = 0;
+    }
+    clear_error_message(error_message);
+
+    // A missing required pointer rejects the call before the result is consumed,
+    // so the caller can retry it or free it afterwards. This is the one documented
+    // exception to consuming a non-NULL result.
     if result.is_null() || batches_out.is_null() || schema_out.is_null() || count_out.is_null() {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
@@ -1061,12 +1091,9 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
         Ok::<Vec<RecordBatch>, lancedb::error::Error>(batches)
     }) {
         Ok(batches) => {
-            let count = batches.len();
-            *count_out = count;
-
-            if count == 0 {
-                *batches_out = ptr::null_mut();
-                *schema_out = ptr::null_mut();
+            // An empty result keeps its legacy representation: no batch, no
+            // schema and a zero count.
+            if batches.is_empty() {
                 return LanceDBError::Success;
             }
 
@@ -1074,26 +1101,23 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
             let schema = batches[0].schema();
             let ffi_schema = match arrow_schema::ffi::FFI_ArrowSchema::try_from(&*schema) {
                 Ok(schema) => Box::new(schema),
-                Err(err) => {
-                    if !error_message.is_null() {
-                        let error_str = format!("Failed to convert Arrow schema to C ABI: {err}");
-                        if let Ok(c_str) = std::ffi::CString::new(error_str) {
-                            *error_message = c_str.into_raw();
-                        }
-                    }
-                    return LanceDBError::Unknown;
+                Err(error) => {
+                    set_custom_error_message(
+                        error_message,
+                        &format!("Failed to convert Arrow schema to C ABI: {error}"),
+                    );
+                    return LanceDBError::Arrow;
                 }
             };
-            *schema_out = Box::into_raw(ffi_schema);
 
+            let count = batches.len();
             // Allocate array for Arrow C ABI array structures
             let arrays_ptr =
                 libc::malloc(count * std::mem::size_of::<*mut arrow_array::ffi::FFI_ArrowArray>())
                     as *mut *mut arrow_array::ffi::FFI_ArrowArray;
             if arrays_ptr.is_null() {
-                // Clean up schema on allocation failure
-                let _ = Box::from_raw(*schema_out);
-                *schema_out = ptr::null_mut();
+                // The prepared schema is dropped with this frame, so a failed
+                // allocation cannot leave a partial result behind.
                 set_unknown_error_message(error_message);
                 return LanceDBError::Unknown;
             }
@@ -1106,13 +1130,13 @@ pub unsafe extern "C" fn lancedb_query_result_to_arrow(
                 *arrays_ptr.add(i) = Box::into_raw(ffi_array);
             }
 
+            // Publish all three outputs only after every piece is ready
+            *count_out = count;
+            *schema_out = Box::into_raw(ffi_schema);
             *batches_out = arrays_ptr;
             LanceDBError::Success
         }
-        Err(_) => {
-            set_unknown_error_message(error_message);
-            LanceDBError::Unknown
-        }
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
