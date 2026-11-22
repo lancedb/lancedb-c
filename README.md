@@ -87,6 +87,14 @@ CMake cannot express a prerelease in a version request, so a numeric
 requirement such as `find_package(lancedb 0.1.0)` is rejected for a preview
 package. Use unversioned discovery for previews.
 
+The imported target handles compile and link paths; it does not add an install
+RPATH to the consuming executable. On Unix, install into a loader path, set an
+RPATH in the consumer, or set `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` at runtime.
+On Windows, the target links `lancedb.dll.lib` from the installation `lib`
+directory, but the loader still has to find `lancedb.dll` in the installation
+`bin` directory. Copy the DLL next to the executable or add that `bin` directory
+to `PATH` before running.
+
 The package config and version file are installed under
 `${CMAKE_INSTALL_LIBDIR}/cmake/lancedb` and use paths relative to the installed
 prefix. For Unix-like and GNU-style toolchains, pkg-config works from
@@ -100,10 +108,12 @@ MSVC shared consumers should use the `lancedb::lancedb` CMake target. The MSVC
 import library is named `lancedb.dll.lib`, which the conventional `-llancedb`
 pkg-config spelling does not select.
 
-On Linux the installed shared library records a SONAME derived from the binding
-version: before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the
-major version is. The unversioned `liblancedb.so` linker name remains available.
-On macOS the library records `@rpath/liblancedb.dylib`. Prebuilt packages keep
+On Linux, builds from this revision and releases from `v0.1.0-preview.2`
+onward record a SONAME derived from the binding version: before 1.0 the
+major.minor pair is the ABI boundary, and from 1.0 the major version is. The
+unversioned `liblancedb.so` linker name remains available. The published
+`v0.1.0-preview.1` Linux package predates this and has no SONAME. On macOS the
+library records `@rpath/liblancedb.dylib`. Prebuilt packages from preview.2 keep
 the same metadata and package the unversioned library path used by consumers.
 
 ### Minimal C17 program
@@ -116,10 +126,17 @@ After installing into a prefix as shown above:
 
 ```bash
 export PKG_CONFIG_PATH=/opt/lancedb/lib64/pkgconfig
+lancedb_libdir="$(pkg-config --variable=libdir lancedb)"
 cc -std=c17 -Wall -Wextra -Werror examples/hello.c \
-  $(pkg-config --cflags --libs lancedb) -o hello
+  $(pkg-config --cflags --libs lancedb) \
+  -Wl,-rpath,"$lancedb_libdir" -o hello
 ./hello ./example-db
 ```
+
+`pkg-config` supplies the link-time `-L` and `-l` flags. The explicit rpath
+lets the loader find the shared library after linking; alternatively set
+`LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS when running the
+program.
 
 A CMake consumer can build the same file as C17:
 

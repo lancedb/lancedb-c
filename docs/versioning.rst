@@ -48,11 +48,13 @@ binary compatibility bumps the minor version, and the release notes tell C and
 C++ callers what to change and that they must recompile against the published
 header. Preview releases make no long-term C ABI promise.
 
-From 1.0 onward, change the public header additively. A breaking or semantic
-change to the C ABI requires a major version. A new function, struct field or
-enum value that does not change existing behavior is additive.
+From 1.0 onward, add new functions and enum values without changing existing
+declarations. Adding a field to an existing public struct changes its size and
+layout and is a breaking ABI change. Changing a function signature, an existing
+enum value or documented behavior also requires a major version.
 
-The shared-library metadata follows the same boundary:
+Builds from this revision and releases from ``v0.1.0-preview.2`` onward follow
+this shared-library metadata:
 
 - On Linux, before 1.0 the SONAME is ``liblancedb.so.<major>.<minor>``; from 1.0
   it is ``liblancedb.so.<major>``. The unversioned ``liblancedb.so`` linker name
@@ -73,14 +75,15 @@ Each archive is named ``lancedb-c-<commit>-<target>.tar.gz`` and contains:
 
 - ``LICENSE``
 - ``include/lancedb.h`` rendered with the release version
-- the target shared library, with the Linux SONAME and unversioned alias, and
-  the MSVC import library on Windows
+- the target shared library, with the Linux SONAME and unversioned alias from
+  ``v0.1.0-preview.2`` onward, and the MSVC import library on Windows
 - ``manifest.json``
 - ``SHA256SUMS`` covering the package contents
 
-The archive has a sibling ``.sha256`` file, and the release includes a combined
-``SHA256SUMS``. The manifest is the machine-readable contract for downstream
-loaders:
+The ``v0.1.0-preview.1`` Linux archive predates the SONAME rule and contains
+only the unversioned ``liblancedb.so``. The archive has a sibling ``.sha256``
+file, and the release includes a combined ``SHA256SUMS``. The manifest is the
+machine-readable contract for downstream loaders:
 
 .. list-table::
    :header-rows: 1

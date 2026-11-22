@@ -98,17 +98,38 @@ and does not consume a non-NULL result, so the caller can retry or free it.
 bytes in a ``LanceDBIpcBuffer``. Free the bytes with
 ``lancedb_ipc_buffer_free()``.
 
-``lancedb_record_batch_reader_from_arrow()`` consumes the Arrow array according
-to the Arrow C Data specification; do not call the array's release callback
-after passing it. The schema is only read and remains owned by the caller.
+``lancedb_record_batch_reader_from_arrow()`` imports the schema first. If the
+schema import fails, the Arrow array is still caller-owned and must be released.
+Once the schema imports, the array is handed to Arrow's importer and must not be
+released again, even when a later batch conversion fails. The schema itself is
+only read and remains owned by the caller.
+
 ``lancedb_record_batch_reader_from_ipc_file()`` borrows the input bytes and
 decodes every batch before returning. ``lancedb_record_batch_reader_from_arrow_stream()``
-moves the producer into the reader after validating its callbacks; the caller
-keeps the outer struct storage and must not release the moved stream again.
-When a reader is passed to ``lancedb_table_create()``, ``lancedb_table_add()`` or
-a merge-insert entry point, that function takes ownership of the reader and
-frees it automatically. Do not call ``lancedb_record_batch_reader_free()`` after
-handing it over.
+validates the required callbacks before moving the producer; if a callback is
+missing, the stream stays with the caller. After a successful move, the binding
+owns the producer and releases it even when the schema callback fails. The
+caller keeps the outer struct storage and must not release the moved stream
+again.
+
+A reader is not transferred just by being passed. The entry point decides when
+it takes ownership:
+
+- ``lancedb_table_create()`` takes a non-NULL reader only after its required
+  pointers are non-NULL, the table name is valid UTF-8, and the Arrow schema
+  imports. Failures before that point leave the reader caller-owned; after the
+  schema imports, the reader is consumed even if table-name validation or table
+  creation fails. Passing NULL creates an empty table.
+- ``lancedb_table_add()`` consumes a non-NULL reader after checking the table
+  and reader pointers for NULL. A NULL table or reader returns without consuming
+  the reader.
+- Every ``lancedb_table_merge_insert*`` entry point consumes a non-NULL reader
+  before validating the table, columns or options. A NULL data pointer returns
+  without consuming it; any non-NULL data is consumed on every later path.
+
+After one of these calls consumes a reader, do not call
+``lancedb_record_batch_reader_free()`` on it. Set the caller's pointer to NULL
+if the caller needs a single cleanup path.
 
 Blob results
 ------------
@@ -121,6 +142,11 @@ no-op and zeroes both fields.
 A ``LanceDBBlobFile`` is a seekable handle. Its size stays available after
 ``lancedb_blob_file_close()``; reads, range reads and seeks on a closed handle
 fail with ``LANCEDB_INVALID_INPUT``. Closing is idempotent.
+
+``lancedb_table_fetch_blob_files()`` returns an array of optional handles. Free
+the whole result with ``lancedb_free_blob_files(files, count)``, which releases
+every non-NULL handle and the array. If a handle was already freed with
+``lancedb_blob_file_free()``, set that array entry to NULL before the bulk free.
 
 Failure and output slots
 ------------------------

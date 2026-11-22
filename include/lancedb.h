@@ -2166,11 +2166,14 @@ void lancedb_run_on_stack(void (*callback)(void*), void* user_data, size_t red_z
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * The caller is responsible for freeing the returned table with lancedb_table_free().
- * This function takes ownership of the reader (when not NULL) and frees it automatically.
- * Do NOT call lancedb_record_batch_reader_free() after calling this function.
- * If error_message is provided and an error occurs, the caller must free
- * the error message with lancedb_free_string().
+ * The caller is responsible for freeing the returned table with
+ * lancedb_table_free(). A non-NULL reader is taken only after the required
+ * pointers are non-NULL, the table name is valid UTF-8 and the Arrow schema
+ * imports. Failures before that point leave the reader caller-owned; after the
+ * schema imports, the reader is consumed even if table-name validation or table
+ * creation fails. Do NOT call lancedb_record_batch_reader_free() after the
+ * reader is consumed. If error_message is provided and an error occurs, the
+ * caller must free the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_create(
     const LanceDBConnection* connection,
@@ -2801,10 +2804,11 @@ LanceDBError lancedb_table_stats(
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * This function takes ownership of the reader and frees it automatically.
- * Do NOT call lancedb_record_batch_reader_free() after calling this function.
- * If error_message is provided and an error occurs, the caller must free
- * the error message with lancedb_free_string().
+ * A non-NULL reader is consumed after the table and reader pointers are checked
+ * for NULL, so a NULL table or reader leaves the reader caller-owned. Do NOT
+ * call lancedb_record_batch_reader_free() after the reader is consumed. If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
  */
 LanceDBError lancedb_table_add(
     const LanceDBTable* table,
@@ -2825,10 +2829,12 @@ LanceDBError lancedb_table_add(
  *
  * This function performs an upsert operation by joining on the specified columns.
  * New records are inserted, existing records can be updated based on configuration.
- * This function takes ownership of the reader and frees it automatically.
- * Do NOT call lancedb_record_batch_reader_free() after calling this function.
- * The expression in the config is not consumed, and must still be freed by the caller
- * with lancedb_expr_free().
+ * A non-NULL reader is consumed before the table, columns and config are
+ * validated, so it is freed even when those arguments are rejected. A NULL data
+ * pointer returns without consuming a reader. Do NOT call
+ * lancedb_record_batch_reader_free() after the reader is consumed. The
+ * expression in the config is not consumed and must still be freed by the
+ * caller with lancedb_expr_free().
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
@@ -4663,12 +4669,14 @@ LanceDBError lancedb_table_nearest_to(
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * This function consumes the array according to Arrow C ABI specification.
- * The caller should NOT call the array's release function after passing it here.
- * The schema is only read and should still be released by the caller.
- * The caller is responsible for freeing the returned reader with
- * lancedb_record_batch_reader_free(). If error_message is provided and an error
- * occurs, the caller must free the error message with lancedb_free_string().
+ * The schema is imported first. If that import fails, the array still belongs
+ * to the caller and must be released. Once the schema imports, the array is
+ * handed to Arrow's importer and the caller must not release it again, even when
+ * a later batch conversion fails. The schema itself is only read and remains
+ * owned by the caller. The caller is responsible for freeing the returned reader
+ * with lancedb_record_batch_reader_free(). If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
  */
 LanceDBError lancedb_record_batch_reader_from_arrow(
     const struct FFI_ArrowArray* array,
