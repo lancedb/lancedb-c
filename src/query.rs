@@ -1157,7 +1157,9 @@ fn run_vector_query(
 }
 
 /// Wrap a stream the SDK started in the result handle exposed to C
-fn query_result_from_stream(stream: SendableRecordBatchStream) -> *mut LanceDBQueryResult {
+pub(crate) fn query_result_from_stream(
+    stream: SendableRecordBatchStream,
+) -> *mut LanceDBQueryResult {
     Box::into_raw(Box::new(LanceDBQueryResult { inner: stream }))
 }
 
