@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 include(cmake/LanceDBVersion.cmake)
 project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
-set(LANCEDB_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/include")
+set(LANCEDB_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
 set(LANCEDB_GENERATED_HEADER "${LANCEDB_GENERATED_INCLUDE_DIR}/lancedb.h")
 lancedb_render_header(
   "${CMAKE_CURRENT_SOURCE_DIR}/include/lancedb.h"

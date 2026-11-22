@@ -222,4 +222,43 @@ if(LANCEDB_GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
       endif()
     endforeach()
   endforeach()
+
+  # A symbolic HEAD keeps .git/HEAD pointing at the branch name, so committing
+  # or resetting the branch tip does not change HEAD itself. Resolve the
+  # effective ref through Git so worktrees and relocated refs use the same path
+  # Git actually reads. Watch the loose ref when present and its parent
+  # directory so a later loose ref created over a packed one is still noticed;
+  # packed-refs is already covered above.
+  execute_process(
+    COMMAND "${LANCEDB_GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+            symbolic-ref -q HEAD
+    RESULT_VARIABLE symbolic_ref_result
+    OUTPUT_VARIABLE symbolic_ref
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(symbolic_ref_result EQUAL 0 AND NOT symbolic_ref STREQUAL "")
+    execute_process(
+      COMMAND "${LANCEDB_GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+              rev-parse --git-path "${symbolic_ref}"
+      RESULT_VARIABLE symbolic_ref_path_result
+      OUTPUT_VARIABLE symbolic_ref_path
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(symbolic_ref_path_result EQUAL 0 AND NOT symbolic_ref_path STREQUAL "")
+      if(NOT IS_ABSOLUTE "${symbolic_ref_path}")
+        set(symbolic_ref_path "${CMAKE_CURRENT_SOURCE_DIR}/${symbolic_ref_path}")
+      endif()
+      if(EXISTS "${symbolic_ref_path}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+          "${symbolic_ref_path}")
+      endif()
+      get_filename_component(symbolic_ref_directory "${symbolic_ref_path}" DIRECTORY)
+      if(IS_DIRECTORY "${symbolic_ref_directory}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+          "${symbolic_ref_directory}")
+      endif()
+    endif()
+  endif()
 endif()
