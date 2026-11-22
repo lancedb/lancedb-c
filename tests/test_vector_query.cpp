@@ -1553,11 +1553,15 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
 
   SECTION("Vector query setters with null query should fail") {
     const char* columns[] = {"key"};
+    const char* expressions[] = {"key"};
 
     REQUIRE(lancedb_vector_query_column(nullptr, "data", nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_limit(nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_offset(nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_select(nullptr, columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_all(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_dynamic(nullptr, columns, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_where_filter(nullptr, "key = 'key_0'", nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_nprobes(nullptr, 10, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_refine_factor(nullptr, 2, nullptr) == LANCEDB_INVALID_ARGUMENT);
@@ -1640,6 +1644,9 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
     const char* const invalid_utf8 = "\xff\xfe";
     const char* invalid_columns[] = {invalid_utf8};
     const char* null_columns[] = {nullptr};
+    const char* columns[] = {"key"};
+    const char* expressions[] = {"key"};
+    const char* invalid_expressions[] = {invalid_utf8};
 
     LanceDBVectorQuery* query = lancedb_vector_query_new(
         table, vector.data(), vector.size());
@@ -1648,6 +1655,12 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
     REQUIRE(lancedb_vector_query_column(query, invalid_utf8, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_select(query, null_columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_select(query, invalid_columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_dynamic(query, null_columns, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_dynamic(query, invalid_columns, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_dynamic(query, columns, invalid_expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_where_filter(query, invalid_utf8, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
     lancedb_vector_query_free(query);
@@ -1665,8 +1678,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
         table, vector.data(), vector.size());
     REQUIRE(query != nullptr);
 
+    const char* expressions[] = {"key"};
     REQUIRE(lancedb_vector_query_column(query, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_select(query, nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_dynamic(query, nullptr, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_select_dynamic(query, expressions, nullptr, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_where_filter(query, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_postfilter(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
@@ -1843,6 +1861,209 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - explain plan", "[vector
         table, query_vector.data(), TEST_SCHEMA_DIMENSIONS);
     REQUIRE(query != nullptr);
     REQUIRE(lancedb_vector_query_explain_plan(query, true, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    lancedb_vector_query_free(query);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - dynamic projection and inspection", "[vector_query]") {
+  const std::string table_name = "vector_query_dynamic_projection_test";
+  constexpr int total_rows = 10;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  const std::vector<float> query_vector = vector_for_row(0);
+  const char* names[] = {"key_length", "key_copy", "is_key_three"};
+  const char* expressions[] = {
+      "cast(length(key) as bigint)", "key", "key = 'key_3'"};
+
+  auto query_with_dynamic_projection = [&] {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_select_dynamic(
+        query, names, expressions, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return query;
+  };
+
+  auto output_schema_of = [&](LanceDBVectorQuery* query) {
+    FFI_ArrowSchema* schema = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_output_schema(query, &schema, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(schema != nullptr);
+
+    auto imported = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(schema));
+    REQUIRE(imported.ok());
+    lancedb_free_arrow_schema(schema);
+    return imported.ValueOrDie();
+  };
+
+  auto analyze_plan_of = [&](LanceDBVectorQuery* query) {
+    char* plan = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_analyze_plan(query, &plan, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+
+    std::string result(plan);
+    lancedb_free_string(plan);
+    return result;
+  };
+
+  SECTION("Dynamic projection order and types drive the schema and rows") {
+    LanceDBVectorQuery* query = query_with_dynamic_projection();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_3'", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() >= 3);
+    REQUIRE(schema->field(0)->name() == "key_length");
+    REQUIRE(schema->field(0)->type()->id() == arrow::Type::INT64);
+    REQUIRE(schema->field(1)->name() == "key_copy");
+    REQUIRE(schema->field(1)->type()->id() == arrow::Type::STRING);
+    REQUIRE(schema->field(2)->name() == "is_key_three");
+    REQUIRE(schema->field(2)->type()->id() == arrow::Type::BOOL);
+
+    auto rows = collect_query_rows(lancedb_vector_query_execute(query));
+    REQUIRE(rows.schema->Equals(*schema));
+    REQUIRE(rows.num_rows() == 1);
+
+    auto batch = rows.batches.front();
+    auto key_length =
+        std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("key_length"));
+    REQUIRE(key_length != nullptr);
+    REQUIRE(key_length->Value(0) == 5);
+
+    auto key_copy =
+        std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("key_copy"));
+    REQUIRE(key_copy != nullptr);
+    REQUIRE(key_copy->GetString(0) == "key_3");
+
+    auto is_key_three = std::static_pointer_cast<arrow::BooleanArray>(
+        batch->GetColumnByName("is_key_three"));
+    REQUIRE(is_key_three != nullptr);
+    REQUIRE(is_key_three->Value(0));
+  }
+
+  SECTION("Select all resets a static or dynamic projection") {
+    LanceDBVectorQuery* query = query_with_dynamic_projection();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_select_all(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() >= 2);
+    REQUIRE(schema->field(0)->name() == "key");
+    REQUIRE(schema->field(1)->name() == "data");
+    REQUIRE(schema->GetFieldByName("key_length") == nullptr);
+
+    const char* key_column[] = {"key"};
+    REQUIRE(lancedb_vector_query_select(query, key_column, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() >= 1);
+    REQUIRE(schema->field(0)->name() == "key");
+
+    REQUIRE(lancedb_vector_query_select_all(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() >= 2);
+    REQUIRE(schema->field(0)->name() == "key");
+    REQUIRE(schema->field(1)->name() == "data");
+
+    lancedb_vector_query_free(query);
+  }
+
+  SECTION("Analyze plan reflects the configured query and executes it") {
+    LanceDBVectorQuery* query = query_with_dynamic_projection();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_where_filter(query, "key = 'key_3'", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto plan = analyze_plan_of(query);
+    REQUIRE(plan.length() > 0);
+    REQUIRE(plan.find("key_3") != std::string::npos);
+    // The SDK executes the query to collect metrics for an analyzed plan.
+    REQUIRE(plan.find("elapsed=") != std::string::npos);
+
+    // analyze_plan does not consume the query.
+    auto rows = collect_query_rows(lancedb_vector_query_execute(query));
+    REQUIRE(rows.num_rows() == 1);
+    auto key_copy = std::static_pointer_cast<arrow::StringArray>(
+        rows.batches.front()->GetColumnByName("key_copy"));
+    REQUIRE(key_copy != nullptr);
+    REQUIRE(key_copy->GetString(0) == "key_3");
+  }
+
+  SECTION("Inspection preserves SDK errors and clears outputs on failure") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+
+    const char* bad_names[] = {"bad"};
+    const char* bad_expressions[] = {"missing_column + 1"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_select_dynamic(
+        query, bad_names, bad_expressions, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    FFI_ArrowSchema* schema = reinterpret_cast<FFI_ArrowSchema*>(uintptr_t{1});
+    REQUIRE(lancedb_vector_query_output_schema(query, &schema, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    char* plan = reinterpret_cast<char*>(uintptr_t{1});
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_analyze_plan(query, &plan, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_vector_query_free(query);
+  }
+
+  SECTION("Inspection rejects null arguments and clears outputs") {
+    FFI_ArrowSchema* schema = reinterpret_cast<FFI_ArrowSchema*>(uintptr_t{1});
+    char* plan = reinterpret_cast<char*>(uintptr_t{1});
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_vector_query_output_schema(nullptr, &schema, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_analyze_plan(nullptr, &plan, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_vector_query_output_schema(query, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_analyze_plan(query, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     lancedb_vector_query_free(query);
   }
 

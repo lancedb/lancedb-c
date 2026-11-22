@@ -5,20 +5,23 @@
 //!
 //! This module provides complete query operations with proper Arrow integration
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};
 use std::ptr;
 use std::sync::Arc;
 
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{Array, RecordBatch, StructArray};
+use arrow_schema::ffi::FFI_ArrowSchema;
 use futures::TryStreamExt;
 
 use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
 use lancedb::index::scalar::FullTextSearchQuery;
-use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
+use lancedb::query::{
+    ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
+};
 use lancedb::rerankers::rrf::RRFReranker;
 use lancedb::rerankers::NormalizeMethod;
 use lancedb::{DistanceType, Table};
@@ -191,6 +194,39 @@ unsafe fn full_text_search_from_c(
     Ok(search)
 }
 
+/// Read parallel C arrays into the SDK's ordered dynamic projection pairs.
+///
+/// The first array names each output column and the second holds its SQL
+/// expression. Both arrays and every entry must be non-NULL; a zero count
+/// describes an empty projection.
+unsafe fn dynamic_projection_from_c(
+    names: *const *const c_char,
+    expressions: *const *const c_char,
+    num_columns: usize,
+) -> Result<Select, ()> {
+    if names.is_null() || expressions.is_null() {
+        return Err(());
+    }
+
+    let mut projection = Vec::with_capacity(num_columns);
+    for index in 0..num_columns {
+        let name = *names.add(index);
+        let expression = *expressions.add(index);
+        if name.is_null() || expression.is_null() {
+            return Err(());
+        }
+
+        let name = CStr::from_ptr(name).to_str().map_err(|_| ())?.to_string();
+        let expression = CStr::from_ptr(expression)
+            .to_str()
+            .map_err(|_| ())?
+            .to_string();
+        projection.push((name, expression));
+    }
+
+    Ok(Select::Dynamic(projection))
+}
+
 /// Set limit for query
 ///
 /// # Safety
@@ -274,6 +310,76 @@ pub unsafe extern "C" fn lancedb_query_select(
         &column_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     ));
     LanceDBError::Success
+}
+
+/// Reset a plain query to every non-system column
+///
+/// This clears a projection set by `lancedb_query_select` or
+/// `lancedb_query_select_dynamic`, including when the query is executed
+/// later. `lancedb_query_with_row_id` still appends the metadata column.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_select_all(
+    query: *mut LanceDBQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+
+    // `None` is the same SDK default as Select::All and keeps the builder from
+    // sending a redundant selection.
+    (*query).select = None;
+    LanceDBError::Success
+}
+
+/// Set an expression-based column projection for query
+///
+/// Each pair adds one output column: `names[i]` is the output name and
+/// `expressions[i]` is the SQL expression that computes it. Columns are
+/// returned in the given order, which may differ from the table order. The
+/// names and expressions are copied. A zero count selects no columns; both
+/// arrays must still be non-NULL.
+///
+/// This replaces a projection set by `lancedb_query_select` or
+/// `lancedb_query_select_all`. A later call to either function replaces this
+/// projection. The SDK decides whether a backend supports dynamic projection
+/// and reports its own error unchanged.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `names` and `expressions` must each point to `num_columns` valid
+///   NUL-terminated UTF-8 strings
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_select_dynamic(
+    query: *mut LanceDBQuery,
+    names: *const *const c_char,
+    expressions: *const *const c_char,
+    num_columns: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match dynamic_projection_from_c(names, expressions, num_columns) {
+        Ok(select) => {
+            (*query).select = Some(select);
+            LanceDBError::Success
+        }
+        Err(()) => {
+            set_invalid_argument_message(error_message);
+            LanceDBError::InvalidArgument
+        }
+    }
 }
 
 /// Ask a plain query to return the `_rowid` metadata column
@@ -525,6 +631,77 @@ pub unsafe extern "C" fn lancedb_vector_query_select(
         &column_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     ));
     LanceDBError::Success
+}
+
+/// Reset a vector query to every non-system column
+///
+/// This clears a projection set by `lancedb_vector_query_select` or
+/// `lancedb_vector_query_select_dynamic`, including when the query is
+/// executed later. `lancedb_vector_query_with_row_id` still appends the
+/// metadata column.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_select_all(
+    query: *mut LanceDBVectorQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+
+    // `None` is the same SDK default as Select::All and keeps the builder from
+    // sending a redundant selection.
+    (*query).select = None;
+    LanceDBError::Success
+}
+
+/// Set an expression-based column projection for vector query
+///
+/// Each pair adds one output column: `names[i]` is the output name and
+/// `expressions[i]` is the SQL expression that computes it. Columns are
+/// returned in the given order, which may differ from the table order. The
+/// names and expressions are copied. A zero count selects no columns; both
+/// arrays must still be non-NULL.
+///
+/// This replaces a projection set by `lancedb_vector_query_select` or
+/// `lancedb_vector_query_select_all`. A later call to either function replaces
+/// this projection. The SDK decides whether a backend supports dynamic
+/// projection and reports its own error unchanged.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `names` and `expressions` must each point to `num_columns` valid
+///   NUL-terminated UTF-8 strings
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_select_dynamic(
+    query: *mut LanceDBVectorQuery,
+    names: *const *const c_char,
+    expressions: *const *const c_char,
+    num_columns: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match dynamic_projection_from_c(names, expressions, num_columns) {
+        Ok(select) => {
+            (*query).select = Some(select);
+            LanceDBError::Success
+        }
+        Err(()) => {
+            set_invalid_argument_message(error_message);
+            LanceDBError::InvalidArgument
+        }
+    }
 }
 
 /// Ask a vector query to return the `_rowid` metadata column
@@ -879,6 +1056,142 @@ pub unsafe extern "C" fn lancedb_vector_query_ef(
     LanceDBError::Success
 }
 
+/// Build the SDK query from every setting held by a plain C query handle.
+///
+/// Execution, plan, schema and analysis all use this path so they observe the
+/// same projection, predicate and query options.
+fn configured_plain_query(query: &LanceDBQuery) -> Query {
+    let mut rust_query = query.table.query();
+
+    if let Some(limit) = query.limit {
+        rust_query = rust_query.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        rust_query = rust_query.offset(offset);
+    }
+    if let Some(ref select) = query.select {
+        rust_query = rust_query.select(select.clone());
+    }
+    if query.with_row_id {
+        rust_query = rust_query.with_row_id();
+    }
+    if query.fast_search {
+        rust_query = rust_query.fast_search();
+    }
+    if let Some(ref df_filter) = query.df_filter {
+        rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
+    } else if let Some(ref filter) = query.filter {
+        rust_query = rust_query.only_if(filter);
+    }
+    if let Some(ref full_text_search) = query.full_text_search {
+        rust_query = rust_query.full_text_search(full_text_search.clone());
+    }
+
+    rust_query
+}
+
+/// Build the SDK vector query from every setting held by its C handle.
+///
+/// Execution, plan, schema and analysis all use this path so they observe the
+/// same vector, projection, predicate and tuning options.
+fn configured_vector_query(
+    query: &LanceDBVectorQuery,
+) -> Result<VectorQuery, lancedb::error::Error> {
+    let mut rust_query = query.table.query().nearest_to(query.query_vector.clone())?;
+
+    if let Some(ref column) = query.column {
+        rust_query = rust_query.column(column);
+    }
+    if let Some(limit) = query.limit {
+        rust_query = rust_query.limit(limit);
+    }
+    if let Some(offset) = query.offset {
+        rust_query = rust_query.offset(offset);
+    }
+    if let Some(ref select) = query.select {
+        rust_query = rust_query.select(select.clone());
+    }
+    if query.with_row_id {
+        rust_query = rust_query.with_row_id();
+    }
+    if query.fast_search {
+        rust_query = rust_query.fast_search();
+    }
+    if query.bypass_vector_index {
+        rust_query = rust_query.bypass_vector_index();
+    }
+    if let Some(ref df_filter) = query.df_filter {
+        rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
+    } else if let Some(ref filter) = query.filter {
+        rust_query = rust_query.only_if(filter);
+    }
+    if let Some(ref full_text_search) = query.full_text_search {
+        rust_query = rust_query.full_text_search(full_text_search.clone());
+    }
+    if let Some(distance_type) = query.distance_type {
+        rust_query = rust_query.distance_type(distance_type);
+    }
+    if let Some(nprobes) = query.nprobes {
+        rust_query = rust_query.nprobes(nprobes)?;
+    }
+    if let Some(refine_factor) = query.refine_factor {
+        rust_query = rust_query.refine_factor(refine_factor);
+    }
+    if let Some(ef) = query.ef {
+        rust_query = rust_query.ef(ef);
+    }
+    if query.postfilter {
+        rust_query = rust_query.postfilter();
+    }
+    if let Some(k) = query.rrf_k {
+        rust_query = rust_query.rerank(Arc::new(RRFReranker::new(k)));
+    }
+    if let Some(norm) = query.norm.clone() {
+        rust_query = rust_query.norm(norm);
+    }
+
+    Ok(rust_query)
+}
+
+/// Hand an SDK plan string to C after validating that it has no NUL byte.
+unsafe fn publish_plan(
+    plan: String,
+    plan_out: *mut *mut c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    match CString::new(plan) {
+        Ok(plan) => {
+            *plan_out = plan.into_raw();
+            LanceDBError::Success
+        }
+        Err(_) => {
+            set_unknown_error_message(error_message);
+            LanceDBError::Unknown
+        }
+    }
+}
+
+/// Hand an owned Arrow schema to C, reporting a C Data conversion failure.
+unsafe fn publish_output_schema(
+    schema: &arrow_schema::Schema,
+    schema_out: *mut *mut FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    match FFI_ArrowSchema::try_from(schema) {
+        Ok(ffi_schema) => {
+            *schema_out = Box::into_raw(Box::new(ffi_schema));
+            LanceDBError::Success
+        }
+        Err(error) => {
+            set_custom_error_message(
+                error_message,
+                &format!("Failed to convert Arrow schema to C ABI: {error}"),
+            );
+            LanceDBError::Arrow
+        }
+    }
+}
+
 /// Get the query execution plan without executing the query
 ///
 /// Returns a human-readable string describing what steps will be taken
@@ -905,46 +1218,9 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
     let query_ref = &*query;
     let runtime = get_runtime();
 
-    match runtime.block_on(async {
-        let mut rust_query = query_ref.table.query();
-
-        if let Some(limit) = query_ref.limit {
-            rust_query = rust_query.limit(limit);
-        }
-        if let Some(offset) = query_ref.offset {
-            rust_query = rust_query.offset(offset);
-        }
-        if let Some(ref select) = query_ref.select {
-            rust_query = rust_query.select(select.clone());
-        }
-        if query_ref.with_row_id {
-            rust_query = rust_query.with_row_id();
-        }
-        if query_ref.fast_search {
-            rust_query = rust_query.fast_search();
-        }
-        if let Some(ref full_text_search) = query_ref.full_text_search {
-            rust_query = rust_query.full_text_search(full_text_search.clone());
-        }
-        if let Some(ref df_filter) = query_ref.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
-        } else if let Some(ref filter) = query_ref.filter {
-            rust_query = rust_query.only_if(filter);
-        }
-
-        rust_query.explain_plan(verbose).await
-    }) {
-        Ok(plan) => match std::ffi::CString::new(plan) {
-            Ok(c_str) => {
-                *plan_out = c_str.into_raw();
-                LanceDBError::Success
-            }
-            Err(_) => {
-                set_unknown_error_message(error_message);
-                LanceDBError::Unknown
-            }
-        },
-        Err(e) => handle_error(&e, error_message),
+    match runtime.block_on(configured_plain_query(query_ref).explain_plan(verbose)) {
+        Ok(plan) => publish_plan(plan, plan_out, error_message),
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
@@ -976,83 +1252,165 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
     }
 
     let query_ref = &*query;
-    let postfilter = query_ref.postfilter;
     let runtime = get_runtime();
 
     match runtime.block_on(async {
-        let mut rust_query = match query_ref
-            .table
-            .query()
-            .nearest_to(query_ref.query_vector.clone())
-        {
-            Ok(q) => q,
-            Err(e) => return Err(e),
-        };
-
-        if let Some(ref column) = query_ref.column {
-            rust_query = rust_query.column(column);
-        }
-        if let Some(limit) = query_ref.limit {
-            rust_query = rust_query.limit(limit);
-        }
-        if let Some(offset) = query_ref.offset {
-            rust_query = rust_query.offset(offset);
-        }
-        if let Some(ref select) = query_ref.select {
-            rust_query = rust_query.select(select.clone());
-        }
-        if query_ref.with_row_id {
-            rust_query = rust_query.with_row_id();
-        }
-        if query_ref.fast_search {
-            rust_query = rust_query.fast_search();
-        }
-        if query_ref.bypass_vector_index {
-            rust_query = rust_query.bypass_vector_index();
-        }
-        if let Some(ref df_filter) = query_ref.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
-        } else if let Some(ref filter) = query_ref.filter {
-            rust_query = rust_query.only_if(filter);
-        }
-        if let Some(distance_type) = query_ref.distance_type {
-            rust_query = rust_query.distance_type(distance_type);
-        }
-        if let Some(nprobes) = query_ref.nprobes {
-            rust_query = rust_query.nprobes(nprobes)?;
-        }
-        if let Some(refine_factor) = query_ref.refine_factor {
-            rust_query = rust_query.refine_factor(refine_factor);
-        }
-        if let Some(ef) = query_ref.ef {
-            rust_query = rust_query.ef(ef);
-        }
-        if let Some(ref full_text_search) = query_ref.full_text_search {
-            rust_query = rust_query.full_text_search(full_text_search.clone());
-        }
-        if postfilter {
-            rust_query = rust_query.postfilter();
-        }
-        if let Some(k) = query_ref.rrf_k {
-            rust_query = rust_query.rerank(Arc::new(RRFReranker::new(k)));
-        }
-        if let Some(norm) = query_ref.norm.clone() {
-            rust_query = rust_query.norm(norm);
-        }
-
-        rust_query.explain_plan(verbose).await
+        configured_vector_query(query_ref)?
+            .explain_plan(verbose)
+            .await
     }) {
-        Ok(plan) => match std::ffi::CString::new(plan) {
-            Ok(c_str) => {
-                *plan_out = c_str.into_raw();
-                LanceDBError::Success
-            }
-            Err(_) => {
-                set_unknown_error_message(error_message);
-                LanceDBError::Unknown
-            }
-        },
-        Err(e) => handle_error(&e, error_message),
+        Ok(plan) => publish_plan(plan, plan_out, error_message),
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Return the schema the query would produce without returning rows
+///
+/// The SDK derives the schema from the same configured query used by
+/// `lancedb_query_execute`, so a dynamic projection's names, types and order
+/// are visible before execution. The query is not consumed. The SDK decides
+/// how a backend resolves the plan, and a remote backend can contact it.
+///
+/// On entry, `*schema_out` and the error message are cleared. On success,
+/// `*schema_out` holds an owned Arrow C Data schema that the caller releases
+/// with `lancedb_free_arrow_schema()`. On failure it stays NULL.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `schema_out` must be a valid pointer to receive the schema
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_output_schema(
+    query: *const LanceDBQuery,
+    schema_out: *mut *mut FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !schema_out.is_null() {
+        *schema_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query.is_null() || schema_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match get_runtime().block_on(configured_plain_query(&*query).output_schema()) {
+        Ok(schema) => publish_output_schema(schema.as_ref(), schema_out, error_message),
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Return the schema a vector query would produce without returning rows
+///
+/// The SDK derives the schema from the same configured query used by
+/// `lancedb_vector_query_execute`, including a dynamic projection's names,
+/// types and order. The query is not consumed. The SDK decides how a backend
+/// resolves the plan, and a remote backend can contact it.
+///
+/// On entry, `*schema_out` and the error message are cleared. On success,
+/// `*schema_out` holds an owned Arrow C Data schema that the caller releases
+/// with `lancedb_free_arrow_schema()`. On failure it stays NULL.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `schema_out` must be a valid pointer to receive the schema
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_output_schema(
+    query: *const LanceDBVectorQuery,
+    schema_out: *mut *mut FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !schema_out.is_null() {
+        *schema_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query.is_null() || schema_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let schema =
+        get_runtime().block_on(async { configured_vector_query(&*query)?.output_schema().await });
+    match schema {
+        Ok(schema) => publish_output_schema(schema.as_ref(), schema_out, error_message),
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Execute the query and return an analyzed plan with runtime metrics
+///
+/// The SDK executes the query to collect the metrics shown in the plan, so this
+/// has the same data and side effects as execution while returning no rows. The
+/// query handle is not consumed and can still be executed.
+///
+/// On entry, `*plan_out` and the error message are cleared. On success,
+/// `*plan_out` holds a NUL-terminated string that the caller releases with
+/// `lancedb_free_string()`. On failure it stays NULL.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `plan_out` must be a valid pointer to receive the plan string
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_analyze_plan(
+    query: *const LanceDBQuery,
+    plan_out: *mut *mut c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !plan_out.is_null() {
+        *plan_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query.is_null() || plan_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match get_runtime().block_on(configured_plain_query(&*query).analyze_plan()) {
+        Ok(plan) => publish_plan(plan, plan_out, error_message),
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Execute the vector query and return an analyzed plan with runtime metrics
+///
+/// The SDK executes the query to collect the metrics shown in the plan, so this
+/// has the same data and side effects as execution while returning no rows. The
+/// query handle is not consumed and can still be executed.
+///
+/// On entry, `*plan_out` and the error message are cleared. On success,
+/// `*plan_out` holds a NUL-terminated string that the caller releases with
+/// `lancedb_free_string()`. On failure it stays NULL.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `plan_out` must be a valid pointer to receive the plan string
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_analyze_plan(
+    query: *const LanceDBVectorQuery,
+    plan_out: *mut *mut c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !plan_out.is_null() {
+        *plan_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query.is_null() || plan_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let plan =
+        get_runtime().block_on(async { configured_vector_query(&*query)?.analyze_plan().await });
+    match plan {
+        Ok(plan) => publish_plan(plan, plan_out, error_message),
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
@@ -1060,35 +1418,7 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
 fn run_plain_query(
     query: Box<LanceDBQuery>,
 ) -> Result<SendableRecordBatchStream, lancedb::error::Error> {
-    get_runtime().block_on(async move {
-        let mut rust_query = query.table.query();
-
-        if let Some(limit) = query.limit {
-            rust_query = rust_query.limit(limit);
-        }
-        if let Some(offset) = query.offset {
-            rust_query = rust_query.offset(offset);
-        }
-        if let Some(ref select) = query.select {
-            rust_query = rust_query.select(select.clone());
-        }
-        if query.with_row_id {
-            rust_query = rust_query.with_row_id();
-        }
-        if query.fast_search {
-            rust_query = rust_query.fast_search();
-        }
-        if let Some(df_filter) = query.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
-        } else if let Some(ref filter) = query.filter {
-            rust_query = rust_query.only_if(filter);
-        }
-        if let Some(ref full_text_search) = query.full_text_search {
-            rust_query = rust_query.full_text_search(full_text_search.clone());
-        }
-
-        rust_query.execute().await
-    })
+    get_runtime().block_on(async move { configured_plain_query(&query).execute().await })
 }
 
 /// Run the vector query held by `query` and return the stream the SDK started
@@ -1096,62 +1426,7 @@ fn run_vector_query(
     query: Box<LanceDBVectorQuery>,
 ) -> Result<SendableRecordBatchStream, lancedb::error::Error> {
     get_runtime().block_on(async move {
-        let mut rust_query = match query.table.query().nearest_to(query.query_vector.clone()) {
-            Ok(q) => q,
-            Err(e) => return Err(e),
-        };
-
-        if let Some(ref column) = query.column {
-            rust_query = rust_query.column(column);
-        }
-        if let Some(limit) = query.limit {
-            rust_query = rust_query.limit(limit);
-        }
-        if let Some(offset) = query.offset {
-            rust_query = rust_query.offset(offset);
-        }
-        if let Some(ref select) = query.select {
-            rust_query = rust_query.select(select.clone());
-        }
-        if query.with_row_id {
-            rust_query = rust_query.with_row_id();
-        }
-        if query.fast_search {
-            rust_query = rust_query.fast_search();
-        }
-        if query.bypass_vector_index {
-            rust_query = rust_query.bypass_vector_index();
-        }
-        if let Some(df_filter) = query.df_filter {
-            rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
-        } else if let Some(ref filter) = query.filter {
-            rust_query = rust_query.only_if(filter);
-        }
-        if let Some(ref full_text_search) = query.full_text_search {
-            rust_query = rust_query.full_text_search(full_text_search.clone());
-        }
-        if let Some(distance_type) = query.distance_type {
-            rust_query = rust_query.distance_type(distance_type);
-        }
-        if let Some(nprobes) = query.nprobes {
-            rust_query = rust_query.nprobes(nprobes)?;
-        }
-        if let Some(refine_factor) = query.refine_factor {
-            rust_query = rust_query.refine_factor(refine_factor);
-        }
-        if let Some(ef) = query.ef {
-            rust_query = rust_query.ef(ef);
-        }
-        if query.postfilter {
-            rust_query = rust_query.postfilter();
-        }
-        if let Some(k) = query.rrf_k {
-            rust_query = rust_query.rerank(Arc::new(RRFReranker::new(k)));
-        }
-        if let Some(norm) = query.norm {
-            rust_query = rust_query.norm(norm);
-        }
-
+        let rust_query = configured_vector_query(&query)?;
         rust_query.execute().await
     })
 }
