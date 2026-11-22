@@ -120,6 +120,13 @@ LanceDB and Lance revisions and every archive checksum. Publication is limited
 to preview tags; stable releases remain a manual decision for Xuanwo. A retry
 reuses a draft, and a published release is never replaced.
 
+If an upload is interrupted after GitHub creates an empty `starter` asset, the
+workflow fails closed and names the placeholder. Inspect the exact draft with
+`gh release view <tag> --json databaseId,isDraft,assets`; confirm the named
+asset is the empty `starter` (`size` 0, no digest), then remove only that asset
+with `gh release delete-asset <tag> <name> --yes`. Keep every other draft asset
+and re-dispatch the same exact tag; the workflow uploads only missing assets.
+
 Tag ref reads and release writes are separate GitHub operations. The workflow
 rechecks the exact remote tag before draft writes and again before publication,
 but a tag move in the remaining interval cannot be made atomic from the

@@ -241,6 +241,58 @@ class PrepareTests(ReleaseFixture):
         self.assertIn("| Peeled commit | `" + self.commit + "` |", notes)
         self.assertIn("lightweight", notes)
 
+    @unittest.skipUnless(shutil.which("sha256sum"), "GNU sha256sum is required")
+    def test_prepare_canonicalizes_crlf_inputs_and_checks_all_sums(self) -> None:
+        windows_targets = ("windows-amd64", "windows-arm64")
+        for target_name in windows_targets:
+            target = package.target_for(target_name)
+            checksum = (
+                self.artifacts
+                / f"lancedb-c-{self.commit}-{target.name}.tar.gz.sha256"
+            )
+            checksum.write_bytes(checksum.read_bytes().replace(b"\n", b"\r\n"))
+
+        output = self.prepare()
+        for target_name in windows_targets:
+            target = package.target_for(target_name)
+            archive = output / f"lancedb-c-{self.commit}-{target.name}.tar.gz"
+            checksum = output / f"{archive.name}.sha256"
+            checksum_bytes = checksum.read_bytes()
+            self.assertNotIn(b"\r", checksum_bytes)
+            self.assertEqual(checksum_bytes.count(b"\n"), 1)
+            subprocess.run(
+                ["sha256sum", "-c", checksum.name],
+                cwd=output,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            with tempfile.TemporaryDirectory(
+                prefix=f"lancedb-c-release-{target.name}-"
+            ) as temp:
+                root = Path(temp)
+                package.extract_tar(archive, root)
+                package_root = root / f"lancedb-c-{self.commit}-{target.name}"
+                internal = (package_root / "SHA256SUMS").read_bytes()
+                self.assertNotIn(b"\r", internal)
+                subprocess.run(
+                    ["sha256sum", "-c", "SHA256SUMS"],
+                    cwd=package_root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+        combined = (output / "SHA256SUMS").read_bytes()
+        self.assertNotIn(b"\r", combined)
+        subprocess.run(
+            ["sha256sum", "-c", "SHA256SUMS"],
+            cwd=output,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     def test_rejects_missing_target(self) -> None:
         target = package.target_for(release.RELEASE_TARGETS[0])
         archive = self.artifacts / f"lancedb-c-{self.commit}-{target.name}.tar.gz"
@@ -470,6 +522,32 @@ class PublishTests(ReleaseFixture):
         self.assertEqual(
             uploaded, {asset.name for asset in self.assets[1:]}
         )
+        self.assertEqual(
+            {asset["name"] for asset in state["release"]["assets"]},
+            {asset.name for asset in self.assets},
+        )
+
+    def test_starter_asset_fails_closed_then_retry_succeeds(self) -> None:
+        starter = self.asset_json(self.assets[0].name)
+        starter.update({"state": "starter", "digest": None, "size": 0})
+        state = {
+            "release": self.release_json([starter]),
+            "created": False,
+            "edits": [],
+            "uploads": [],
+        }
+        with self.assertRaisesRegex(SystemExit, "empty starter"):
+            self.publish(state)
+        self.assertEqual(state["edits"], [])
+        self.assertEqual(state["uploads"], [])
+
+        # This is the documented operator action: remove only the empty
+        # placeholder from the exact draft, leaving every other asset in place.
+        state["release"]["assets"] = []
+        state["edits"].clear()
+        state["uploads"].clear()
+        self.publish(state)
+        self.assertFalse(state["release"]["isDraft"])
         self.assertEqual(
             {asset["name"] for asset in state["release"]["assets"]},
             {asset.name for asset in self.assets},

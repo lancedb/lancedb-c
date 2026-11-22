@@ -430,12 +430,14 @@ def prepare(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, exist_ok=True)
     for artifact in packages:
         shutil.copyfile(artifact.archive, output / artifact.archive.name)
-        shutil.copyfile(artifact.checksum, output / artifact.checksum.name)
+        (output / artifact.checksum.name).write_bytes(
+            f"{artifact.sha256}  {artifact.archive.name}\n".encode("utf-8")
+        )
 
     sums = "\n".join(
         f"{artifact.sha256}  {artifact.archive.name}" for artifact in packages
     )
-    (output / "SHA256SUMS").write_text(sums + "\n", encoding="utf-8")
+    (output / "SHA256SUMS").write_bytes((sums + "\n").encode("utf-8"))
     notes_name = "release-notes.md"
     (output / notes_name).write_text(
         render_notes(tag, packages, locked), encoding="utf-8"
@@ -651,8 +653,16 @@ def check_release_assets(
             fail(f"release contains duplicate asset: {name}")
         if name not in expected:
             fail(f"release contains unexpected asset: {name}")
-        if asset.get("state") != "uploaded":
-            fail(f"release asset {name} is not in the uploaded state")
+        state = asset.get("state")
+        if state == "starter":
+            fail(
+                f"release asset {name} is an empty starter left by an interrupted "
+                f"upload; remove only that placeholder from draft "
+                f"{release.get('tagName')!r} (release {release.get('databaseId')!r}) "
+                "before retrying, then leave the other draft assets in place"
+            )
+        if state != "uploaded":
+            fail(f"release asset {name} is in state {state!r}, not 'uploaded'")
         digest = normalized_asset_digest(asset)
         if digest is None:
             fail(f"cannot verify the existing digest of release asset {name}")
