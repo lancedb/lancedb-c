@@ -89,8 +89,6 @@ fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str,
     }
     let output_dir = cargo_output_dir(out_dir);
     let deps_dir = output_dir.join("deps");
-    fs::create_dir_all(&deps_dir)
-        .unwrap_or_else(|error| panic!("failed to create {}: {error}", deps_dir.display()));
 
     let mut definition = String::from("LIBRARY lancedb.dll\nEXPORTS\n");
     for name in functions {
@@ -109,11 +107,10 @@ fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str,
     } else {
         panic!("unsupported MSVC architecture in target {target}");
     };
-    // lib.exe writes the export file next to the import library. Passing an
-    // export file to link.exe makes it ignore rustc's generated /DEF, including
-    // dependency __declspec(dllexport) directives, so the DLL and the paired
-    // import library contain exactly the header functions.
-    let import_library = deps_dir.join("lancedb.dll.lib");
+    // Keep every generated file under OUT_DIR. Cargo and rustc replace the
+    // normal output basename in the profile and deps directories, so an export
+    // file or import library there can disappear before the final link.
+    let import_library = out_dir.join("lancedb.dll.lib");
     let status = Command::new("lib.exe")
         .arg("/nologo")
         .arg(format!("/DEF:{}", definition_path.display()))
@@ -124,19 +121,23 @@ fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str,
     if !status.success() {
         panic!("lib.exe did not create {}", import_library.display());
     }
-    let export_file = deps_dir.join("lancedb.dll.exp");
+    let export_file = out_dir.join("lancedb.dll.exp");
     if !export_file.is_file() {
         panic!("lib.exe did not create {}", export_file.display());
     }
-    let uplifted_import_library = output_dir.join("lancedb.dll.lib");
-    fs::copy(&import_library, &uplifted_import_library).unwrap_or_else(|error| {
-        panic!(
-            "failed to copy {} to {}: {error}",
-            import_library.display(),
-            uplifted_import_library.display()
-        )
-    });
     println!("cargo:rustc-cdylib-link-arg={}", export_file.display());
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY={}",
+        import_library.display()
+    );
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY_DEPS={}",
+        deps_dir.join("lancedb.dll.lib").display()
+    );
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY_UPLIFT={}",
+        output_dir.join("lancedb.dll.lib").display()
+    );
 }
 
 fn cargo_output_dir(out_dir: &Path) -> PathBuf {
