@@ -22,6 +22,8 @@ _Static_assert(sizeof(LanceDBIndexType) == sizeof(int), "LanceDBIndexType must h
 _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType must have the C int ABI");
 _Static_assert(sizeof(LanceDBBinaryOp) == sizeof(int), "LanceDBBinaryOp must have the C int ABI");
 _Static_assert(sizeof(LanceDBBranchSourceKind) == sizeof(int), "LanceDBBranchSourceKind must have the C int ABI");
+_Static_assert(sizeof(LanceDBOpenTableField) == sizeof(int),
+               "LanceDBOpenTableField must have the C int ABI");
 _Static_assert(sizeof(float) == sizeof(int), "LanceDBVectorIndexConfig assumes int-sized fields");
 _Static_assert(offsetof(LanceDBVectorIndexConfig, distance_type) == 4 * sizeof(int),
                "LanceDBVectorIndexConfig layout changed");

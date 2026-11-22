@@ -1016,6 +1016,449 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
+  const std::string table_name = "open_options_table";
+  constexpr size_t initial_rows = 6;
+  constexpr size_t added_rows = 3;
+
+  auto open_with_options = [&](const char* name,
+                               const LanceDBOpenTableOptions* options,
+                               LanceDBTable** table,
+                               char** error_message) {
+    return lancedb_connection_open_table_with_options(
+        db, name, options, table, error_message);
+  };
+
+  auto require_count_and_version = [](LanceDBTable* table, size_t rows, uint64_t version) {
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == rows);
+    REQUIRE(lancedb_table_version(table) == version);
+  };
+
+  char* error_message = nullptr;
+  LanceDBTable* table = create_table_with_data(table_name, initial_rows, 0);
+  REQUIRE(table != nullptr);
+  auto reader = create_reader_from_batch(
+      create_test_record_batch(added_rows, initial_rows));
+  REQUIRE(reader != nullptr);
+  REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  require_count_and_version(table, initial_rows + added_rows, 2);
+  lancedb_table_free(table);
+
+  SECTION("Zero-initialized and NULL options open the latest table") {
+    LanceDBOpenTableOptions options{};
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+
+    opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), nullptr, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("Unused initialized fields do not change the latest open") {
+    LanceDBOpenTableOptions options{};
+    options.version = 1;
+    options.managed_versioning = 2;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("A selected version opens a read-only snapshot") {
+    LanceDBOpenTableOptions options{};
+    options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
+    options.version = 1;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows, 1);
+
+    auto pinned_reader = create_reader_from_batch(create_test_record_batch(1, 20));
+    REQUIRE(pinned_reader != nullptr);
+    REQUIRE(lancedb_table_add(opened, pinned_reader, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    require_count_and_version(opened, initial_rows, 1);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("Version zero is selected instead of treated as omitted") {
+    LanceDBOpenTableOptions options{};
+    options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
+    options.version = 0;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("The main branch composes with a selected version") {
+    LanceDBOpenTableOptions options{};
+    options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
+    options.version = 1;
+    options.branch = "main";
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows, 1);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("A named branch opens its head and a pinned branch version") {
+    LanceDBTable* main = open_table(table_name);
+    LanceDBBranchSource source{};
+    source.kind = LANCEDB_BRANCH_SOURCE_VERSION;
+    source.has_version = 1;
+    source.version = 2;
+
+    LanceDBTable* branch = nullptr;
+    REQUIRE(lancedb_table_create_branch(
+        main, "open_options_branch", &source, &branch, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(branch != nullptr);
+    lancedb_table_free(main);
+
+    const uint64_t branch_fork_version = lancedb_table_version(branch);
+    require_count_and_version(branch, initial_rows + added_rows, branch_fork_version);
+
+    auto branch_reader = create_reader_from_batch(
+        create_test_record_batch(2, initial_rows + added_rows));
+    REQUIRE(branch_reader != nullptr);
+    REQUIRE(lancedb_table_add(branch, branch_reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    const uint64_t branch_head_version = lancedb_table_version(branch);
+    require_count_and_version(
+        branch, initial_rows + added_rows + 2, branch_head_version);
+    lancedb_table_free(branch);
+
+    LanceDBOpenTableOptions options{};
+    options.branch = "open_options_branch";
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(
+        opened, initial_rows + added_rows + 2, branch_head_version);
+    lancedb_table_free(opened);
+
+    options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
+    options.version = branch_fork_version;
+    opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(
+        opened, initial_rows + added_rows, branch_fork_version);
+
+    auto pinned_reader = create_reader_from_batch(create_test_record_batch(1, 30));
+    REQUIRE(pinned_reader != nullptr);
+    REQUIRE(lancedb_table_add(opened, pinned_reader, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    require_count_and_version(
+        opened, initial_rows + added_rows, branch_fork_version);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("A missing branch keeps the output NULL") {
+    LanceDBOpenTableOptions options{};
+    options.branch = "open_options_missing_branch";
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("Explicit index cache sizes are accepted") {
+    LanceDBOpenTableOptions options{};
+    options.set_fields = LANCEDB_OPEN_TABLE_INDEX_CACHE_SIZE;
+    options.index_cache_size = 0;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+
+    options.index_cache_size = 16;
+    opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("A custom location replaces the derived table path") {
+    const std::string source_name = "open_options_location_source";
+    const std::string moved_name = "open_options_location_moved";
+    LanceDBTable* source = create_table_with_data(source_name, 4, 0);
+    REQUIRE(source != nullptr);
+    lancedb_table_free(source);
+
+    const auto source_dir = std::filesystem::path(uri) / (source_name + ".lance");
+    const auto moved_dir = std::filesystem::path(uri) / (moved_name + ".lance");
+    std::error_code rename_error;
+    std::filesystem::rename(source_dir, moved_dir, rename_error);
+    REQUIRE_FALSE(rename_error);
+    const std::string moved_location = moved_dir.string();
+
+    LanceDBOpenTableOptions options{};
+    options.location = moved_location.c_str();
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(source_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, 4, 1);
+    lancedb_table_free(opened);
+
+    // The derived path no longer exists, so the legacy open cannot find it.
+    opened = nullptr;
+    REQUIRE(lancedb_connection_open_table(db, source_name.c_str(), &opened, &error_message)
+        == LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("Per-table storage options are borrowed and validated") {
+    const std::string key_storage = "scheduler_error_mode";
+    const std::string value_storage = "best_effort";
+    const char* keys[] = {key_storage.c_str()};
+    const char* values[] = {value_storage.c_str()};
+
+    LanceDBOpenTableOptions options{};
+    options.storage_keys = keys;
+    options.storage_values = values;
+    options.storage_count = 1;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+
+    // The options and their strings are only borrowed for the call.
+    options.storage_keys = nullptr;
+    opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.storage_keys = keys;
+    const char* null_values[] = {nullptr};
+    options.storage_values = null_values;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const char* invalid_keys[] = {NON_UTF8};
+    options.storage_keys = invalid_keys;
+    options.storage_values = values;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("An invalid scheduler_error_mode is diagnosed by the SDK") {
+    const char* keys[] = {"scheduler_error_mode"};
+    const char* values[] = {"invalid"};
+    LanceDBOpenTableOptions options{};
+    options.storage_keys = keys;
+    options.storage_values = values;
+    options.storage_count = 1;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("scheduler_error_mode") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("Managed versioning distinguishes unset, false and true") {
+    LanceDBOpenTableOptions options{};
+    options.set_fields = LANCEDB_OPEN_TABLE_MANAGED_VERSIONING;
+
+    for (const int value : {0, 1}) {
+      options.managed_versioning = value;
+      LanceDBTable* opened = nullptr;
+      REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      require_count_and_version(opened, initial_rows + added_rows, 2);
+      lancedb_table_free(opened);
+    }
+
+    options.managed_versioning = 2;
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("A multi-component namespace path selects that namespace") {
+    const char* parent_path[] = {"open_options_parent"};
+    const char* child_path[] = {"open_options_parent", "child"};
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, parent_path, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, child_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const std::string namespaced_name = "open_options_namespaced";
+    LanceDBTable* root_table = create_table_with_data(namespaced_name, 4, 0);
+    REQUIRE(root_table != nullptr);
+    lancedb_table_free(root_table);
+
+    LanceDBOpenTableOptions options{};
+    options.namespace_path = child_path;
+    options.namespace_path_len = 2;
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(namespaced_name.c_str(), &options, &opened, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // Zero length is the root namespace even when a non-NULL array is passed.
+    options.namespace_path_len = 0;
+    opened = nullptr;
+    REQUIRE(open_with_options(namespaced_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, 4, 1);
+    lancedb_table_free(opened);
+  }
+
+  SECTION("Invalid open options are rejected") {
+    LanceDBOpenTableOptions options{};
+    options.set_fields = 1u << 31;
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = {};
+    options.location = NON_UTF8;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = {};
+    options.branch = NON_UTF8;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const char* null_component[] = {"parent", nullptr};
+    options = {};
+    options.namespace_path_len = 2;
+    options.namespace_path = null_component;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options = {};
+    options.namespace_path_len = 1;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(open_with_options("invalid table name", nullptr, &opened, &error_message)
+        == LANCEDB_INVALID_TABLE_NAME);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("The new entry clears outputs on failure while the legacy entry keeps its own") {
+    LanceDBTable* previous = open_table(table_name);
+    LanceDBTable* output = previous;
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(open_with_options("open_options_missing", nullptr, &output, &error_message)
+        == LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(output == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    lancedb_table_free(previous);
+
+    // The legacy entry does not write its output on failure.
+    previous = open_table(table_name);
+    output = previous;
+    REQUIRE(lancedb_connection_open_table(
+        db, "open_options_missing", &output, &error_message) == LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(output == previous);
+    if (error_message != nullptr) {
+      lancedb_free_string(error_message);
+      error_message = nullptr;
+    }
+    lancedb_table_free(previous);
+  }
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Connection - table operations with invalid arguments", "[connection]") {
   char* error_message = nullptr;
   const char* _namespace = nullptr;
