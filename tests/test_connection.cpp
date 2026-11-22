@@ -232,8 +232,11 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Settings", "[connection]") {
     lancedb_connection_free(connection);
   }
 
-  SECTION("Remote settings reach the SDK without contacting the backend") {
-    LanceDBConnectBuilder* builder = lancedb_connect("db://test");
+  SECTION("A valid remote root applies settings without contacting the backend") {
+    // The root URI requires a host override. Without the API key reaching the
+    // SDK, execution fails while validating the remote options, before any
+    // network request. This is a local dummy host.
+    LanceDBConnectBuilder* builder = lancedb_connect("db://");
     REQUIRE(builder != nullptr);
     builder = lancedb_connect_builder_api_key(builder, "test-api-key");
     REQUIRE(builder != nullptr);
@@ -262,6 +265,24 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Settings", "[connection]") {
     REQUIRE(consistency.interval_ms == 7);
     lancedb_free_string(error_message);
     lancedb_connection_free(connection);
+  }
+
+  SECTION("Malformed remote URIs keep SDK validation errors") {
+    LanceDBConnectBuilder* builder = lancedb_connect("db-not-a-uri");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "test-api-key");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "us-east-1");
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_builder_execute(builder, &connection, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(connection == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("not a valid URL") != std::string::npos);
+    lancedb_free_string(error_message);
   }
 
   SECTION("Enterprise connections reject namespace client properties") {

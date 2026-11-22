@@ -493,10 +493,12 @@ typedef struct {
 /**
  * Read consistency mode reported by a connection
  *
- * LANCEDB_READ_CONSISTENCY_MANUAL means reads do not check for updates from
- * other writers. LANCEDB_READ_CONSISTENCY_STRONG means every read checks for
- * updates. LANCEDB_READ_CONSISTENCY_EVENTUAL means a read checks for updates
- * when more than the configured interval has passed since the previous check.
+ * LANCEDB_READ_CONSISTENCY_MANUAL means reads add no freshness constraint.
+ * LANCEDB_READ_CONSISTENCY_STRONG means reads request the latest data.
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL means reads accept data within the
+ * configured freshness bound. Native connections check for updates at most
+ * once per interval; remote connections send the interval as a per-request
+ * minimum freshness bound.
  */
 typedef enum {
     LANCEDB_READ_CONSISTENCY_MANUAL = 0,
@@ -568,21 +570,24 @@ LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuil
  * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
  *
  * The builder is consumed by this function and must not be used after calling.
- * The option is only used for db:// URIs and is ignored for other URIs.
- * A NULL or non-UTF-8 api_key returns NULL.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. The setter does not add
+ * it to native storage options. A NULL or non-UTF-8 api_key returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_api_key(LanceDBConnectBuilder* builder, const char* api_key);
 
 /**
- * Set the LanceDB Cloud (legacy) region
+ * Set the region for a db:// connection
  *
  * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
  * @param region - NUL-terminated region name
  * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
  *
  * The builder is consumed by this function and must not be used after calling.
- * The option is only used for db:// URIs and is ignored for other URIs.
- * A NULL or non-UTF-8 region returns NULL.
+ * The SDK requires a region for both LanceDB Cloud and LanceDB Enterprise
+ * connections, including when a host override is used. This setter is only
+ * applied when the connection dispatches to the SDK remote path, which is
+ * selected by a URI beginning with db. A NULL or non-UTF-8 region returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_region(LanceDBConnectBuilder* builder, const char* region);
 
@@ -594,10 +599,10 @@ LanceDBConnectBuilder* lancedb_connect_builder_region(LanceDBConnectBuilder* bui
  * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
  *
  * The builder is consumed by this function and must not be used after calling.
- * The option is only used for db:// URIs and is ignored for other URIs. Use the
- * URI db:// together with a host override to connect to LanceDB Enterprise
- * tables stored directly in the storage root.
- * A NULL or non-UTF-8 host_override returns NULL.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. Use the URI db:// together
+ * with a host override to connect to LanceDB Enterprise tables stored directly
+ * in the storage root. A NULL or non-UTF-8 host_override returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_host_override(LanceDBConnectBuilder* builder, const char* host_override);
 
@@ -609,8 +614,10 @@ LanceDBConnectBuilder* lancedb_connect_builder_host_override(LanceDBConnectBuild
  * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
  *
  * The builder is consumed by this function and must not be used after calling.
- * The option is only used for db:// URIs and is ignored for other URIs.
- * A NULL or non-UTF-8 sql_host_override returns NULL.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. The SQL endpoint is
+ * contacted only when the connection executes SQL; setting this option does
+ * not contact it. A NULL or non-UTF-8 sql_host_override returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_sql_host_override(LanceDBConnectBuilder* builder, const char* sql_host_override);
 
@@ -654,11 +661,18 @@ LanceDBConnectBuilder* lancedb_connect_builder_manifest_enabled(LanceDBConnectBu
  * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
  *
  * The builder is consumed by this function and must not be used after calling.
- * Leaving this setter unused keeps the SDK default: reads do not check for
- * updates from other writers. An explicit 0 selects strong consistency, so
- * every read checks for updates. A positive value selects eventual consistency:
- * a read checks for updates when more than interval_ms has passed since the
- * previous check. The interval only affects reads; writes are always consistent.
+ * Leaving this setter unused keeps the SDK default: no freshness constraint is
+ * added to reads. An explicit 0 requests strong consistency. A positive value
+ * requests eventual consistency. The interval only affects reads; writes are
+ * always consistent.
+ *
+ * Native connections check for updates at most once per interval. Remote
+ * connections send the interval as a minimum freshness bound on each table
+ * request; the server applies it rather than the client polling locally.
+ * Reading the configured mode back through lancedb_connection_read_consistency()
+ * is supported for native connections; the SDK reports LANCEDB_NOT_SUPPORTED
+ * for remote connections.
+ *
  * A NULL builder returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_read_consistency_interval_ms(LanceDBConnectBuilder* builder, uint64_t interval_ms);
@@ -715,10 +729,11 @@ const char* lancedb_connection_uri(const LanceDBConnection* connection);
  * LANCEDB_READ_CONSISTENCY_EVENTUAL with interval_ms set to that value.
  *
  * On failure, consistency_out is left unchanged so a caller can keep its own
- * sentinel there. LanceDB Enterprise connections return LANCEDB_NOT_SUPPORTED
- * because the SDK does not expose their read consistency. A non-NULL
- * error_message is cleared on entry and must be freed with
- * lancedb_free_string() after an error.
+ * sentinel there. LanceDB Enterprise and LanceDB Cloud connections return
+ * LANCEDB_NOT_SUPPORTED because the SDK does not expose their read
+ * consistency, even though the interval still controls their per-request
+ * freshness bound. A non-NULL error_message is cleared on entry and must be
+ * freed with lancedb_free_string() after an error.
  *
  * This function does not fall back to a predicted mode when the SDK query
  * fails.
