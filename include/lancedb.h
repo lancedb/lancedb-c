@@ -1450,6 +1450,12 @@ LanceDBError lancedb_table_alter_columns(
  * the call. On success, version_out is the operation's own commit version; it
  * may be 0 for legacy remote servers that do not report a version. On failure,
  * version_out is left unchanged. No separate table version lookup is performed.
+ *
+ * The pinned embedded Lance backend rejects changing a currently nullable field
+ * to NOT NULL in the same call as a cast, even when the field has no NULL
+ * values. The SDK error is returned unchanged; apply the cast and the
+ * nullability change in separate calls. Renaming a field, or relaxing a NOT
+ * NULL field to NULL, can be combined with a cast.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */

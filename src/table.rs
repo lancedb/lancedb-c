@@ -2352,6 +2352,12 @@ pub unsafe extern "C" fn lancedb_table_alter_columns(
 ///
 /// # Returns
 /// - Error code indicating success or failure
+///
+/// The pinned embedded Lance backend rejects changing a currently nullable
+/// field to NOT NULL in the same call as a cast, even when the field has no
+/// NULL values. The SDK error is returned unchanged; apply the cast and the
+/// nullability change in separate calls. Renaming a field, or relaxing a NOT
+/// NULL field to NULL, can be combined with a cast.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_alter_columns_with_cast(
     table: *const LanceDBTable,

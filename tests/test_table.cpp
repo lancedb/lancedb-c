@@ -3079,6 +3079,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(error_message == nullptr);
     REQUIRE(version == initial_version + 1);
     REQUIRE(version == lancedb_table_version(table));
+    REQUIRE(c_all_nulls_schema.release != nullptr);
     if (c_all_nulls_schema.release) {
       c_all_nulls_schema.release(&c_all_nulls_schema);
     }
@@ -3120,11 +3121,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
         table, reinterpret_cast<FFI_ArrowSchema*>(&c_empty_schema), &version,
         &error_message) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
+    REQUIRE(c_empty_schema.release != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
     REQUIRE(lancedb_table_add_columns_all_nulls(
         table, reinterpret_cast<FFI_ArrowSchema*>(&c_empty_schema), nullptr,
         nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(c_empty_schema.release != nullptr);
     if (c_empty_schema.release) {
       c_empty_schema.release(&c_empty_schema);
     }
@@ -3137,6 +3140,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(lancedb_table_add_columns_all_nulls(
         table, reinterpret_cast<FFI_ArrowSchema*>(&c_non_nullable_schema), &version,
         &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(c_non_nullable_schema.release != nullptr);
     REQUIRE(error_message != nullptr);
     REQUIRE(std::string(error_message).find("nullable") != std::string::npos);
     lancedb_free_string(error_message);
@@ -3164,6 +3168,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     uint64_t version = 42;
     REQUIRE(lancedb_table_alter_columns_with_cast(
         table, unsupported, 1, &version, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(c_unsupported_cast.release != nullptr);
     REQUIRE(error_message != nullptr);
     REQUIRE(std::string(error_message).find("Cannot cast column") != std::string::npos);
     lancedb_free_string(error_message);
@@ -3175,7 +3180,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(lancedb_table_version(table) == initial_version);
 
     auto int64_cast = arrow::schema({
-        arrow::field("score", arrow::int64()),
+        arrow::field("score", arrow::int64(), /*nullable=*/false),
     });
     struct ArrowSchema c_int64_cast;
     REQUIRE(arrow::ExportSchema(*int64_cast, &c_int64_cast).ok());
@@ -3189,6 +3194,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(error_message == nullptr);
     REQUIRE(version == initial_version + 1);
     REQUIRE(version == lancedb_table_version(table));
+    REQUIRE(c_int64_cast.release != nullptr);
     if (c_int64_cast.release) {
       c_int64_cast.release(&c_int64_cast);
     }
@@ -3204,11 +3210,50 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(query_int64_values(table, "key = 'key_1'", "score64") ==
             std::vector<int64_t>{20});
     REQUIRE(lancedb_table_count_rows(table) == 5);
+
+    // Embedded Lance rejects a cast combined with tightening a nullable field
+    // even when the data has no NULLs. Add a nullable column whose values are
+    // all non-null, then ask for the cast and NOT NULL in one operation.
+    const char* nullable_name[] = {"cast_tighten"};
+    const char* nullable_expression[] = {"score64"};
+    uint64_t add_version = 0;
+    REQUIRE(lancedb_table_add_columns(
+        table, nullable_name, nullable_expression, 1, &add_version, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(add_version == lancedb_table_version(table));
+    auto nullable_schema = read_table_schema(table);
+    auto tighten_field = schema_field(nullable_schema, "cast_tighten");
+    REQUIRE(tighten_field != nullptr);
+    REQUIRE(tighten_field->nullable());
+
+    auto int32_cast = arrow::schema({
+        arrow::field("cast_tighten", arrow::int32(), /*nullable=*/false),
+    });
+    struct ArrowSchema c_int32_cast;
+    REQUIRE(arrow::ExportSchema(*int32_cast, &c_int32_cast).ok());
+    LanceDBColumnAlterationWithCast tighten[] = {
+        {"cast_tighten", nullptr, /*set_nullable=*/1, /*nullable=*/0,
+         reinterpret_cast<FFI_ArrowSchema*>(&c_int32_cast)},
+    };
+    uint64_t failed_version = 42;
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, tighten, 1, &failed_version, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(c_int32_cast.release != nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("non-nullable and cast") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    if (c_int32_cast.release) {
+      c_int32_cast.release(&c_int32_cast);
+    }
+    REQUIRE(failed_version == 42);
+    REQUIRE(lancedb_table_version(table) == add_version);
   }
 
   SECTION("Alter columns with cast rejects invalid input and preserves state") {
     auto int64_cast = arrow::schema({
-        arrow::field("score", arrow::int64()),
+        arrow::field("score", arrow::int64(), /*nullable=*/false),
     });
     struct ArrowSchema c_int64_cast;
     REQUIRE(arrow::ExportSchema(*int64_cast, &c_int64_cast).ok());
@@ -3244,6 +3289,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
         table, no_change, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_table_alter_columns_with_cast(
         table, two_field_cast, 1, &version, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(c_int64_cast.release != nullptr);
+    REQUIRE(c_two_fields.release != nullptr);
     REQUIRE(error_message != nullptr);
     REQUIRE(std::string(error_message).find("exactly one field") != std::string::npos);
     lancedb_free_string(error_message);
