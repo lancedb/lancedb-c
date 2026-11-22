@@ -6,6 +6,7 @@
 use std::os::raw::{c_char, c_int};
 
 use arrow_array::RecordBatchReader;
+use lancedb::rerankers::NormalizeMethod;
 use lancedb::DistanceType;
 
 use crate::expr::LanceDBExpr;
@@ -40,6 +41,34 @@ impl From<LanceDBDistanceType> for DistanceType {
             LanceDBDistanceType::Cosine => Self::Cosine,
             LanceDBDistanceType::Dot => Self::Dot,
             LanceDBDistanceType::Hamming => Self::Hamming,
+        }
+    }
+}
+
+/// Score normalization method for hybrid search reranking
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LanceDBNormalizeMethod {
+    Score = 0,
+    Rank = 1,
+}
+
+impl LanceDBNormalizeMethod {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    pub(crate) fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::Score),
+            1 => Some(Self::Rank),
+            _ => None,
+        }
+    }
+}
+
+impl From<LanceDBNormalizeMethod> for NormalizeMethod {
+    fn from(method: LanceDBNormalizeMethod) -> Self {
+        match method {
+            LanceDBNormalizeMethod::Score => Self::Score,
+            LanceDBNormalizeMethod::Rank => Self::Rank,
         }
     }
 }

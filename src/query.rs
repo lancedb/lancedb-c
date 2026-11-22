@@ -19,6 +19,8 @@ use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
 use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
+use lancedb::rerankers::rrf::RRFReranker;
+use lancedb::rerankers::NormalizeMethod;
 use lancedb::{DistanceType, Table};
 
 use crate::connection::{get_runtime, LanceDBTable};
@@ -28,7 +30,7 @@ use crate::error::{
 };
 use crate::expr::LanceDBExpr;
 use crate::ipc::{self, LanceDBIpcBuffer};
-use crate::types::LanceDBDistanceType;
+use crate::types::{LanceDBDistanceType, LanceDBNormalizeMethod};
 
 /// Opaque handle to a LanceDB Query
 #[repr(C)]
@@ -37,6 +39,8 @@ pub struct LanceDBQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     select: Option<Select>,
+    with_row_id: bool,
+    fast_search: bool,
     filter: Option<String>,
     df_filter: Option<Expr>,
     full_text_search: Option<FullTextSearchQuery>,
@@ -51,6 +55,11 @@ pub struct LanceDBVectorQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     select: Option<Select>,
+    with_row_id: bool,
+    fast_search: bool,
+    bypass_vector_index: bool,
+    rrf_k: Option<f32>,
+    norm: Option<NormalizeMethod>,
     filter: Option<String>,
     df_filter: Option<Expr>,
     full_text_search: Option<FullTextSearchQuery>,
@@ -90,6 +99,8 @@ pub unsafe extern "C" fn lancedb_query_new(table: *const LanceDBTable) -> *mut L
         limit: None,
         offset: None,
         select: None,
+        with_row_id: false,
+        fast_search: false,
         filter: None,
         df_filter: None,
         full_text_search: None,
@@ -129,6 +140,11 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
         limit: None,
         offset: None,
         select: None,
+        with_row_id: false,
+        fast_search: false,
+        bypass_vector_index: false,
+        rrf_k: None,
+        norm: None,
         filter: None,
         df_filter: None,
         full_text_search: None,
@@ -257,6 +273,54 @@ pub unsafe extern "C" fn lancedb_query_select(
     (*query).select = Some(Select::columns(
         &column_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     ));
+    LanceDBError::Success
+}
+
+/// Ask a plain query to return the `_rowid` metadata column
+///
+/// This applies to ordinary scans and standalone full-text searches built with
+/// `lancedb_query_full_text_search`. The metadata column is appended to the
+/// projection.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_with_row_id(
+    query: *mut LanceDBQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+    (*query).with_row_id = true;
+    LanceDBError::Success
+}
+
+/// Restrict a plain query to data covered by an index
+///
+/// For an ordinary scan this applies only when the filter plan uses a scalar
+/// index; an unfiltered scan, or a filter without an index, still reads every
+/// selected fragment. A standalone full-text search reads only indexed rows.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_fast_search(
+    query: *mut LanceDBQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+    (*query).fast_search = true;
     LanceDBError::Success
 }
 
@@ -463,6 +527,87 @@ pub unsafe extern "C" fn lancedb_vector_query_select(
     LanceDBError::Success
 }
 
+/// Ask a vector query to return the `_rowid` metadata column
+///
+/// This also applies to a hybrid vector plus full-text query. The metadata
+/// column is appended to the projection.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_with_row_id(
+    query: *mut LanceDBVectorQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+    (*query).with_row_id = true;
+    LanceDBError::Success
+}
+
+/// Restrict a vector query to rows covered by the vector index
+///
+/// The SDK turns this into an index-only search: rows appended or updated
+/// after the index was built may be absent, and a query with no usable vector
+/// index returns no rows.
+///
+/// On a hybrid query this flag is part of the shared request, so it applies to
+/// both the full-text and vector legs. `lancedb_vector_query_bypass_vector_index`
+/// only affects the vector leg. Embedded LanceDB applies fast search after the
+/// bypass flag, so fast search wins when both are set. A remote LanceDB forwards
+/// both flags to the server, which decides their interaction.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_fast_search(
+    query: *mut LanceDBVectorQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+    (*query).fast_search = true;
+    LanceDBError::Success
+}
+
+/// Skip the vector index and compare the query vector with every row
+///
+/// This performs an exhaustive flat search even when a vector index exists.
+/// It is useful as ground truth for recall measurements. A filter still keeps
+/// its configured pre-filter or post-filter placement.
+///
+/// On a hybrid query this only affects the vector leg. Embedded LanceDB applies
+/// fast search after this flag, so a query with both set behaves as a fast
+/// search. A remote LanceDB forwards both flags to the server.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_bypass_vector_index(
+    query: *mut LanceDBVectorQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+    (*query).bypass_vector_index = true;
+    LanceDBError::Success
+}
+
 /// Set WHERE filter for vector query
 ///
 /// # Safety
@@ -575,6 +720,74 @@ pub unsafe extern "C" fn lancedb_vector_query_postfilter(
 
     let _ = error_message; // No errors possible in this function
     (*query).postfilter = true;
+    LanceDBError::Success
+}
+
+/// Use reciprocal rank fusion with an explicit `k` for hybrid search
+///
+/// This installs the SDK's `RRFReranker` on the vector query. It only changes
+/// the result of a hybrid query built with
+/// `lancedb_vector_query_full_text_search`; on a vector-only query the
+/// reranker is stored but unused. Fusion scores each result as
+/// `1 / (k + rank)` with ranks starting at 1, summed across the vector and
+/// full-text lists. When this setter is not called, the SDK uses its own
+/// default `k = 60`. A caller that treats zero as "use the default" must pass
+/// 60 here instead, because the value is forwarded unchanged.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_rerank_rrf(
+    query: *mut LanceDBVectorQuery,
+    k: c_float,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let _ = error_message; // No errors possible in this function
+    (*query).rrf_k = Some(k);
+    LanceDBError::Success
+}
+
+/// Set how hybrid-search scores are normalized before reranking
+///
+/// This only affects a hybrid query built with
+/// `lancedb_vector_query_full_text_search`. `LANCEDB_NORMALIZE_SCORE`
+/// normalizes the raw scores and `LANCEDB_NORMALIZE_RANK` converts them to
+/// ranks first. The SDK always normalizes the vector distance and full-text
+/// score columns before invoking the reranker; this setter selects whether
+/// that normalization starts from the scores or from their ranks.
+///
+/// The built-in RRF reranker uses only row identities and list positions, so
+/// this setting does not change its ranking or `_relevance_score`. It does
+/// change the normalized score columns preserved in the result. When this
+/// setter is not called, the SDK's default normalization applies. An invalid
+/// value is rejected before assignment, leaving any previous selection intact.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_norm(
+    query: *mut LanceDBVectorQuery,
+    normalize_method: c_int,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(normalize_method) = LanceDBNormalizeMethod::from_c_int(normalize_method) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    (*query).norm = Some(normalize_method.into());
     LanceDBError::Success
 }
 
@@ -704,6 +917,12 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
         if let Some(ref select) = query_ref.select {
             rust_query = rust_query.select(select.clone());
         }
+        if query_ref.with_row_id {
+            rust_query = rust_query.with_row_id();
+        }
+        if query_ref.fast_search {
+            rust_query = rust_query.fast_search();
+        }
         if let Some(ref full_text_search) = query_ref.full_text_search {
             rust_query = rust_query.full_text_search(full_text_search.clone());
         }
@@ -734,6 +953,10 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
 /// Returns a human-readable string describing what steps will be taken
 /// to execute the query. Does NOT consume the query — it can still be
 /// executed afterwards.
+///
+/// Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
+/// full-text search at plan time with the SDK's unsupported-shape error. That is
+/// an SDK limitation, not a C-side argument error; execute the query instead.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -778,6 +1001,15 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         if let Some(ref select) = query_ref.select {
             rust_query = rust_query.select(select.clone());
         }
+        if query_ref.with_row_id {
+            rust_query = rust_query.with_row_id();
+        }
+        if query_ref.fast_search {
+            rust_query = rust_query.fast_search();
+        }
+        if query_ref.bypass_vector_index {
+            rust_query = rust_query.bypass_vector_index();
+        }
         if let Some(ref df_filter) = query_ref.df_filter {
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter.clone()));
         } else if let Some(ref filter) = query_ref.filter {
@@ -800,6 +1032,12 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
         }
         if postfilter {
             rust_query = rust_query.postfilter();
+        }
+        if let Some(k) = query_ref.rrf_k {
+            rust_query = rust_query.rerank(Arc::new(RRFReranker::new(k)));
+        }
+        if let Some(norm) = query_ref.norm.clone() {
+            rust_query = rust_query.norm(norm);
         }
 
         rust_query.explain_plan(verbose).await
@@ -833,6 +1071,12 @@ fn run_plain_query(
         }
         if let Some(ref select) = query.select {
             rust_query = rust_query.select(select.clone());
+        }
+        if query.with_row_id {
+            rust_query = rust_query.with_row_id();
+        }
+        if query.fast_search {
+            rust_query = rust_query.fast_search();
         }
         if let Some(df_filter) = query.df_filter {
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
@@ -869,6 +1113,15 @@ fn run_vector_query(
         if let Some(ref select) = query.select {
             rust_query = rust_query.select(select.clone());
         }
+        if query.with_row_id {
+            rust_query = rust_query.with_row_id();
+        }
+        if query.fast_search {
+            rust_query = rust_query.fast_search();
+        }
+        if query.bypass_vector_index {
+            rust_query = rust_query.bypass_vector_index();
+        }
         if let Some(df_filter) = query.df_filter {
             rust_query.mut_query().filter = Some(QueryFilter::Datafusion(df_filter));
         } else if let Some(ref filter) = query.filter {
@@ -891,6 +1144,12 @@ fn run_vector_query(
         }
         if query.postfilter {
             rust_query = rust_query.postfilter();
+        }
+        if let Some(k) = query.rrf_k {
+            rust_query = rust_query.rerank(Arc::new(RRFReranker::new(k)));
+        }
+        if let Some(norm) = query.norm {
+            rust_query = rust_query.norm(norm);
         }
 
         rust_query.execute().await

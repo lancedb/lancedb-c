@@ -5,6 +5,8 @@
 
 #include "test_common.h"
 
+#include <map>
+
 void verify_query_result(LanceDBQueryResult* query_result, size_t expected_rows) {
   // Convert to Arrow
   FFI_ArrowArray** result_arrays = nullptr;
@@ -33,6 +35,83 @@ void verify_query_result(LanceDBQueryResult* query_result, size_t expected_rows)
   // Clean up
   lancedb_free_arrow_arrays(result_arrays, count);
   lancedb_free_arrow_schema(result_schema);
+}
+
+struct CollectedQueryRows {
+  std::shared_ptr<arrow::Schema> schema;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+
+  size_t num_rows() const {
+    size_t rows = 0;
+    for (const auto& batch : batches) {
+      rows += static_cast<size_t>(batch->num_rows());
+    }
+    return rows;
+  }
+};
+
+CollectedQueryRows collect_query_rows(LanceDBQueryResult* query_result) {
+  REQUIRE(query_result != nullptr);
+
+  FFI_ArrowArray** result_arrays = nullptr;
+  FFI_ArrowSchema* result_schema = nullptr;
+  size_t count = 0;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_result_to_arrow(
+      query_result, &result_arrays, &result_schema, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  CollectedQueryRows collected;
+  if (count == 0) {
+    REQUIRE(result_arrays == nullptr);
+    REQUIRE(result_schema == nullptr);
+    return collected;
+  }
+
+  auto imported_schema = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(result_schema));
+  REQUIRE(imported_schema.ok());
+  collected.schema = imported_schema.ValueOrDie();
+
+  for (size_t i = 0; i < count; i++) {
+    auto imported_batch = arrow::ImportRecordBatch(
+        reinterpret_cast<ArrowArray*>(result_arrays[i]), collected.schema);
+    REQUIRE(imported_batch.ok());
+    collected.batches.push_back(imported_batch.ValueOrDie());
+  }
+
+  lancedb_free_arrow_arrays(result_arrays, count);
+  lancedb_free_arrow_schema(result_schema);
+  return collected;
+}
+
+std::vector<std::string> keys_of(const CollectedQueryRows& rows) {
+  std::vector<std::string> keys;
+  for (const auto& batch : rows.batches) {
+    auto key_column = batch->GetColumnByName("key");
+    REQUIRE(key_column != nullptr);
+    auto key_array = std::static_pointer_cast<arrow::StringArray>(key_column);
+    for (int64_t i = 0; i < key_array->length(); i++) {
+      keys.push_back(key_array->GetString(i));
+    }
+  }
+  return keys;
+}
+
+std::map<std::string, uint64_t> row_ids_by_key(const CollectedQueryRows& rows) {
+  std::map<std::string, uint64_t> row_ids;
+  for (const auto& batch : rows.batches) {
+    auto key_column = batch->GetColumnByName("key");
+    auto row_id_column = batch->GetColumnByName("_rowid");
+    REQUIRE(key_column != nullptr);
+    REQUIRE(row_id_column != nullptr);
+    auto key_array = std::static_pointer_cast<arrow::StringArray>(key_column);
+    auto row_id_array = std::static_pointer_cast<arrow::UInt64Array>(row_id_column);
+    for (int64_t i = 0; i < key_array->length(); i++) {
+      REQUIRE(!row_id_array->IsNull(i));
+      row_ids[key_array->GetString(i)] = row_id_array->Value(i);
+    }
+  }
+  return row_ids;
 }
 
 void create_key_index(LanceDBTable* table) {
@@ -425,6 +504,81 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - row id and fast search flags", "[query]") {
+  const std::string table_name = "query_flags_test";
+  constexpr size_t indexed_rows = 8;
+  constexpr size_t appended_rows = 8;
+
+  LanceDBTable* table = create_table_with_data(
+      table_name, static_cast<int>(indexed_rows), 0);
+  REQUIRE(table != nullptr);
+  create_key_index(table);
+
+  auto appended = create_test_record_batch(
+      static_cast<int>(appended_rows), static_cast<int>(indexed_rows));
+  REQUIRE(lancedb_table_add(table, create_reader_from_batch(appended), nullptr) == LANCEDB_SUCCESS);
+
+  auto run_query = [&](const std::string& filter, bool fast_search) {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_where_filter(query, filter.c_str(), &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_with_row_id(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    if (fast_search) {
+      REQUIRE(lancedb_query_fast_search(query, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+
+    return collect_query_rows(lancedb_query_execute(query));
+  };
+
+  SECTION("with_row_id appends the actual _rowid column") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_with_row_id(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto rows = collect_query_rows(lancedb_query_execute(query));
+    REQUIRE(rows.num_rows() == indexed_rows + appended_rows);
+    REQUIRE(rows.schema->GetFieldByName("_rowid") != nullptr);
+    REQUIRE(rows.schema->GetFieldByName("data") == nullptr);
+    auto row_ids = row_ids_by_key(rows);
+    REQUIRE(row_ids.size() == indexed_rows + appended_rows);
+
+    auto appended_row = run_query("key = 'key_12'", false);
+    REQUIRE(appended_row.num_rows() == 1);
+    auto appended_row_ids = row_ids_by_key(appended_row);
+    REQUIRE(appended_row_ids.at("key_12") == row_ids.at("key_12"));
+  }
+
+  SECTION("fast_search skips rows covered only by the appended fragment") {
+    auto unfiltered = run_query("key = 'key_12'", false);
+    REQUIRE(unfiltered.num_rows() == 1);
+    REQUIRE(keys_of(unfiltered) == std::vector<std::string>{"key_12"});
+
+    auto fast = run_query("key = 'key_12'", true);
+    REQUIRE(fast.num_rows() == 0);
+
+    auto indexed = run_query("key = 'key_3'", true);
+    REQUIRE(indexed.num_rows() == 1);
+    REQUIRE(keys_of(indexed) == std::vector<std::string>{"key_3"});
+    REQUIRE(row_ids_by_key(indexed).count("key_3") == 1);
+  }
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - invalid arguments", "[query]") {
   const std::string table_name = "query_invalid_args_test";
   LanceDBTable* table = create_table_with_data(table_name, 10, 0);
@@ -437,7 +591,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - invalid arguments", "[query]")
     REQUIRE(lancedb_query_offset(nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_select(nullptr, columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_where_filter(nullptr, "key = 'key_0'", nullptr) == LANCEDB_INVALID_ARGUMENT);
-
+    REQUIRE(lancedb_query_with_row_id(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_fast_search(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
   }
 
   SECTION("Query setters with null arguments should fail") {
