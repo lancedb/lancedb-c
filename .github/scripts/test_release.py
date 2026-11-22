@@ -30,8 +30,8 @@ VERSION = "0.1.0-preview.1"
 TAG = f"v{VERSION}"
 TAG_OBJECT = "a" * 40
 COMMIT = "b" * 40
-LANCEDB_REVISION = "b35cce60d66e5ae58e7ef470af7bd268d22c0396"
-LANCE_REVISION = "f5dbd55dd79f1f0412f897ed1917128300fb8c1a"
+LANCEDB_REVISION = "21f074cb02a682ab883c24dc319c61d6914471c7"
+LANCE_REVISION = "f9fd19edfb14e43d3981b20dfaf183672751414b"
 
 
 def cargo_lock() -> str:
@@ -47,26 +47,26 @@ def cargo_lock() -> str:
     return (
         block(
             "lancedb",
-            "0.42.0-beta.21",
-            "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.21#"
+            "0.42.0-beta.22",
+            "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.22#"
             + LANCEDB_REVISION,
         )
         + block(
             "lance",
-            "15.0.0-beta.25",
-            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.25#"
+            "15.0.0-beta.26",
+            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.26#"
             + LANCE_REVISION,
         )
         + block(
             "lance-io",
-            "15.0.0-beta.25",
-            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.25#"
+            "15.0.0-beta.26",
+            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.26#"
             + LANCE_REVISION,
         )
         + block(
             "lance-namespace",
-            "15.0.0-beta.25",
-            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.25#"
+            "15.0.0-beta.26",
+            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.26#"
             + LANCE_REVISION,
         )
         + block("arrow", "59.2.0", "registry+https://github.com/rust-lang/crates.io-index")
