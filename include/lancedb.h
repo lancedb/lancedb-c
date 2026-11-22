@@ -208,6 +208,9 @@ typedef struct {
 
 /**
  * Error codes for LanceDB C API
+ *
+ * Existing values never move. Codes for error categories added by a newer SDK
+ * are appended before LANCEDB_UNKNOWN, which stays outside the contiguous range.
  */
 typedef enum {
     LANCEDB_SUCCESS = 0,
@@ -234,6 +237,19 @@ typedef enum {
     LANCEDB_NAMESPACE = 21,
     LANCEDB_PERMISSION_DENIED = 22,
     LANCEDB_NOT_FOUND = 23,
+    LANCEDB_TABLE_CORRUPTED = 24,
+    LANCEDB_COLUMN_NOT_FOUND = 25,
+    LANCEDB_FIELD_NOT_FOUND = 26,
+    LANCEDB_COLUMN_ALREADY_EXISTS = 27,
+    LANCEDB_NOT_A_COMPUTED_COLUMN = 28,
+    LANCEDB_NOT_A_MATERIALIZED_VIEW = 29,
+    LANCEDB_INVALID_EXPRESSION = 30,
+    LANCEDB_SQL = 31,
+    LANCEDB_JOB_FAILED = 32,
+    LANCEDB_JOB_CANCELLED = 33,
+    LANCEDB_JOB_NOT_FOUND = 34,
+    LANCEDB_RESPONSE_INTERRUPTED = 35,
+    LANCEDB_EXTERNAL = 36,
     /* keep last, so that new error codes can be added without renumbering */
     LANCEDB_UNKNOWN = 99
 } LanceDBError;
@@ -265,7 +281,20 @@ static const char* LANCEDB_ERROR_MESSAGES[] = {
     "Other error",
     "Namespace error",
     "Permission denied",
-    "Not found"
+    "Not found",
+    "Table corrupted",
+    "Column not found",
+    "Field not found",
+    "Column already exists",
+    "Not a computed column",
+    "Not a materialized view",
+    "Invalid expression",
+    "SQL error",
+    "Job failed",
+    "Job cancelled",
+    "Job not found",
+    "Response interrupted",
+    "External error"
 };
 
 /**
@@ -459,7 +488,9 @@ typedef struct {
 } LanceDBMergeInsertConfig;
 
 /**
- * Options for lancedb_table_merge_insert_with_result
+ * Options for the merge insert entry points that expose explicit actions
+ * (lancedb_table_merge_insert_with_result and
+ * lancedb_table_merge_insert_with_options)
  *
  * Every action is disabled unless its flag is non-zero. A NULL options pointer
  * selects the same default upsert as lancedb_table_merge_insert(): update every
@@ -854,6 +885,110 @@ void lancedb_table_names_builder_free(LanceDBTableNamesBuilder* builder);
 LanceDBError lancedb_connection_open_table(
     const LanceDBConnection* connection,
     const char* table_name,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
+ * Open table option fields of LanceDBOpenTableOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB default, so an omitted index cache size stays distinct from
+ * an explicit zero, and an omitted managed-versioning value stays distinct from
+ * an explicit false.
+ */
+typedef enum {
+    LANCEDB_OPEN_TABLE_INDEX_CACHE_SIZE = 1 << 0,
+    LANCEDB_OPEN_TABLE_VERSION = 1 << 1,
+    LANCEDB_OPEN_TABLE_MANAGED_VERSIONING = 1 << 2
+} LanceDBOpenTableField;
+
+/**
+ * Options for lancedb_connection_open_table_with_options
+ *
+ * A zero-initialized struct keeps every SDK default. set_fields selects the
+ * scalar overrides; an unknown bit is rejected with LANCEDB_INVALID_ARGUMENT.
+ *
+ * namespace_path is a borrowed array of namespace_path_len borrowed strings.
+ * Zero length is the root namespace and accepts a NULL array. A positive length
+ * requires a non-NULL array of non-NULL, NUL-terminated UTF-8 strings.
+ *
+ * location and branch are borrowed strings. NULL leaves that option unset; a
+ * non-NULL string, including an empty one, is passed unchanged. For branch, the
+ * SDK treats "main" as the default branch. storage_keys and storage_values are
+ * parallel arrays of storage_count borrowed strings for this table only. A
+ * zero count omits per-table storage options. A non-zero count requires both arrays and
+ * every entry to be non-NULL and valid UTF-8.
+ *
+ * index_cache_size and version are read only when their set_fields bit is set.
+ * Setting the bit selects the value, including zero, instead of treating zero as
+ * omitted. The SDK still owns precedence: an embedded open attaches the
+ * connection's Session to the dataset builder, and that Session supplies the
+ * effective index cache capacity. An explicit index_cache_size, including zero,
+ * is therefore forwarded but does not resize or disable the Session's cache.
+ * managed_versioning is also read only when its bit is set: 0 selects false and
+ * 1 selects true; every other value is rejected. Leaving the bit unset passes no
+ * managed-versioning preference.
+ *
+ * The C layer forwards these options to the SDK unchanged. The SDK decides which
+ * backend accepts them and may resolve values from the backend. At the pinned
+ * SDK version:
+ * - An embedded listing root table uses location in place of the derived table
+ *   path, and per-table storage options override connection options on the same
+ *   key. index_cache_size follows the Session precedence above, so the
+ *   connection Session's current effective capacity remains in use. version
+ *   selects a read-only detached snapshot. managed_versioning is forwarded, but
+ *   a plain listing connection has no namespace client, so it does not enable
+ *   namespace-managed commits.
+ * - An embedded namespace table (a non-empty namespace_path) gets its location,
+ *   namespace storage options and managed-versioning state from the namespace.
+ *   The SDK does not apply the request location or managed_versioning value to
+ *   that open, and index_cache_size follows the Session precedence above.
+ *   Per-table storage options are passed through, but namespace values win on
+ *   the same key. version and branch still compose in the SDK after the
+ *   namespace table is opened.
+ * - An Enterprise connection rejects index_cache_size, per-table storage
+ *   options, location and managed_versioning (whether true or false) with
+ *   LANCEDB_NOT_SUPPORTED. namespace_path is part of the table identifier, and
+ *   version and branch are resolved by the server.
+ *
+ * The options struct and every string it points to are borrowed for the
+ * duration of the call and are not consumed.
+ */
+typedef struct {
+    uint32_t set_fields;                  // Bitmask of LanceDBOpenTableField values (0 = defaults)
+    const char* const* namespace_path;    // Namespace path parts (NULL with length 0 for root)
+    size_t namespace_path_len;            // Number of namespace path parts
+    const char* location;                 // Custom location (NULL to derive it)
+    const char* const* storage_keys;      // Storage option keys (NULL when storage_count is 0)
+    const char* const* storage_values;    // Storage option values matching storage_keys
+    size_t storage_count;                 // Number of per-table storage options
+    uint32_t index_cache_size;            // Index cache entries; read only when its bit is set
+    uint64_t version;                     // Table version; read only when its bit is set
+    const char* branch;                   // Branch name (NULL for the default branch)
+    int managed_versioning;               // 0 = false, 1 = true; read only when its bit is set
+} LanceDBOpenTableOptions;
+
+/**
+ * Open an existing table with SDK open-table builder options
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param table_name - null-terminated C string containing the table name
+ * @param options - pointer to read-only options, or NULL for every SDK default
+ * @param table_out - pointer to receive the opened table
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On entry, a non-NULL table_out is set to NULL and the error message slot is
+ * cleared. The table is written only on success, so a failure leaves it NULL.
+ * This differs from lancedb_connection_open_table, which leaves its output
+ * unchanged on failure. The caller frees a returned table with
+ * lancedb_table_free() and a returned error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_open_table_with_options(
+    const LanceDBConnection* connection,
+    const char* table_name,
+    const LanceDBOpenTableOptions* options,
     LanceDBTable** table_out,
     char** error_message
 );
@@ -1793,6 +1928,83 @@ LanceDBError lancedb_table_merge_insert_with_result(
 );
 
 /**
+ * Result of lancedb_table_merge_insert_with_options
+ *
+ * This is the SDK's complete MergeResult, copied unchanged. It is a separate
+ * struct so LanceDBMergeInsertResult keeps its published layout. The SDK
+ * defaults each field missing from a remote response to zero, so zero means
+ * "not reported" rather than necessarily no work. num_attempts is the merge
+ * attempt count reported by the SDK or server, not the number of HTTP requests.
+ * num_rows is the SDK's total written-row count: on the standard path it equals
+ * num_inserted_rows + num_updated_rows, while the RTE write path can report only
+ * num_rows and leave the breakdown zero. A legacy remote empty response can
+ * succeed with every field zero, and a version of 0 means the backend did not
+ * report a commit version.
+ */
+typedef struct {
+    uint64_t version;           // Reported commit version; 0 may mean not reported
+    uint64_t num_inserted_rows; // Reported inserted rows; 0 may mean not reported
+    uint64_t num_updated_rows;  // Reported updated rows; 0 may mean not reported
+    uint64_t num_deleted_rows;  // Reported deleted rows; 0 may mean not reported
+    uint32_t num_attempts;      // Reported merge attempts; 0 may mean not reported
+    uint64_t num_rows;          // Reported total rows written; 0 may mean not reported
+} LanceDBMergeInsertResultV2;
+
+/**
+ * Merge insert with the complete option set and an optional result
+ *
+ * This entry point performs one SDK merge and reuses LanceDBMergeInsertOptions
+ * for its actions, SQL conditions, timeout and index choice. A NULL options
+ * pointer keeps the same default upsert as lancedb_table_merge_insert(): update
+ * every matched row and insert every unmatched source row.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param data - pointer to LanceDBRecordBatchReader with the source schema and batches
+ * @param on_columns - array of column names to join on (typically key/id columns)
+ * @param num_columns - number of columns in the on_columns array (must be > 0)
+ * @param options - pointer to LanceDBMergeInsertOptions, or NULL for the default upsert
+ * @param retries - optional pointer to a uint8_t retry budget, or NULL for the SDK default
+ * @param when_not_matched_by_source_delete_expr - optional borrowed DataFusion expression,
+ *        or NULL. Only used when the by-source-delete action is enabled
+ * @param result_out - optional pointer to receive the complete SDK result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The function takes ownership of the reader and frees it automatically on every
+ * path, including rejected arguments. Do NOT call
+ * lancedb_record_batch_reader_free() after calling this function. The options,
+ * their strings, retries and the expression are borrowed and remain owned by the
+ * caller; free the expression with lancedb_expr_free().
+ *
+ * retries overrides the SDK's remote transport retry budget for this call. A
+ * pointed-to 0 disables retries, while a NULL pointer keeps the SDK default.
+ * This budget is independent of local transaction-conflict retries, and the SDK
+ * never replays an ambiguous write result. Embedded tables ignore it.
+ *
+ * The by-source-delete expression is evaluated against unmatched target rows and
+ * uses target column references directly, like the SQL filter in
+ * LanceDBMergeInsertOptions. When that action is enabled, the expression and a
+ * non-NULL SQL filter are mutually exclusive; setting both fails with
+ * LANCEDB_INVALID_ARGUMENT. A condition set for a disabled action is ignored.
+ *
+ * On entry, a non-NULL *result_out and the error message are cleared. The result
+ * is only meaningful when the function returns LANCEDB_SUCCESS; on failure it
+ * stays zero. If error_message is provided and an error occurs, the caller must
+ * free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_merge_insert_with_options(
+    const LanceDBTable* table,
+    LanceDBRecordBatchReader* data,
+    const char* const* on_columns,
+    size_t num_columns,
+    const LanceDBMergeInsertOptions* options,
+    const uint8_t* retries,
+    const LanceDBExpr* when_not_matched_by_source_delete_expr,
+    LanceDBMergeInsertResultV2* result_out,
+    char** error_message
+);
+
+/**
  * Update option fields of LanceDBUpdateOptions
  *
  * Every bit makes the matching field an override. A field whose bit is not set
@@ -2022,6 +2234,23 @@ typedef struct {
 } LanceDBColumnAlteration;
 
 /**
+ * One column alteration for lancedb_table_alter_columns_with_cast
+ *
+ * The first four fields have the same meaning as LanceDBColumnAlteration.
+ * `cast_to`, when non-NULL, points to a borrowed Arrow C ABI schema that holds
+ * exactly one field. Only that field's data type is used; its name, nullability
+ * and metadata are ignored. The caller keeps ownership of the schema and must
+ * still release it with the Arrow C ABI release callback.
+ */
+typedef struct {
+    const char* path;
+    const char* rename;
+    int set_nullable;
+    int nullable;
+    const FFI_ArrowSchema* cast_to;
+} LanceDBColumnAlterationWithCast;
+
+/**
  * Add new columns using SQL expressions
  *
  * @param table - pointer to LanceDBTable
@@ -2046,6 +2275,34 @@ LanceDBError lancedb_table_add_columns(
     const char* const* names,
     const char* const* expressions,
     size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Add typed columns whose existing rows read as NULL
+ *
+ * @param table - pointer to LanceDBTable
+ * @param schema - pointer to a borrowed Arrow C ABI schema with at least one field
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This binds NewColumnTransform::AllNulls: every field of `schema` is added as
+ * a new column and every existing row reads NULL for it. Each field must be
+ * nullable, as the SDK requires, and its data type is added unchanged. Field
+ * names, types, and field metadata are taken from the Arrow schema.
+ * The schema is only read for the duration of the call and remains owned by the
+ * caller; it is not consumed. On success, version_out is the operation's own
+ * commit version; it may be 0 for legacy remote servers that do not report a
+ * version. On failure, version_out is left unchanged. No separate table version
+ * lookup is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_add_columns_all_nulls(
+    const LanceDBTable* table,
+    const FFI_ArrowSchema* schema,
     uint64_t* version_out,
     char** error_message
 );
@@ -2079,6 +2336,44 @@ LanceDBError lancedb_table_alter_columns(
 );
 
 /**
+ * Alter column names, nullability, and data types
+ *
+ * @param table - pointer to LanceDBTable
+ * @param alterations - array of column alterations that may cast
+ * @param num_alterations - number of entries in alterations (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This is the same operation as lancedb_table_alter_columns, with an optional
+ * cast_to data type per entry. Each entry must set a non-empty path and change
+ * at least the name, the nullability, or the data type. Rename, nullability,
+ * and cast are independent and can be combined in one commit. A non-NULL
+ * cast_to must point to an Arrow C ABI schema with exactly one field; only its
+ * data type is used, and the schema remains owned by the caller. A NULL cast_to
+ * leaves the type unchanged.
+ * The array, its strings, and its cast schemas are borrowed for the duration of
+ * the call. On success, version_out is the operation's own commit version; it
+ * may be 0 for legacy remote servers that do not report a version. On failure,
+ * version_out is left unchanged. No separate table version lookup is performed.
+ *
+ * The pinned embedded Lance backend rejects changing a currently nullable field
+ * to NOT NULL in the same call as a cast, even when the field has no NULL
+ * values. The SDK error is returned unchanged; apply the cast and the
+ * nullability change in separate calls. Renaming a field, or relaxing a NOT
+ * NULL field to NULL, can be combined with a cast.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_alter_columns_with_cast(
+    const LanceDBTable* table,
+    const LanceDBColumnAlterationWithCast* alterations,
+    size_t num_alterations,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
  * Drop columns from a table
  *
  * @param table - pointer to LanceDBTable
@@ -2100,6 +2395,64 @@ LanceDBError lancedb_table_drop_columns(
     const LanceDBTable* table,
     const char* const* columns,
     size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * One field metadata key change for lancedb_table_update_field_metadata
+ *
+ * `key` must be a non-empty string. A non-NULL `value` sets the key to that
+ * value; a NULL value removes the key. Keys must be unique within one update.
+ * The strings are borrowed for the duration of the call.
+ */
+typedef struct {
+    const char* key;
+    const char* value;
+} LanceDBFieldMetadataEntry;
+
+/**
+ * One field metadata update for lancedb_table_update_field_metadata
+ *
+ * `path` addresses the field by its dot-separated path, for example `zip` or
+ * `address.zip`. `entries` holds `num_entries` key changes applied in order and
+ * must be non-NULL when num_entries is greater than zero. When `replace` is 0,
+ * the entries merge into the field's existing metadata; a merge with zero
+ * entries is rejected because it changes nothing. When `replace` is non-zero,
+ * the entries replace the field's entire metadata map, so a replace with zero
+ * entries clears the metadata.
+ */
+typedef struct {
+    const char* path;
+    const LanceDBFieldMetadataEntry* entries;
+    size_t num_entries;
+    int replace;
+} LanceDBFieldMetadataUpdate;
+
+/**
+ * Update per-field metadata through the SDK
+ *
+ * @param table - pointer to LanceDBTable
+ * @param updates - array of field metadata updates
+ * @param num_updates - number of entries in updates (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This binds lancedb::table::Table::update_field_metadata and works on embedded
+ * and remote tables. Each update is merged into its field's existing metadata
+ * unless replace is set, in which case it swaps the field's whole metadata map.
+ * The array, its entries, and their strings are borrowed for the duration of the
+ * call. On success, version_out is the operation's own commit version; it may be
+ * 0 for legacy remote servers that do not report a version. On failure,
+ * version_out is left unchanged. No separate table version lookup is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_update_field_metadata(
+    const LanceDBTable* table,
+    const LanceDBFieldMetadataUpdate* updates,
+    size_t num_updates,
     uint64_t* version_out,
     char** error_message
 );
@@ -4191,6 +4544,10 @@ void lancedb_table_delta_free(LanceDBTableDelta* delta);
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
+ * This reads the dataset directly and is available only on embedded
+ * (Lance-backed) tables. On a remote table it returns LANCEDB_NOT_SUPPORTED;
+ * use lancedb_table_update_field_metadata for field metadata that goes through
+ * the SDK on both backends.
  * To return all metadata, please set filter_keys to NULL and filter_count to zero.
  * Any other combination of NULL and zero is considered an error.
  * Otherwise, only metadata matching the specified keys is returned.
@@ -4221,6 +4578,10 @@ LanceDBError lancedb_table_get_metadata(
  * @return Error code indicating success or failure
  *
  * Existing keys will be updated with new values. New keys will be added.
+ * This writes the dataset directly and is available only on embedded
+ * (Lance-backed) tables. On a remote table it returns LANCEDB_NOT_SUPPORTED;
+ * use lancedb_table_update_field_metadata for field metadata that goes through
+ * the SDK on both backends.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
@@ -4242,6 +4603,10 @@ LanceDBError lancedb_table_set_metadata(
  * @return Error code indicating success or failure
  *
  * Keys that do not exist are silently ignored.
+ * This writes the dataset directly and is available only on embedded
+ * (Lance-backed) tables. On a remote table it returns LANCEDB_NOT_SUPPORTED;
+ * use lancedb_table_update_field_metadata for field metadata that goes through
+ * the SDK on both backends.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */

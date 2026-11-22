@@ -6,9 +6,11 @@
 //! This module provides all table operations using Arrow-only APIs,
 //! combining both simple and full table functionality.
 
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::ptr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use arrow_array::{Array, RecordBatch, RecordBatchReader, StructArray};
@@ -16,7 +18,7 @@ use arrow_schema::{ArrowError, Schema};
 use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::table::{ColumnAlteration, NewColumnTransform, Ref};
+use lancedb::table::{ColumnAlteration, FieldMetadataUpdate, NewColumnTransform, Ref};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
@@ -27,7 +29,7 @@ use crate::expr::LanceDBExpr;
 use crate::ipc::{self, LanceDBIpcBuffer};
 use crate::types::{
     LanceDBMergeInsertConfig, LanceDBMergeInsertOptions, LanceDBMergeInsertResult,
-    LanceDBRecordBatchReader,
+    LanceDBMergeInsertResultV2, LanceDBRecordBatchReader,
 };
 
 /// Get table schema as Arrow C ABI
@@ -160,8 +162,10 @@ struct MergeInsertSettings<'a> {
     when_not_matched_insert_all: bool,
     when_not_matched_by_source_delete: bool,
     when_not_matched_by_source_delete_filter: Option<&'a str>,
+    when_not_matched_by_source_delete_expr: Option<&'a LanceDBExpr>,
     timeout: Option<Duration>,
     use_index: Option<bool>,
+    retries: Option<u8>,
 }
 
 /// Read the join columns, rejecting a missing array or an empty or non-UTF-8 name
@@ -215,17 +219,30 @@ fn execute_merge_insert(
             builder.when_not_matched_insert_all();
         }
         if settings.when_not_matched_by_source_delete {
-            builder.when_not_matched_by_source_delete(
-                settings
-                    .when_not_matched_by_source_delete_filter
-                    .map(|filter| filter.to_owned()),
-            );
+            match settings.when_not_matched_by_source_delete_expr {
+                // The expression is borrowed, ownership stays with the caller
+                Some(expr) => {
+                    builder.when_not_matched_by_source_delete_expr(expr.inner.clone());
+                }
+                None => {
+                    builder.when_not_matched_by_source_delete(
+                        settings
+                            .when_not_matched_by_source_delete_filter
+                            .map(|filter| filter.to_owned()),
+                    );
+                }
+            }
         }
         if let Some(timeout) = settings.timeout {
             builder.timeout(timeout);
         }
         if let Some(use_index) = settings.use_index {
             builder.use_index(use_index);
+        }
+        if let Some(retries) = settings.retries {
+            // An explicit 0 reaches the SDK as a disabled retry budget; an
+            // omitted retry leaves the SDK default in place.
+            builder.retries(retries);
         }
 
         builder.execute(reader).await
@@ -287,8 +304,10 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
         when_not_matched_insert_all: true,
         when_not_matched_by_source_delete: false,
         when_not_matched_by_source_delete_filter: None,
+        when_not_matched_by_source_delete_expr: None,
         timeout: None,
         use_index: None,
+        retries: None,
     };
 
     if !config.is_null() {
@@ -332,6 +351,104 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
         Ok(_) => LanceDBError::Success,
         Err(error) => handle_error(&error, error_message),
     }
+}
+
+/// Parse the options shared by the merge insert entry points that expose actions
+///
+/// Conditions for disabled actions are ignored, as on the existing entry points.
+/// The settings borrow the options struct, the DataFusion expression and the
+/// embedded C strings for the duration of the call.
+unsafe fn parse_merge_insert_options<'a>(
+    options: *const LanceDBMergeInsertOptions,
+    by_source_delete_expr: *const LanceDBExpr,
+    retries: *const u8,
+    error_message: *mut *mut c_char,
+) -> Option<MergeInsertSettings<'a>> {
+    let mut settings = MergeInsertSettings {
+        when_matched_update_all: true,
+        update_condition: None,
+        when_not_matched_insert_all: true,
+        when_not_matched_by_source_delete: false,
+        when_not_matched_by_source_delete_filter: None,
+        when_not_matched_by_source_delete_expr: None,
+        timeout: None,
+        use_index: None,
+        retries: if retries.is_null() {
+            None
+        } else {
+            Some(*retries)
+        },
+    };
+
+    // A NULL options pointer keeps the historical default upsert
+    if options.is_null() {
+        return Some(settings);
+    }
+
+    let options = &*options;
+    settings.when_matched_update_all = options.when_matched_update_all != 0;
+    settings.when_not_matched_insert_all = options.when_not_matched_insert_all != 0;
+    settings.when_not_matched_by_source_delete = options.when_not_matched_by_source_delete != 0;
+
+    if settings.when_matched_update_all && !options.when_matched_update_all_condition.is_null() {
+        let Ok(condition) = CStr::from_ptr(options.when_matched_update_all_condition).to_str()
+        else {
+            set_invalid_argument_message(error_message);
+            return None;
+        };
+        settings.update_condition = Some(MergeUpdateCondition::Sql(condition));
+    }
+
+    if settings.when_not_matched_by_source_delete {
+        let has_expr = !by_source_delete_expr.is_null();
+        let has_sql = !options.when_not_matched_by_source_delete_filter.is_null();
+
+        // The SQL filter and the expression are alternative forms of the same
+        // condition, so enabling both at once is ambiguous.
+        if has_expr && has_sql {
+            set_invalid_argument_message(error_message);
+            return None;
+        }
+
+        if has_expr {
+            settings.when_not_matched_by_source_delete_expr = Some(&*by_source_delete_expr);
+        } else if has_sql {
+            let Ok(filter) =
+                CStr::from_ptr(options.when_not_matched_by_source_delete_filter).to_str()
+            else {
+                set_invalid_argument_message(error_message);
+                return None;
+            };
+            settings.when_not_matched_by_source_delete_filter = Some(filter);
+        }
+    }
+
+    settings.use_index = match options.use_index {
+        -1 => None,
+        0 => Some(false),
+        1 => Some(true),
+        _ => {
+            set_custom_error_message(
+                error_message,
+                "Invalid argument: use_index must be -1, 0, or 1",
+            );
+            return None;
+        }
+    };
+
+    settings.timeout = match options.timeout_ms {
+        -1 => None,
+        timeout_ms if timeout_ms >= 0 => Some(Duration::from_millis(timeout_ms as u64)),
+        _ => {
+            set_custom_error_message(
+                error_message,
+                "Invalid argument: timeout_ms must be -1 or a non-negative number",
+            );
+            return None;
+        }
+    };
+
+    Some(settings)
 }
 
 /// Merge data into table with explicit actions and a result
@@ -392,70 +509,11 @@ pub unsafe extern "C" fn lancedb_table_merge_insert_with_result(
     };
     let on_columns: Vec<&str> = column_names.iter().map(String::as_str).collect();
 
-    // A NULL options pointer keeps the historical default upsert
-    let mut settings = MergeInsertSettings {
-        when_matched_update_all: true,
-        update_condition: None,
-        when_not_matched_insert_all: true,
-        when_not_matched_by_source_delete: false,
-        when_not_matched_by_source_delete_filter: None,
-        timeout: None,
-        use_index: None,
+    let Some(settings) =
+        parse_merge_insert_options(options, ptr::null(), ptr::null(), error_message)
+    else {
+        return LanceDBError::InvalidArgument;
     };
-
-    if !options.is_null() {
-        let options = &*options;
-        settings.when_matched_update_all = options.when_matched_update_all != 0;
-        settings.when_not_matched_insert_all = options.when_not_matched_insert_all != 0;
-        settings.when_not_matched_by_source_delete = options.when_not_matched_by_source_delete != 0;
-
-        if settings.when_matched_update_all && !options.when_matched_update_all_condition.is_null()
-        {
-            let Ok(condition) = CStr::from_ptr(options.when_matched_update_all_condition).to_str()
-            else {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            };
-            settings.update_condition = Some(MergeUpdateCondition::Sql(condition));
-        }
-
-        if settings.when_not_matched_by_source_delete
-            && !options.when_not_matched_by_source_delete_filter.is_null()
-        {
-            let Ok(filter) =
-                CStr::from_ptr(options.when_not_matched_by_source_delete_filter).to_str()
-            else {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            };
-            settings.when_not_matched_by_source_delete_filter = Some(filter);
-        }
-
-        settings.use_index = match options.use_index {
-            -1 => None,
-            0 => Some(false),
-            1 => Some(true),
-            _ => {
-                set_custom_error_message(
-                    error_message,
-                    "Invalid argument: use_index must be -1, 0, or 1",
-                );
-                return LanceDBError::InvalidArgument;
-            }
-        };
-
-        settings.timeout = match options.timeout_ms {
-            -1 => None,
-            timeout_ms if timeout_ms >= 0 => Some(Duration::from_millis(timeout_ms as u64)),
-            _ => {
-                set_custom_error_message(
-                    error_message,
-                    "Invalid argument: timeout_ms must be -1 or a non-negative number",
-                );
-                return LanceDBError::InvalidArgument;
-            }
-        };
-    }
 
     match execute_merge_insert(
         &(*table).inner,
@@ -471,6 +529,105 @@ pub unsafe extern "C" fn lancedb_table_merge_insert_with_result(
                 num_deleted_rows: merge_result.num_deleted_rows,
                 num_attempts: merge_result.num_attempts,
             };
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Merge data into table with the complete option set and an optional result
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `data` must be a valid pointer to a LanceDBRecordBatchReader. It carries both
+///   the source schema and every source batch, so one call performs one SDK merge
+/// - `on_columns` must be an array of `num_columns` valid null-terminated C strings
+/// - `options`, when not NULL, must point to a readable `LanceDBMergeInsertOptions`.
+///   Its actions, conditions, filters and timeout are borrowed for the call
+/// - `retries`, when not NULL, points to a readable `u8` that overrides the SDK
+///   remote transport retry budget. NULL keeps the SDK default, and a pointed-to
+///   zero is an explicit disabled budget
+/// - `when_not_matched_by_source_delete_expr`, when not NULL, must be a valid
+///   pointer returned from `lancedb_expr_*`. It is borrowed for the call, not
+///   consumed, and is only used when the by-source-delete action is enabled. It
+///   is mutually exclusive with the SQL filter of that enabled action
+/// - `result_out` can be NULL when the caller does not need the SDK result
+/// - `data` is always consumed, also when the other arguments are rejected
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*result_out`, when non-NULL, filled from the SDK result
+/// - `LANCEDB_INVALID_ARGUMENT` for a NULL pointer, an empty join-key list, a
+///   non-UTF-8 string, both by-source-delete condition forms, or an out-of-range
+///   `use_index`/`timeout_ms` sentinel
+/// - The SDK error code for a rejected merge
+///
+/// On entry, a non-NULL `result_out` and the error message are cleared. The
+/// result is only meaningful when the call succeeds. Free a returned error
+/// message with `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_merge_insert_with_options(
+    table: *const LanceDBTable,
+    data: *mut LanceDBRecordBatchReader,
+    on_columns: *const *const c_char,
+    num_columns: usize,
+    options: *const LanceDBMergeInsertOptions,
+    retries: *const u8,
+    when_not_matched_by_source_delete_expr: *const LanceDBExpr,
+    result_out: *mut LanceDBMergeInsertResultV2,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !result_out.is_null() {
+        *result_out = LanceDBMergeInsertResultV2::default();
+    }
+    clear_error_message(error_message);
+
+    if data.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    // Take ownership of the data reader before anything else, so that it is freed
+    // on every path, including the ones rejecting the rest of the arguments
+    let data_box = Box::from_raw(data);
+
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(column_names) = parse_on_columns(on_columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let on_columns: Vec<&str> = column_names.iter().map(String::as_str).collect();
+
+    let Some(settings) = parse_merge_insert_options(
+        options,
+        when_not_matched_by_source_delete_expr,
+        retries,
+        error_message,
+    ) else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    match execute_merge_insert(
+        &(*table).inner,
+        data_box.into_inner(),
+        &on_columns,
+        settings,
+    ) {
+        Ok(merge_result) => {
+            if !result_out.is_null() {
+                *result_out = LanceDBMergeInsertResultV2 {
+                    version: merge_result.version,
+                    num_inserted_rows: merge_result.num_inserted_rows,
+                    num_updated_rows: merge_result.num_updated_rows,
+                    num_deleted_rows: merge_result.num_deleted_rows,
+                    num_attempts: merge_result.num_attempts,
+                    num_rows: merge_result.num_rows,
+                };
+            }
             LanceDBError::Success
         }
         Err(error) => handle_error(&error, error_message),
@@ -2797,6 +2954,48 @@ pub struct LanceDBColumnAlteration {
     pub nullable: i32,
 }
 
+/// One column alteration for `lancedb_table_alter_columns_with_cast`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBColumnAlterationWithCast {
+    /// Existing column to alter.
+    pub path: *const c_char,
+    /// New column name, or NULL to leave the name unchanged.
+    pub rename: *const c_char,
+    /// 0 leaves nullability unchanged, 1 applies `nullable`.
+    pub set_nullable: i32,
+    /// New nullability when `set_nullable` is 1: 0 for NOT NULL, non-zero for NULL.
+    pub nullable: i32,
+    /// Arrow C ABI schema holding exactly one field, or NULL to leave the type
+    /// unchanged. Only that field's data type is used.
+    pub cast_to: *const arrow_schema::ffi::FFI_ArrowSchema,
+}
+
+/// One field metadata key change for `lancedb_table_update_field_metadata`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBFieldMetadataEntry {
+    /// Metadata key to set or remove.
+    pub key: *const c_char,
+    /// New value, or NULL to remove the key.
+    pub value: *const c_char,
+}
+
+/// One field metadata update for `lancedb_table_update_field_metadata`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBFieldMetadataUpdate {
+    /// Dot-separated path to the field, for example `address.zip`.
+    pub path: *const c_char,
+    /// Array of `num_entries` key changes applied in order.
+    pub entries: *const LanceDBFieldMetadataEntry,
+    /// Number of entries in `entries`.
+    pub num_entries: usize,
+    /// 0 merges the entries into the existing metadata; non-zero replaces the
+    /// field's whole metadata map with them.
+    pub replace: i32,
+}
+
 /// Read a required C string as UTF-8, reporting an invalid argument on failure.
 unsafe fn required_c_string<'a>(
     value: *const c_char,
@@ -2813,6 +3012,114 @@ unsafe fn required_c_string<'a>(
             set_invalid_argument_message(error_message);
             None
         }
+    }
+}
+
+/// Import an Arrow C ABI schema without consuming the caller's structure.
+unsafe fn imported_arrow_schema(
+    schema: *const arrow_schema::ffi::FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> Option<Schema> {
+    match Schema::try_from(&*schema) {
+        Ok(schema) => Some(schema),
+        Err(_) => {
+            set_custom_error_message(error_message, "Failed to import Arrow schema from C ABI");
+            None
+        }
+    }
+}
+
+/// Read the data type a cast alteration requests.
+unsafe fn cast_data_type(
+    schema: *const arrow_schema::ffi::FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> Option<arrow_schema::DataType> {
+    let schema = imported_arrow_schema(schema, error_message)?;
+    if schema.fields().len() != 1 {
+        set_custom_error_message(
+            error_message,
+            "The cast_to schema must contain exactly one field",
+        );
+        return None;
+    }
+    Some(schema.field(0).data_type().clone())
+}
+
+/// Validate and convert one column alteration at the FFI boundary.
+unsafe fn parse_column_alteration(
+    path: *const c_char,
+    rename: *const c_char,
+    set_nullable: i32,
+    nullable: i32,
+    cast_to: *const arrow_schema::ffi::FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> Option<ColumnAlteration> {
+    let path = required_c_string(path, error_message)?;
+    if path.trim().is_empty() {
+        set_invalid_argument_message(error_message);
+        return None;
+    }
+
+    let rename = if rename.is_null() {
+        None
+    } else {
+        let rename = required_c_string(rename, error_message)?;
+        if rename.trim().is_empty() {
+            set_invalid_argument_message(error_message);
+            return None;
+        }
+        Some(rename.to_string())
+    };
+
+    let nullable = match set_nullable {
+        0 => None,
+        1 => Some(nullable != 0),
+        _ => {
+            set_invalid_argument_message(error_message);
+            return None;
+        }
+    };
+
+    let data_type = if cast_to.is_null() {
+        None
+    } else {
+        Some(cast_data_type(cast_to, error_message)?)
+    };
+
+    if rename.is_none() && nullable.is_none() && data_type.is_none() {
+        set_invalid_argument_message(error_message);
+        return None;
+    }
+
+    let mut column = ColumnAlteration::new(path.to_string());
+    if let Some(rename) = rename {
+        column = column.rename(rename);
+    }
+    if let Some(nullable) = nullable {
+        column = column.set_nullable(nullable);
+    }
+    if let Some(data_type) = data_type {
+        column = column.cast_to(data_type);
+    }
+    Some(column)
+}
+
+/// Run the SDK alter-columns operation and report its commit version.
+unsafe fn apply_column_alterations(
+    table: *const LanceDBTable,
+    alterations: &[ColumnAlteration],
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    let tbl = &(*table).inner;
+    let result = get_runtime().block_on(tbl.base_table().alter_columns(alterations));
+
+    match result {
+        Ok(result) => {
+            *version_out = result.version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
     }
 }
 
@@ -2877,6 +3184,54 @@ pub unsafe extern "C" fn lancedb_table_add_columns(
     }
 }
 
+/// Add typed columns whose existing rows read as NULL
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `schema` must be a valid pointer to an Arrow C ABI schema with at least one field
+/// - `version_out` must be a valid pointer to receive the commit version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_add_columns_all_nulls(
+    table: *const LanceDBTable,
+    schema: *const arrow_schema::ffi::FFI_ArrowSchema,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || schema.is_null() || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(schema) = imported_arrow_schema(schema, error_message) else {
+        return LanceDBError::InvalidArgument;
+    };
+    if schema.fields().is_empty() {
+        set_custom_error_message(
+            error_message,
+            "The all-null column schema must contain at least one field",
+        );
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    let result = get_runtime().block_on(
+        tbl.base_table()
+            .add_columns(NewColumnTransform::AllNulls(Arc::new(schema)), None),
+    );
+
+    match result {
+        Ok(result) => {
+            *version_out = result.version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Alter column names and nullability
 ///
 /// # Safety
@@ -2906,61 +3261,73 @@ pub unsafe extern "C" fn lancedb_table_alter_columns(
     let mut parsed_alterations = Vec::with_capacity(num_alterations);
     for i in 0..num_alterations {
         let alteration = &*alterations.add(i);
-        let Some(path) = required_c_string(alteration.path, error_message) else {
+        let Some(column) = parse_column_alteration(
+            alteration.path,
+            alteration.rename,
+            alteration.set_nullable,
+            alteration.nullable,
+            ptr::null(),
+            error_message,
+        ) else {
             return LanceDBError::InvalidArgument;
         };
-        if path.trim().is_empty() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let rename = if alteration.rename.is_null() {
-            None
-        } else {
-            let Some(rename) = required_c_string(alteration.rename, error_message) else {
-                return LanceDBError::InvalidArgument;
-            };
-            if rename.trim().is_empty() {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-            Some(rename.to_string())
-        };
-
-        let nullable = match alteration.set_nullable {
-            0 => None,
-            1 => Some(alteration.nullable != 0),
-            _ => {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            }
-        };
-
-        if rename.is_none() && nullable.is_none() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
-
-        let mut column = ColumnAlteration::new(path.to_string());
-        if let Some(rename) = rename {
-            column = column.rename(rename);
-        }
-        if let Some(nullable) = nullable {
-            column = column.set_nullable(nullable);
-        }
         parsed_alterations.push(column);
     }
 
-    let tbl = &(*table).inner;
-    let result = get_runtime().block_on(tbl.base_table().alter_columns(&parsed_alterations));
+    apply_column_alterations(table, &parsed_alterations, version_out, error_message)
+}
 
-    match result {
-        Ok(result) => {
-            *version_out = result.version;
-            LanceDBError::Success
-        }
-        Err(e) => handle_error(&e, error_message),
+/// Alter column names, nullability, and data types
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `alterations` must point to an array of `num_alterations` entries
+/// - Each `path` must be a valid null-terminated C string naming an existing column
+/// - Each `rename`, when not NULL, must be a valid null-terminated C string
+/// - Each `cast_to`, when not NULL, must point to an Arrow C ABI schema with exactly
+///   one field; only that field's data type is used
+/// - Each entry must change the name, nullability, or data type
+/// - `version_out` must be a valid pointer to receive the commit version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+///
+/// The pinned embedded Lance backend rejects changing a currently nullable
+/// field to NOT NULL in the same call as a cast, even when the field has no
+/// NULL values. The SDK error is returned unchanged; apply the cast and the
+/// nullability change in separate calls. Renaming a field, or relaxing a NOT
+/// NULL field to NULL, can be combined with a cast.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_alter_columns_with_cast(
+    table: *const LanceDBTable,
+    alterations: *const LanceDBColumnAlterationWithCast,
+    num_alterations: usize,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || alterations.is_null() || num_alterations == 0 || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
     }
+
+    let mut parsed_alterations = Vec::with_capacity(num_alterations);
+    for i in 0..num_alterations {
+        let alteration = &*alterations.add(i);
+        let Some(column) = parse_column_alteration(
+            alteration.path,
+            alteration.rename,
+            alteration.set_nullable,
+            alteration.nullable,
+            alteration.cast_to,
+            error_message,
+        ) else {
+            return LanceDBError::InvalidArgument;
+        };
+        parsed_alterations.push(column);
+    }
+
+    apply_column_alterations(table, &parsed_alterations, version_out, error_message)
 }
 
 /// Drop columns from a table
@@ -3010,3 +3377,99 @@ pub unsafe extern "C" fn lancedb_table_drop_columns(
         Err(e) => handle_error(&e, error_message),
     }
 }
+/// Update per-field metadata through the SDK
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `updates` must point to an array of `num_updates` entries
+/// - Each `path` must be a valid non-empty null-terminated C string
+/// - Each `entries` array and its strings are borrowed for the duration of the call
+/// - `num_updates` must be greater than zero
+/// - `version_out` must be a valid pointer to receive the commit version
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_update_field_metadata(
+    table: *const LanceDBTable,
+    updates: *const LanceDBFieldMetadataUpdate,
+    num_updates: usize,
+    version_out: *mut u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || updates.is_null() || num_updates == 0 || version_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let mut parsed_updates = Vec::with_capacity(num_updates);
+    for i in 0..num_updates {
+        let update = &*updates.add(i);
+        let Some(path) = required_c_string(update.path, error_message) else {
+            return LanceDBError::InvalidArgument;
+        };
+        if path.trim().is_empty() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        let replace = update.replace != 0;
+        if update.entries.is_null() {
+            if update.num_entries != 0 || !replace {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            }
+        } else if update.num_entries == 0 && !replace {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        let mut field_update = FieldMetadataUpdate::new(path.to_string());
+        let mut seen_keys = HashSet::with_capacity(update.num_entries);
+        for j in 0..update.num_entries {
+            let entry = &*update.entries.add(j);
+            let Some(key) = required_c_string(entry.key, error_message) else {
+                return LanceDBError::InvalidArgument;
+            };
+            if key.trim().is_empty() {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            }
+            if !seen_keys.insert(key.to_string()) {
+                set_custom_error_message(
+                    error_message,
+                    "Field metadata keys must be unique within one update",
+                );
+                return LanceDBError::InvalidArgument;
+            }
+
+            if entry.value.is_null() {
+                field_update = field_update.remove(key);
+            } else {
+                let Some(value) = required_c_string(entry.value, error_message) else {
+                    return LanceDBError::InvalidArgument;
+                };
+                field_update = field_update.set(key, value);
+            }
+        }
+        if replace {
+            field_update = field_update.replace();
+        }
+        parsed_updates.push(field_update);
+    }
+
+    let tbl = &(*table).inner;
+    let result = get_runtime().block_on(tbl.base_table().update_field_metadata(&parsed_updates));
+
+    match result {
+        Ok(result) => {
+            *version_out = result.version;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+#[cfg(all(test, feature = "remote"))]
+mod merge_insert_retry_tests;

@@ -61,10 +61,14 @@ jobs:
           mkdir -p build
           cd build
           cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
             -DBUILD_SHARED_LIBS=${{ matrix.lib_type == 'shared' && 'ON' || 'OFF' }}
 
       - name: Build
         run: ninja -C build
+
+      - name: Check installed package consumers
+        run: ninja -C build check-install
 
       - name: Check C17 consumer
         run: ninja -C build check-c17
@@ -170,6 +174,9 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 4
 
+      - name: Check installed package consumers
+        run: cmake --build build --target check-install
+
       - name: Test C17 consumer
         run: ctest --test-dir build -R "^lancedb_c17_consumer$" --output-on-failure --no-tests=error
 
@@ -201,10 +208,14 @@ jobs:
         run: |
           mkdir -p build
           cd build
-          cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
+            -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: ninja -C build
+
+      - name: Check installed package consumers
+        run: ninja -C build check-install
 
       - name: Test
         run: ctest --test-dir build -j --output-on-failure

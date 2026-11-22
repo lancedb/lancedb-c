@@ -134,6 +134,20 @@ def validate_tag(tag: str) -> str:
     return version
 
 
+def soversion(version: str) -> str:
+    """Return the Linux SONAME version for a resolved binding version.
+
+    Before 1.0 the C ABI may change with the minor version, so major.minor is
+    the compatibility boundary. From 1.0 onward it is the major version.
+    """
+    resolved = parse_resolved(version)
+    core = resolved.split("+", 1)[0].split("-", 1)[0].split(".")
+    major, minor = int(core[0]), int(core[1])
+    if major == 0:
+        return f"{major}.{minor}"
+    return str(major)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -144,11 +158,17 @@ def main(argv: list[str] | None = None) -> int:
         "resolve", help="resolve the version from a repository"
     )
     resolve_parser.add_argument("repo_root", nargs="?", default=".")
+    soversion_parser = subparsers.add_parser(
+        "soversion", help="resolve the Linux SONAME version from a repository"
+    )
+    soversion_parser.add_argument("repo_root", nargs="?", default=".")
 
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-tag":
             print(validate_tag(args.tag))
+        elif args.command == "soversion":
+            print(soversion(resolve_version(Path(args.repo_root))))
         else:
             print(resolve_version(Path(args.repo_root)))
     except ValueError as error:

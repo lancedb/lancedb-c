@@ -81,6 +81,211 @@ pub struct LanceDBSessionOptions {
     pub metadata_cache_bytes: usize,
 }
 
+/// Open table option fields of `LanceDBOpenTableOptions`
+///
+/// These values mirror the `LanceDBOpenTableField` enumerators of the public header.
+const OPEN_TABLE_INDEX_CACHE_SIZE: u32 = 1 << 0;
+const OPEN_TABLE_VERSION: u32 = 1 << 1;
+const OPEN_TABLE_MANAGED_VERSIONING: u32 = 1 << 2;
+const OPEN_TABLE_ALL_FIELDS: u32 =
+    OPEN_TABLE_INDEX_CACHE_SIZE | OPEN_TABLE_VERSION | OPEN_TABLE_MANAGED_VERSIONING;
+
+/// Options for `lancedb_connection_open_table_with_options`
+///
+/// A zero-initialized struct keeps every SDK default. `set_fields` selects the
+/// scalar overrides, so an omitted `index_cache_size` stays distinct from an
+/// explicit zero and an omitted `managed_versioning` stays distinct from false.
+///
+/// `namespace_path` is a C array of `namespace_path_len` borrowed strings; NULL
+/// with length zero is the root namespace. `storage_keys` and `storage_values`
+/// are parallel arrays of `storage_count` borrowed strings for this table only.
+/// `location` and `branch` are borrowed strings; NULL leaves them unset. The
+/// struct and every string it points to are borrowed for the duration of the
+/// call and are not consumed.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBOpenTableOptions {
+    /// Bitmask of `LanceDBOpenTableField` values; 0 uses every default
+    pub set_fields: u32,
+    /// Namespace path parts (NULL with length 0 for the root namespace)
+    pub namespace_path: *const *const c_char,
+    /// Number of namespace path parts
+    pub namespace_path_len: usize,
+    /// Custom table location (NULL to derive it from the database URI and name)
+    pub location: *const c_char,
+    /// Storage option keys for this table (NULL when storage_count is 0)
+    pub storage_keys: *const *const c_char,
+    /// Storage option values matching storage_keys
+    pub storage_values: *const *const c_char,
+    /// Number of per-table storage options
+    pub storage_count: usize,
+    /// Index cache size in entries; read only when its bit is set. The SDK
+    /// forwards it, but an attached connection Session keeps its own effective
+    /// capacity.
+    pub index_cache_size: u32,
+    /// Table version; read only when its bit is set
+    pub version: u64,
+    /// Read-only branch name (NULL for the default branch)
+    pub branch: *const c_char,
+    /// Managed versioning (0 = false, 1 = true); read only when its bit is set
+    pub managed_versioning: c_int,
+}
+
+impl Default for LanceDBOpenTableOptions {
+    fn default() -> Self {
+        Self {
+            set_fields: 0,
+            namespace_path: ptr::null(),
+            namespace_path_len: 0,
+            location: ptr::null(),
+            storage_keys: ptr::null(),
+            storage_values: ptr::null(),
+            storage_count: 0,
+            index_cache_size: 0,
+            version: 0,
+            branch: ptr::null(),
+            managed_versioning: 0,
+        }
+    }
+}
+
+/// The SDK open-table settings parsed from the borrowed C options
+#[derive(Default)]
+struct OpenTableSettings {
+    namespace_path: Vec<String>,
+    location: Option<String>,
+    storage_options: Vec<(String, String)>,
+    index_cache_size: Option<u32>,
+    version: Option<u64>,
+    branch: Option<String>,
+    managed_versioning: Option<bool>,
+}
+
+/// Convert one nullable borrowed string
+unsafe fn open_table_optional_string(
+    value: *const c_char,
+    name: &str,
+) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    CStr::from_ptr(value)
+        .to_str()
+        .map(|value| Some(value.to_string()))
+        .map_err(|_| format!("'{name}' is not valid UTF-8"))
+}
+
+/// Convert the per-table storage option arrays from C
+unsafe fn open_table_storage_options(
+    options: &LanceDBOpenTableOptions,
+) -> Result<Vec<(String, String)>, String> {
+    if options.storage_count == 0 {
+        return Ok(Vec::new());
+    }
+    if options.storage_keys.is_null() || options.storage_values.is_null() {
+        return Err(
+            "storage_keys and storage_values must not be NULL when storage_count is non-zero"
+                .to_string(),
+        );
+    }
+
+    let mut pairs = Vec::with_capacity(options.storage_count);
+    for index in 0..options.storage_count {
+        let key = *options.storage_keys.add(index);
+        let value = *options.storage_values.add(index);
+        if key.is_null() || value.is_null() {
+            return Err(format!("storage option {} has a NULL key or value", index));
+        }
+        let key = CStr::from_ptr(key)
+            .to_str()
+            .map_err(|_| format!("storage option key {} is not valid UTF-8", index))?;
+        let value = CStr::from_ptr(value)
+            .to_str()
+            .map_err(|_| format!("storage option value {} is not valid UTF-8", index))?;
+        pairs.push((key.to_string(), value.to_string()));
+    }
+    Ok(pairs)
+}
+
+/// Parse the borrowed C options into values the SDK builder accepts
+///
+/// Every rejection sets the error message through `error_message` and returns
+/// the matching C error code.
+unsafe fn open_table_settings_from_c(
+    options: *const LanceDBOpenTableOptions,
+    error_message: *mut *mut c_char,
+) -> Result<OpenTableSettings, LanceDBError> {
+    let mut settings = OpenTableSettings::default();
+    if options.is_null() {
+        return Ok(settings);
+    }
+    let options = &*options;
+
+    let unknown = options.set_fields & !OPEN_TABLE_ALL_FIELDS;
+    if unknown != 0 {
+        set_custom_error_message(
+            error_message,
+            &format!("unknown open table option bits: 0x{unknown:x}"),
+        );
+        return Err(LanceDBError::InvalidArgument);
+    }
+
+    settings.namespace_path = match namespace_path_from_c(
+        options.namespace_path,
+        options.namespace_path_len,
+        error_message,
+    ) {
+        Some(path) => path,
+        None => return Err(LanceDBError::InvalidArgument),
+    };
+
+    settings.location = match open_table_optional_string(options.location, "location") {
+        Ok(location) => location,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return Err(LanceDBError::InvalidArgument);
+        }
+    };
+
+    settings.storage_options = match open_table_storage_options(options) {
+        Ok(storage_options) => storage_options,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return Err(LanceDBError::InvalidArgument);
+        }
+    };
+
+    if options.set_fields & OPEN_TABLE_INDEX_CACHE_SIZE != 0 {
+        settings.index_cache_size = Some(options.index_cache_size);
+    }
+    if options.set_fields & OPEN_TABLE_VERSION != 0 {
+        settings.version = Some(options.version);
+    }
+    if options.set_fields & OPEN_TABLE_MANAGED_VERSIONING != 0 {
+        settings.managed_versioning = Some(match options.managed_versioning {
+            0 => false,
+            1 => true,
+            other => {
+                set_custom_error_message(
+                    error_message,
+                    &format!("'managed_versioning' must be 0 or 1, got {other}"),
+                );
+                return Err(LanceDBError::InvalidArgument);
+            }
+        });
+    }
+
+    settings.branch = match open_table_optional_string(options.branch, "branch") {
+        Ok(branch) => branch,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return Err(LanceDBError::InvalidArgument);
+        }
+    };
+
+    Ok(settings)
+}
+
 /// Cache statistics for a session cache
 #[repr(C)]
 pub struct LanceDBSessionCacheStats {
@@ -1400,6 +1605,99 @@ pub unsafe extern "C" fn lancedb_connection_open_table(
             LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Open an existing table with SDK open-table builder options
+///
+/// # Safety
+/// - `connection` must be a valid pointer returned from `lancedb_connect_builder_execute`
+/// - `table_name` must be a valid null-terminated C string
+/// - `options` may be NULL for the SDK defaults, or point to a readable
+///   `LanceDBOpenTableOptions`. Its pointers and strings are borrowed
+/// - `table_out` must be a valid pointer to receive the opened table
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*table_out` set to the opened table
+/// - `LANCEDB_INVALID_ARGUMENT` for a NULL pointer or an invalid option
+/// - `LANCEDB_INVALID_TABLE_NAME` for a name the SDK rejects
+/// - The SDK error code for a rejected open
+///
+/// On entry, `*table_out` and the error message slot are cleared. The table is
+/// written only on success, so a failure leaves `*table_out` NULL. That differs
+/// from the legacy `lancedb_connection_open_table`, which leaves its output
+/// unchanged on failure. The caller frees the returned table with
+/// `lancedb_table_free()` and a returned error message with
+/// `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_open_table_with_options(
+    connection: *const LanceDBConnection,
+    table_name: *const c_char,
+    options: *const LanceDBOpenTableOptions,
+    table_out: *mut *mut LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !table_out.is_null() {
+        *table_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if connection.is_null() || table_name.is_null() || table_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(table_name_str) = CStr::from_ptr(table_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    // lancedb panics on an invalid table name instead of returning an error,
+    // so the name is validated before the table is opened.
+    if let Err(error) = validate_table_name(table_name_str) {
+        return handle_error(&error, error_message);
+    }
+
+    let settings = match open_table_settings_from_c(options, error_message) {
+        Ok(settings) => settings,
+        Err(error) => return error,
+    };
+
+    let conn = &(*connection).inner;
+    let runtime = get_runtime();
+    let outcome = runtime.block_on(async {
+        let mut builder = conn
+            .open_table(table_name_str)
+            .namespace(settings.namespace_path);
+        if let Some(location) = settings.location {
+            builder = builder.location(location);
+        }
+        if !settings.storage_options.is_empty() {
+            builder = builder.storage_options(settings.storage_options);
+        }
+        if let Some(index_cache_size) = settings.index_cache_size {
+            builder = builder.index_cache_size(index_cache_size);
+        }
+        if let Some(version) = settings.version {
+            builder = builder.version(version);
+        }
+        if let Some(branch) = settings.branch {
+            builder = builder.branch(branch);
+        }
+        if let Some(managed_versioning) = settings.managed_versioning {
+            builder = builder.managed_versioning(managed_versioning);
+        }
+        builder.execute().await
+    });
+
+    match outcome {
+        Ok(table) => {
+            let boxed_table = Box::new(LanceDBTable { inner: table });
+            *table_out = Box::into_raw(boxed_table);
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
     }
 }
 

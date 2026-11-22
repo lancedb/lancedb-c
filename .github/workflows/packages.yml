@@ -177,8 +177,16 @@ jobs:
           cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib --
           -C link-arg=-Wl,-install_name,@rpath/liblancedb.dylib
 
-      - name: Build shared library
-        if: runner.os != 'macOS'
+      - name: Build shared library (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          soversion="$("${{ matrix.python }}" .github/scripts/version.py soversion)"
+          cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib -- \
+            -C "link-arg=-Wl,-soname,liblancedb.so.${soversion}"
+
+      - name: Build shared library (Windows)
+        if: runner.os == 'Windows'
         run: cargo build --release --locked --package lancedb-c --target ${{ matrix.target }}
 
       - name: Create package

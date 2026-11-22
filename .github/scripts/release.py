@@ -322,11 +322,8 @@ def verify_archive_contents(
         expected_files = {
             "LICENSE",
             manifest["include"],
-            manifest["library"],
             "manifest.json",
-        }
-        if manifest["importLibrary"]:
-            expected_files.add(manifest["importLibrary"])
+        } | package.library_members(target, tag.version)
         if set(inventory) != expected_files:
             fail(
                 f"{archive.name} has unexpected package members: "
@@ -340,13 +337,10 @@ def verify_archive_contents(
             "include",
             "include/lancedb.h",
             "lib",
-            manifest["library"],
             manifest["license"],
             "manifest.json",
             "SHA256SUMS",
-        }
-        if manifest["importLibrary"]:
-            expected_members.add(manifest["importLibrary"])
+        } | package.library_members(target, tag.version)
         if actual_members != expected_members:
             fail(
                 f"{archive.name} has unexpected package paths: "

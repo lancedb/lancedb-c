@@ -360,6 +360,27 @@ pub struct LanceDBMergeInsertResult {
     pub num_attempts: u32,
 }
 
+/// Result of `lancedb_table_merge_insert_with_options`
+///
+/// This is the SDK's complete `MergeResult`, copied unchanged. It is separate from
+/// `LanceDBMergeInsertResult` so the older struct keeps its published layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LanceDBMergeInsertResultV2 {
+    /// Reported commit version; 0 may mean not reported
+    pub version: u64,
+    /// Reported number of inserted rows; 0 may mean not reported
+    pub num_inserted_rows: u64,
+    /// Reported number of updated rows; 0 may mean not reported
+    pub num_updated_rows: u64,
+    /// Reported number of deleted rows; 0 may mean not reported
+    pub num_deleted_rows: u64,
+    /// Reported merge attempts; 0 may mean not reported
+    pub num_attempts: u32,
+    /// Reported total rows written; 0 may mean not reported
+    pub num_rows: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
