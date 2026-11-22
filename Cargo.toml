@@ -22,10 +22,23 @@ resolver = "2"
 name = "lancedb"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+# Forwarded features of the pinned lancedb SDK. Prebuilt packages use the
+# defaults; source builds can narrow them with --no-default-features.
+default = ["remote", "aws", "gcs", "azure", "dynamodb"]
+remote = ["lancedb/remote"]
+aws = ["lancedb/aws"]
+gcs = ["lancedb/gcs"]
+azure = ["lancedb/azure"]
+oss = ["lancedb/oss"]
+dynamodb = ["lancedb/dynamodb"]
+geo = ["lancedb/geo"]
+fp16kernels = ["lancedb/fp16kernels"]
+
 [dependencies]
 tokio = { version = "1.23", features = ["rt-multi-thread"] }
 libc = "0.2"
-lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.21", features = ["remote"] }
+lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.21", default-features = false }
 lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
 lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
 lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
