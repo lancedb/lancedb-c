@@ -161,6 +161,24 @@ the SHA-256 of each archive.
    ctest -j 6
    ```
 
+### C ABI Declarations
+
+The public header is hand-written and must match the Rust FFI. Generate
+declarations from the Rust source with the pinned `cbindgen` and compare them
+with the header using `clang`:
+
+```bash
+cargo install cbindgen --version =0.29.4 --locked
+ninja -C build check-abi
+```
+
+The check compares the host data model and the Windows MSVC LLP64 model using
+Clang target headers; it does not build a Windows Rust library. It also runs
+temporary signature, layout and enum drift fixtures to show that a mismatch is
+reported with the affected function, argument, struct field or enumerator.
+Native C17 consumers remain platform runtime smoke tests rather than full
+declaration coverage, and MSVC C17 CI is owned by #107.
+
 ### Code Coverage
 
 Generate a Rust code coverage report showing which `src/*.rs` lines are exercised by the C++ tests.
