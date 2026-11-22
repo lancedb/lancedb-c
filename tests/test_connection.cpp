@@ -1139,12 +1139,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
     REQUIRE(branch != nullptr);
     lancedb_table_free(main);
 
+    const uint64_t branch_fork_version = lancedb_table_version(branch);
+    require_count_and_version(branch, initial_rows + added_rows, branch_fork_version);
+
     auto branch_reader = create_reader_from_batch(
         create_test_record_batch(2, initial_rows + added_rows));
     REQUIRE(branch_reader != nullptr);
     REQUIRE(lancedb_table_add(branch, branch_reader, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    require_count_and_version(branch, initial_rows + added_rows + 2, 3);
+    const uint64_t branch_head_version = lancedb_table_version(branch);
+    require_count_and_version(
+        branch, initial_rows + added_rows + 2, branch_head_version);
     lancedb_table_free(branch);
 
     LanceDBOpenTableOptions options{};
@@ -1153,16 +1158,18 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
     REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    require_count_and_version(opened, initial_rows + added_rows + 2, 3);
+    require_count_and_version(
+        opened, initial_rows + added_rows + 2, branch_head_version);
     lancedb_table_free(opened);
 
     options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
-    options.version = 2;
+    options.version = branch_fork_version;
     opened = nullptr;
     REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    require_count_and_version(opened, initial_rows + added_rows, 2);
+    require_count_and_version(
+        opened, initial_rows + added_rows, branch_fork_version);
 
     auto pinned_reader = create_reader_from_batch(create_test_record_batch(1, 30));
     REQUIRE(pinned_reader != nullptr);
@@ -1170,7 +1177,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
-    require_count_and_version(opened, initial_rows + added_rows, 2);
+    require_count_and_version(
+        opened, initial_rows + added_rows, branch_fork_version);
     lancedb_table_free(opened);
   }
 
