@@ -383,9 +383,6 @@ unsafe fn build_index_from_options(
             }
             Ok(Index::FTS(builder))
         }
-        _ => Err(format!(
-            "Index type {index_type:?} cannot be created through lancedb_table_create_index"
-        )),
     }
 }
 
