@@ -4,8 +4,9 @@
 name: Shared Library Packages
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +25,7 @@ jobs:
       - name: Check out the commit being tested
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Run packaging fixture checks
@@ -57,7 +58,7 @@ jobs:
       - name: Check out the commit being packaged
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Verify the checked-out head
@@ -65,7 +66,7 @@ jobs:
         shell: bash
         run: |
           actual="$(git rev-parse HEAD)"
-          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          expected="${{ github.sha }}"
           echo "checked out ${actual}"
           test "${actual}" = "${expected}"
 
@@ -176,21 +177,21 @@ jobs:
         run: >
           ${{ matrix.python }} .github/scripts/package.py create
           --target ${{ matrix.target }}
-          --commit ${{ steps.release-tag.outputs.commit || github.event.pull_request.head.sha || github.sha }}
+          --commit ${{ steps.release-tag.outputs.commit || github.sha }}
           --output-dir dist
 
       - name: Verify package with a real consumer
         run: >
           ${{ matrix.python }} .github/scripts/package.py verify
           --target ${{ matrix.target }}
-          --commit ${{ steps.release-tag.outputs.commit || github.event.pull_request.head.sha || github.sha }}
+          --commit ${{ steps.release-tag.outputs.commit || github.sha }}
           --archive ${{ steps.package.outputs.archive }}
           --checksum ${{ steps.package.outputs.checksum }}
 
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: lancedb-c-${{ steps.release-tag.outputs.commit || github.event.pull_request.head.sha || github.sha }}-${{ matrix.target }}
+          name: lancedb-c-${{ steps.release-tag.outputs.commit || github.sha }}-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
           retention-days: 7

@@ -96,7 +96,7 @@ jobs:
 
       - name: Download baseline coverage
         if: github.event_name == 'pull_request'
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v28
         with:
           workflow: coverage.yml
           commit: ${{ steps.merge_base.outputs.sha }}

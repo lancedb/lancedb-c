@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-15]
         lib_type: [shared]
         include:
           - os: ubuntu-latest
@@ -48,7 +48,7 @@ jobs:
           sudo apt-get install -y libarrow-dev libboost-coroutine-dev libboost-context-dev
 
       - name: Install dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-15'
         run: |
           brew install apache-arrow protobuf boost
 
@@ -95,6 +95,75 @@ jobs:
             build/valgrind_*.txt
           if-no-files-found: ignore
           retention-days: 7
+
+  package-script:
+    name: Package script checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run packaging fixture checks
+        run: python3 .github/scripts/test_package.py
+
+  build_windows_native:
+    name: Build shared on windows-2025
+    runs-on: windows-2025
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enable long paths for Cargo git checkouts
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      # The locked Lance v15.0.0-beta.25 fixture contains a 188-character
+      # relative test-data path. C:\c keeps Cargo's git checkout under MAX_PATH.
+      - name: Use short Cargo home on Windows
+        shell: bash
+        run: |
+          mkdir -p /c/c
+          echo 'CARGO_HOME=C:\c' >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          choco install protoc --version=29.0.0 -y --no-progress
+          protoc --version
+
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Configure CMake (Debug)
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_SHARED_LIBS=ON
+          -DBUILD_CONSUMER_TEST=ON
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test C17 consumer
+        run: ctest --test-dir build -R "^lancedb_c17_consumer$" --output-on-failure --no-tests=error
+
+      - name: Test C++ consumer
+        run: ctest --test-dir build -R "^package_consumer$" --output-on-failure --no-tests=error
 
   build_almalinux:
     name: Build on AlmaLinux 10
@@ -169,7 +238,7 @@ jobs:
 
       - name: Cache Arrow
         id: cache-arrow
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: arrow-install
           key: ${{ runner.os }}-mingw-arrow-22.0.0
