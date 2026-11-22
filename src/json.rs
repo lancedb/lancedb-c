@@ -17,7 +17,7 @@ use lancedb::datafusion::common::DFSchema;
 use lancedb::datafusion::logical_expr::execution_props::ExecutionProps;
 use lancedb::datafusion::logical_expr::expr::ScalarFunction;
 use lancedb::datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
-use lancedb::datafusion::logical_expr::{lit, ColumnarValue, Expr};
+use lancedb::datafusion::logical_expr::{lit, Cast, ColumnarValue, Expr};
 use lancedb::datafusion::physical_expr::create_physical_expr;
 
 use crate::error::{set_custom_error_message, set_invalid_argument_message, LanceDBError};
@@ -237,10 +237,7 @@ pub unsafe extern "C" fn lancedb_expr_json_array_has(
     let array_inner = Box::from_raw(array_expr_ptr).inner;
     let udf = lancedb::datafusion::functions_nested::array_has::array_has_udf();
 
-    let val_as_utf8 = Expr::Cast(lancedb::datafusion::logical_expr::Cast::new(
-        Box::new(val),
-        arrow_schema::DataType::Utf8,
-    ));
+    let val_as_utf8 = Expr::Cast(Cast::new(Box::new(val), arrow_schema::DataType::Utf8));
 
     let search_val = if quote_value {
         let concat_udf = lancedb::datafusion::functions::string::concat();
