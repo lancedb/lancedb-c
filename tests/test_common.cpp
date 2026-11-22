@@ -16,7 +16,7 @@ int remove_directory(const char* path) {
   return std::filesystem::remove_all(path) ? 0 : 1;
 }
 
-void LanceDBFixture::create_empty_table(const std::string& table_name) {
+void create_empty_table_on(LanceDBConnection* db, const std::string& table_name) {
   // Create schema
   auto schema = create_test_schema();
 
@@ -47,6 +47,10 @@ void LanceDBFixture::create_empty_table(const std::string& table_name) {
   if (c_schema.release) {
     c_schema.release(&c_schema);
   }
+}
+
+void LanceDBFixture::create_empty_table(const std::string& table_name) {
+  create_empty_table_on(db, table_name);
 }
 
 LanceDBTable* LanceDBFixture::create_table_with_data(const std::string& table_name, int num_rows, int start_index) {
@@ -87,7 +91,7 @@ LanceDBTable* LanceDBFixture::create_table_with_data(const std::string& table_na
   return table;
 }
 
-LanceDBTable* LanceDBFixture::open_table(const std::string& table_name) {
+LanceDBTable* open_table_on(LanceDBConnection* db, const std::string& table_name) {
   LanceDBTable* table = nullptr;
   char* error_message = nullptr;
 
@@ -98,7 +102,11 @@ LanceDBTable* LanceDBFixture::open_table(const std::string& table_name) {
   return table;
 }
 
-void LanceDBFixture::require_table_not_found(const std::string& table_name) {
+LanceDBTable* LanceDBFixture::open_table(const std::string& table_name) {
+  return open_table_on(db, table_name);
+}
+
+void require_table_not_found_on(LanceDBConnection* db, const std::string& table_name) {
   LanceDBTable* table = nullptr;
   char* error_message = nullptr;
 
@@ -107,6 +115,10 @@ void LanceDBFixture::require_table_not_found(const std::string& table_name) {
   REQUIRE(table == nullptr);
 
   lancedb_free_string(error_message);
+}
+
+void LanceDBFixture::require_table_not_found(const std::string& table_name) {
+  require_table_not_found_on(db, table_name);
 }
 
 std::shared_ptr<arrow::Schema> create_test_schema() {

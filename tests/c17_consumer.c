@@ -180,6 +180,88 @@ int main(int argc, char** argv) {
   }
 
   lancedb_connection_free(connection);
+
+  /* A direct directory namespace connection uses the same C connection
+   * entry points and needs no URI-specific setup. */
+  char namespace_root[4096];
+  const int namespace_root_len = snprintf(
+      namespace_root, sizeof(namespace_root), "%s-namespace", uri);
+  if (namespace_root_len < 0 ||
+      (size_t)namespace_root_len >= sizeof(namespace_root)) {
+    return fail("the namespace root path does not fit the C17 buffer");
+  }
+
+  const char* namespace_keys[] = {"root"};
+  const char* namespace_values[] = {namespace_root};
+  LanceDBConnectNamespaceBuilder* namespace_builder =
+      lancedb_connect_namespace("dir", namespace_keys, namespace_values, 1);
+  if (namespace_builder == NULL) {
+    return fail("lancedb_connect_namespace() must return a builder");
+  }
+  namespace_builder = lancedb_connect_namespace_builder_storage_option(
+      namespace_builder, "client_retry_timeout", "10");
+  namespace_builder = lancedb_connect_namespace_builder_namespace_client_property(
+      namespace_builder, "manifest_enabled", "true");
+  namespace_builder = lancedb_connect_namespace_builder_read_consistency_interval_ms(
+      namespace_builder, 0);
+  namespace_builder = lancedb_connect_namespace_builder_pushdown_operation(
+      namespace_builder, LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE);
+  if (namespace_builder == NULL) {
+    return fail("the namespace builder setters must return a builder");
+  }
+
+  connection = NULL;
+  status =
+      lancedb_connect_namespace_builder_execute(namespace_builder, &connection, &error_message);
+  if (status != LANCEDB_SUCCESS || connection == NULL) {
+    fprintf(stderr, "connecting to the dir namespace failed: %s\n",
+            error_message != NULL ? error_message : "no error message");
+    lancedb_free_string(error_message);
+    return 1;
+  }
+
+  connected_uri = lancedb_connection_uri(connection);
+  if (connected_uri == NULL || strcmp(connected_uri, "namespace://dir") != 0) {
+    lancedb_connection_free(connection);
+    return fail("the namespace connection must expose namespace://dir");
+  }
+
+  consistency.kind = LANCEDB_READ_CONSISTENCY_MANUAL;
+  consistency.interval_ms = 1;
+  status = lancedb_connection_read_consistency(connection, &consistency, &error_message);
+  if (status != LANCEDB_SUCCESS) {
+    fprintf(stderr, "reading namespace consistency failed: %s\n",
+            error_message != NULL ? error_message : "no error message");
+    lancedb_free_string(error_message);
+    lancedb_connection_free(connection);
+    return 1;
+  }
+  if (consistency.kind != LANCEDB_READ_CONSISTENCY_STRONG ||
+      consistency.interval_ms != 0) {
+    lancedb_connection_free(connection);
+    return fail("an explicit zero namespace interval must report strong consistency");
+  }
+
+  names = NULL;
+  count = 0;
+  status =
+      lancedb_connection_table_names(connection, &names, &count, &error_message);
+  if (status != LANCEDB_SUCCESS) {
+    fprintf(stderr, "listing namespace tables failed: %s\n",
+            error_message != NULL ? error_message : "no error message");
+    lancedb_free_string(error_message);
+    lancedb_connection_free(connection);
+    return 1;
+  }
+  if (count != 0 || names != NULL) {
+    lancedb_free_table_names(names, count);
+    lancedb_connection_free(connection);
+    return fail("a new dir namespace must not contain tables");
+  }
+
+  lancedb_free_table_names(names, count);
+  lancedb_connection_free(connection);
+
   printf("C17 consumer: OK (version %s)\n", runtime_version);
   return 0;
 }

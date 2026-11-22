@@ -16,7 +16,10 @@ use futures::TryStreamExt;
 use lance_namespace::models::{
     CreateNamespaceRequest, DescribeNamespaceRequest, DropNamespaceRequest,
 };
-use lancedb::connection::{connect, ConnectBuilder, Connection, TableNamesBuilder};
+use lancedb::connection::{
+    connect, connect_namespace, ConnectBuilder, ConnectNamespaceBuilder, Connection,
+    NamespaceClientPushdownOperation, TableNamesBuilder,
+};
 use lancedb::database::ReadConsistency;
 use lancedb::utils::validate_table_name;
 use lancedb::Table;
@@ -35,6 +38,12 @@ pub struct LanceDBConnectBuilder {
     // the same classification so remote-only setters never land in a native
     // storage provider's options.
     is_remote: bool,
+}
+
+/// Opaque handle to a ConnectNamespaceBuilder
+#[repr(C)]
+pub struct LanceDBConnectNamespaceBuilder {
+    inner: Box<ConnectNamespaceBuilder>,
 }
 
 /// Opaque handle to a Connection
@@ -338,6 +347,34 @@ pub struct LanceDBReadConsistency {
     pub interval_ms: u64,
 }
 
+/// A namespace operation that can be executed by the namespace backend
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanceDBNamespacePushdownOperation {
+    QueryTable = 0,
+    CreateTable = 1,
+}
+
+impl LanceDBNamespacePushdownOperation {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::QueryTable),
+            1 => Some(Self::CreateTable),
+            _ => None,
+        }
+    }
+}
+
+impl From<LanceDBNamespacePushdownOperation> for NamespaceClientPushdownOperation {
+    fn from(operation: LanceDBNamespacePushdownOperation) -> Self {
+        match operation {
+            LanceDBNamespacePushdownOperation::QueryTable => Self::QueryTable,
+            LanceDBNamespacePushdownOperation::CreateTable => Self::CreateTable,
+        }
+    }
+}
+
 const DEFAULT_INDEX_CACHE_SIZE_BYTES: usize = 6 * 1024 * 1024 * 1024;
 const DEFAULT_METADATA_CACHE_SIZE_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -519,6 +556,77 @@ fn connect_builder_handle(builder: ConnectBuilder, is_remote: bool) -> *mut Lanc
         inner: Box::new(builder),
         is_remote,
     }))
+}
+
+/// Wrap an updated SDK namespace builder for C callers
+fn connect_namespace_builder_handle(
+    builder: ConnectNamespaceBuilder,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    Box::into_raw(Box::new(LanceDBConnectNamespaceBuilder {
+        inner: Box::new(builder),
+    }))
+}
+
+/// Copy borrowed parallel property arrays into the SDK's owned map.
+///
+/// A zero count accepts NULL arrays. A positive count requires both arrays and
+/// every key and value to be non-NULL UTF-8. Duplicate keys keep the last
+/// value, matching the SDK's `HashMap` properties.
+unsafe fn namespace_properties_from_c(
+    keys: *const *const c_char,
+    values: *const *const c_char,
+    count: usize,
+) -> Option<HashMap<String, String>> {
+    let mut properties = HashMap::with_capacity(count);
+    if count == 0 {
+        return Some(properties);
+    }
+    if keys.is_null() || values.is_null() {
+        return None;
+    }
+
+    for index in 0..count {
+        let key = *keys.add(index);
+        let value = *values.add(index);
+        if key.is_null() || value.is_null() {
+            return None;
+        }
+        let key = CStr::from_ptr(key).to_str().ok()?;
+        let value = CStr::from_ptr(value).to_str().ok()?;
+        properties.insert(key.to_string(), value.to_string());
+    }
+
+    Some(properties)
+}
+
+/// Consume a namespace builder and apply a key/value option
+///
+/// A NULL builder, key or value leaves nothing to return. The builder is
+/// consumed even when a string is invalid, matching the URI connect builder.
+unsafe fn connect_namespace_builder_with_key_value(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    key: *const c_char,
+    value: *const c_char,
+    apply: impl FnOnce(ConnectNamespaceBuilder, &str, &str) -> ConnectNamespaceBuilder,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if key.is_null() || value.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(key) = CStr::from_ptr(key).to_str() else {
+        return ptr::null_mut();
+    };
+    let Ok(value) = CStr::from_ptr(value).to_str() else {
+        return ptr::null_mut();
+    };
+
+    connect_namespace_builder_handle(apply(*builder_box.inner, key, value))
 }
 
 #[cfg(feature = "remote")]
@@ -904,6 +1012,268 @@ pub unsafe extern "C" fn lancedb_connect_builder_session(
 /// - `builder` must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_connect_builder_free(builder: *mut LanceDBConnectBuilder) {
+    if !builder.is_null() {
+        let _ = Box::from_raw(builder);
+    }
+}
+
+/// Create a ConnectNamespaceBuilder for a Lance namespace implementation
+///
+/// # Safety
+/// - `ns_impl` must be a valid null-terminated UTF-8 C string
+/// - `property_keys` and `property_values` must each point to `property_count`
+///   readable pointers, or be NULL when `property_count` is zero
+/// - Every property key and value must be a valid null-terminated UTF-8 C string
+///
+/// The strings are borrowed for the duration of this call and copied into the
+/// returned builder. Invalid input returns NULL.
+///
+/// For the `dir` implementation, properties whose names start with `storage.`
+/// apply to its own root object store. This is separate from the connection
+/// storage-options map set by `lancedb_connect_namespace_builder_storage_option`.
+///
+/// # Returns
+/// - Non-null pointer to LanceDBConnectNamespaceBuilder on success
+/// - Null pointer on invalid input
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace(
+    ns_impl: *const c_char,
+    property_keys: *const *const c_char,
+    property_values: *const *const c_char,
+    property_count: usize,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    if ns_impl.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(ns_impl) = CStr::from_ptr(ns_impl).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let Some(properties) =
+        namespace_properties_from_c(property_keys, property_values, property_count)
+    else {
+        return ptr::null_mut();
+    };
+
+    connect_namespace_builder_handle(connect_namespace(ns_impl, properties))
+}
+
+/// Execute the namespace connection and return a Connection handle
+///
+/// The builder is consumed on every path. `connection` is written only on
+/// success; on failure it is left unchanged. A non-NULL `error_message` slot is
+/// preserved on success, matching `lancedb_connect_builder_execute()`, and
+/// receives an owned diagnostic on error.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `connection` must be a valid pointer to receive the connection
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_execute(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    connection: *mut *mut LanceDBConnection,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if builder.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let connect_builder = *builder_box.inner;
+
+    if connection.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match get_runtime().block_on(connect_builder.execute()) {
+        Ok(conn) => {
+            *connection = Box::into_raw(Box::new(LanceDBConnection {
+                inner: conn,
+                uri_cache: OnceLock::new(),
+            }));
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Set an option for the storage layer of a namespace connection
+///
+/// These options apply to table access through the namespace connection. They
+/// are not the `storage.`-prefixed implementation properties that the `dir`
+/// namespace uses for its own root object store.
+///
+/// At the pinned SDK, the table creation path falls back to this map only when
+/// the namespace response omits `storage_options`. An explicit empty
+/// `storage_options` map prevents that fallback. The selected map overrides
+/// per-write keys with the same name.
+///
+/// Opening a table uses the `describe_table` storage options plus the options
+/// supplied on that open request, with namespace values winning on overlaps; it
+/// does not use this connection-level map there.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `key` and `value` must be valid null-terminated C strings
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectNamespaceBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_storage_option(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    key: *const c_char,
+    value: *const c_char,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    connect_namespace_builder_with_key_value(builder, key, value, |builder, key, value| {
+        builder.storage_option(key, value)
+    })
+}
+
+/// Set an additional property for the namespace client
+///
+/// Namespace client properties are merged into the implementation properties
+/// when the connection is executed. The SDK decides which value wins when a key
+/// is set in both places. For the `dir` implementation, a property whose name
+/// starts with `storage.` configures its own root object store even when it is
+/// supplied through this setter; this differs from
+/// `lancedb_connect_namespace_builder_storage_option`, which configures table
+/// access for the connection.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `key` and `value` must be valid null-terminated C strings
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectNamespaceBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_namespace_client_property(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    key: *const c_char,
+    value: *const c_char,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    connect_namespace_builder_with_key_value(builder, key, value, |builder, key, value| {
+        builder.namespace_client_property(key, value)
+    })
+}
+
+/// Set the read consistency interval in milliseconds for a namespace connection
+///
+/// Leaving this setter unused keeps the SDK default, which adds no freshness
+/// constraint to reads. An explicit 0 requests strong consistency and a positive
+/// value requests eventual consistency, matching the URI connect builder.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectNamespaceBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_read_consistency_interval_ms(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    interval_ms: u64,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let updated_builder = (*builder_box.inner)
+        .read_consistency_interval(std::time::Duration::from_millis(interval_ms));
+    connect_namespace_builder_handle(updated_builder)
+}
+
+/// Set a session for the namespace connection builder
+///
+/// The session is borrowed for the duration of this call and kept alive by the
+/// builder through a cloned Arc, matching the URI connect builder. Passing NULL
+/// is a no-op.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `session` can be NULL or a valid pointer returned from `lancedb_session_new`
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectNamespaceBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_session(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    session: *const LanceDBSession,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let connect_builder = *builder_box.inner;
+
+    let updated_builder = if session.is_null() {
+        connect_builder
+    } else {
+        connect_builder.session((*session).inner.clone())
+    };
+
+    connect_namespace_builder_handle(updated_builder)
+}
+
+/// Add an operation to push down to the namespace backend
+///
+/// Operations are opt-in and can be added by calling this setter more than once.
+/// The SDK decides whether the selected namespace implementation supports an
+/// operation and which settings a pushed-down operation can represent. At the
+/// pinned SDK version, `CreateTable` is forwarded but the namespace create path
+/// still declares the table and writes locally.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `operation` must be a raw `LanceDBNamespacePushdownOperation` value
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectNamespaceBuilder on success
+/// - Null pointer on an invalid operation value
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_pushdown_operation(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+    operation: c_int,
+) -> *mut LanceDBConnectNamespaceBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let Some(operation) = LanceDBNamespacePushdownOperation::from_c_int(operation) else {
+        return ptr::null_mut();
+    };
+
+    let updated_builder = (*builder_box.inner).pushdown_operation(operation.into());
+    connect_namespace_builder_handle(updated_builder)
+}
+
+/// Free a ConnectNamespaceBuilder
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
+/// - `builder` must not be used after calling this function
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_namespace_builder_free(
+    builder: *mut LanceDBConnectNamespaceBuilder,
+) {
     if !builder.is_null() {
         let _ = Box::from_raw(builder);
     }
@@ -2641,5 +3011,74 @@ mod tests {
         assert!(!debug.contains(secret.to_str().unwrap()));
 
         unsafe { lancedb_connect_builder_free(builder) };
+    }
+
+    #[test]
+    fn namespace_unknown_implementation_is_rejected_by_the_sdk() {
+        let implementation = CString::new("not-a-namespace").unwrap();
+        let builder = unsafe {
+            lancedb_connect_namespace(implementation.as_ptr(), ptr::null(), ptr::null(), 0)
+        };
+        assert!(!builder.is_null());
+
+        let mut connection = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            lancedb_connect_namespace_builder_execute(builder, &mut connection, &mut error)
+        };
+
+        assert_ne!(status, LanceDBError::Success);
+        assert!(connection.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("Failed to connect to namespace"));
+        assert!(message.contains("not available"));
+        unsafe { crate::error::lancedb_free_string(error) };
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn namespace_rest_rejects_missing_properties_before_network() {
+        let implementation = CString::new("rest").unwrap();
+        let builder = unsafe {
+            lancedb_connect_namespace(implementation.as_ptr(), ptr::null(), ptr::null(), 0)
+        };
+        assert!(!builder.is_null());
+
+        let mut connection = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            lancedb_connect_namespace_builder_execute(builder, &mut connection, &mut error)
+        };
+
+        assert_ne!(status, LanceDBError::Success);
+        assert!(connection.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("Missing required property 'uri' for REST namespace"));
+        unsafe { crate::error::lancedb_free_string(error) };
+    }
+
+    #[cfg(not(feature = "remote"))]
+    #[test]
+    fn namespace_rest_requires_the_remote_feature() {
+        let implementation = CString::new("rest").unwrap();
+        let builder = unsafe {
+            lancedb_connect_namespace(implementation.as_ptr(), ptr::null(), ptr::null(), 0)
+        };
+        assert!(!builder.is_null());
+
+        let mut connection = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            lancedb_connect_namespace_builder_execute(builder, &mut connection, &mut error)
+        };
+
+        assert_ne!(status, LanceDBError::Success);
+        assert!(connection.is_null());
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("requires 'rest' feature"));
+        unsafe { crate::error::lancedb_free_string(error) };
     }
 }
