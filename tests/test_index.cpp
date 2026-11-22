@@ -757,6 +757,75 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Create Index Options", "[index]") {
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Create Index Train and Exist OK", "[index]") {
+  const std::string table_name = "create_index_train_exist_ok_test";
+  const size_t num_rows = 100;
+  LanceDBTable* table = create_table_with_data(table_name, static_cast<int>(num_rows), 0);
+  REQUIRE(table != nullptr);
+
+  const char* columns[] = {"key"};
+  LanceDBIndexOptions options = lancedb_index_options_default();
+  options.name = "key_untrained";
+  char* error_message = nullptr;
+
+  auto require_index_stats = [&](size_t indexed_rows, size_t unindexed_rows) {
+    const LanceDBIndexStatistics* stats = nullptr;
+    REQUIRE(lancedb_table_index_statistics(
+        table, options.name, &stats, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(stats != nullptr);
+    REQUIRE(stats->index_type != nullptr);
+    CHECK(std::string(stats->index_type) == "BTREE");
+    CHECK(stats->distance_type == nullptr);
+    CHECK(stats->num_indexed_rows == indexed_rows);
+    CHECK(stats->num_unindexed_rows == unindexed_rows);
+    lancedb_free_index_statistics(stats);
+  };
+
+  // An embedded table can create a named scalar index without training it.
+  REQUIRE(lancedb_table_create_index_with_builder_options(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &options, 0, -1, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  require_index_stats(0, num_rows);
+
+  // exist_ok preserves the existing name even with explicit replace and train.
+  options.replace = 1;
+  REQUIRE(lancedb_table_create_index_with_builder_options(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &options, 1, 1, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  require_index_stats(0, num_rows);
+
+  // The legacy entry leaves both choices unset, so the SDK defaults replace and
+  // train the existing index.
+  options.replace = -1;
+  REQUIRE(lancedb_table_create_index(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &options, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  require_index_stats(num_rows, 0);
+
+  // The new arguments are validated before any SDK call.
+  REQUIRE(lancedb_table_create_index_with_builder_options(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &options, 2, -1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+  REQUIRE(lancedb_table_create_index_with_builder_options(
+      table, columns, 1, LANCEDB_INDEX_BTREE, &options, -1, 2, &error_message) == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+  require_index_stats(num_rows, 0);
+
+  char** indices = nullptr;
+  size_t count = 0;
+  REQUIRE(lancedb_table_list_indices(table, &indices, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(count == 1);
+  lancedb_free_index_list(indices, count);
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Optimize", "[index]") {
   const std::string table_name = "optimize_test";
 

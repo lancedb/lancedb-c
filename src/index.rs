@@ -386,8 +386,25 @@ unsafe fn build_index_from_options(
     }
 }
 
-/// Create an index with a custom name, replace choice, creation wait and
-/// per-type tuning parameters
+/// Raw train and exist_ok choices shared by the generic create entry points
+///
+/// The fields use the same -1/0/1 sentinel convention as the boolean fields in
+/// `LanceDBIndexOptions`.
+#[derive(Clone, Copy)]
+struct IndexBuilderChoices {
+    train: c_int,
+    exist_ok: c_int,
+}
+
+impl IndexBuilderChoices {
+    /// Let the SDK apply its defaults for both choices
+    const SDK_DEFAULTS: Self = Self {
+        train: -1,
+        exist_ok: -1,
+    };
+}
+
+/// Shared implementation for the generic index creation entry points
 ///
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
@@ -396,16 +413,13 @@ unsafe fn build_index_from_options(
 /// - `options` can be NULL for the SDK defaults
 /// - String fields in `options` are borrowed for the duration of the call
 /// - `error_message` can be NULL to ignore detailed error messages
-///
-/// # Returns
-/// - Error code indicating success or failure
-#[no_mangle]
-pub unsafe extern "C" fn lancedb_table_create_index(
+unsafe fn create_index(
     table: *const LanceDBTable,
     columns: *const *const c_char,
     num_columns: usize,
     index_type: c_int,
     options: *const LanceDBIndexOptions,
+    builder_choices: IndexBuilderChoices,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || columns.is_null() || num_columns == 0 {
@@ -455,6 +469,20 @@ pub unsafe extern "C" fn lancedb_table_create_index(
             return LanceDBError::InvalidArgument;
         }
     };
+    let train = match optional_bool(builder_choices.train, "train") {
+        Ok(train) => train,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+    let exist_ok = match optional_bool(builder_choices.exist_ok, "exist_ok") {
+        Ok(exist_ok) => exist_ok,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
     let index = match build_index_from_options(index_type, &options) {
         Ok(index) => index,
         Err(message) => {
@@ -474,6 +502,12 @@ pub unsafe extern "C" fn lancedb_table_create_index(
         if let Some(replace) = replace {
             builder = builder.replace(replace);
         }
+        if let Some(train) = train {
+            builder = builder.train(train);
+        }
+        if let Some(exist_ok) = exist_ok {
+            builder = builder.exist_ok(exist_ok);
+        }
         if options.wait_timeout_ms > 0 {
             builder = builder.wait_timeout(Duration::from_millis(options.wait_timeout_ms));
         }
@@ -484,6 +518,76 @@ pub unsafe extern "C" fn lancedb_table_create_index(
         Ok(()) => LanceDBError::Success,
         Err(error) => handle_error(&error, error_message),
     }
+}
+
+/// Create an index with a custom name, replace choice, creation wait and
+/// per-type tuning parameters
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` must be an array of valid null-terminated C strings
+/// - `num_columns` must match the actual number of columns in the array
+/// - `options` can be NULL for the SDK defaults
+/// - String fields in `options` are borrowed for the duration of the call
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_create_index(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    num_columns: usize,
+    index_type: c_int,
+    options: *const LanceDBIndexOptions,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    create_index(
+        table,
+        columns,
+        num_columns,
+        index_type,
+        options,
+        IndexBuilderChoices::SDK_DEFAULTS,
+        error_message,
+    )
+}
+
+/// Create an index with explicit SDK IndexBuilder train and exist_ok choices
+///
+/// This entry point takes the same arguments as `lancedb_table_create_index`,
+/// plus `train` and `exist_ok` as -1 (SDK default), 0 (false) or 1 (true).
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` must be an array of valid null-terminated C strings
+/// - `num_columns` must match the actual number of columns in the array
+/// - `options` can be NULL for the SDK defaults
+/// - String fields in `options` are borrowed for the duration of the call
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_create_index_with_builder_options(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    num_columns: usize,
+    index_type: c_int,
+    options: *const LanceDBIndexOptions,
+    train: c_int,
+    exist_ok: c_int,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    create_index(
+        table,
+        columns,
+        num_columns,
+        index_type,
+        options,
+        IndexBuilderChoices { train, exist_ok },
+        error_message,
+    )
 }
 
 /// Configuration for table optimize action
