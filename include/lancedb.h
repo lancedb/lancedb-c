@@ -371,6 +371,37 @@ typedef enum {
 } LanceDBNormalizeMethod;
 
 /**
+ * Element type of one typed query vector
+ *
+ * LANCEDB_QUERY_VECTOR_F16 points at uint16_t IEEE-754 binary16 bit patterns.
+ * LANCEDB_QUERY_VECTOR_F32 points at float, LANCEDB_QUERY_VECTOR_F64 at double,
+ * and LANCEDB_QUERY_VECTOR_BINARY at uint8_t. The binary form widens each byte
+ * to its numeric Float32 value before it reaches the SDK; the bytes are not
+ * reinterpreted as floats.
+ */
+typedef enum {
+    LANCEDB_QUERY_VECTOR_F16 = 0,
+    LANCEDB_QUERY_VECTOR_F32 = 1,
+    LANCEDB_QUERY_VECTOR_F64 = 2,
+    LANCEDB_QUERY_VECTOR_BINARY = 3
+} LanceDBQueryVectorType;
+
+/**
+ * One typed query vector for lancedb_vector_query_new_typed() and
+ * lancedb_vector_query_add_query_vector()
+ *
+ * This is a value description, not a builder handle. `data` is borrowed for
+ * the duration of the call and copied before the function returns. `dimension`
+ * is the number of elements in `data`; for LANCEDB_QUERY_VECTOR_BINARY it is
+ * the number of bytes. It must be greater than zero.
+ */
+typedef struct {
+    LanceDBQueryVectorType kind;
+    const void* data;
+    size_t dimension;
+} LanceDBQueryVector;
+
+/**
  * Index type enum
  */
 typedef enum {
@@ -3385,6 +3416,79 @@ LanceDBVectorQuery* lancedb_vector_query_new(
     const LanceDBTable* table,
     const float* vector,
     size_t dimension
+);
+
+/**
+ * Create a vector query from one or more typed query vectors
+ *
+ * `vectors` is borrowed for this call and every input is copied before the
+ * function returns. The first vector becomes the nearest-neighbour query and
+ * each later vector is added as an SDK batch query vector. `num_vectors` must
+ * be at least one.
+ *
+ * F16, F32 and F64 inputs are passed to the SDK in their declared element
+ * type; the SDK converts F16 and F64 components to Float32 before planning. The
+ * binary form widens each byte to its numeric Float32 value, so a
+ * FixedSizeList<UInt8> column is cast back to UInt8 at planning time. Lance
+ * supports only LANCEDB_DISTANCE_HAMMING for such a column. No additional
+ * precision is preserved for F64 input.
+ *
+ * Against a fixed-size-list float vector column, multiple vectors produce one
+ * top-K result set per vector and the result adds an Int32 `query_index`
+ * column. Against a List<FixedSizeList<...>> multivector column, multiple
+ * vectors form one multivector search and no `query_index` column is added. A
+ * UInt8 fixed-size vector column keeps one plan per vector and also adds
+ * `query_index`.
+ *
+ * This constructor only copies and checks the description. Like
+ * lancedb_vector_query_new(), the SDK reports non-finite values, F64 values
+ * that become non-finite after conversion, and mismatched dimensions when the
+ * query is executed or its plan or output schema is requested.
+ *
+ * A native namespace connection forwards the SDK's Float32 query vectors in its
+ * QueryTable request when pushdown is selected. An Enterprise server 0.2.0 or
+ * later receives all vectors in one request; older servers receive one request
+ * per vector. Binary column and distance handling on those backends is
+ * server-side.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param vectors - borrowed array of num_vectors typed vectors
+ * @param num_vectors - number of entries; must be at least 1
+ * @return Pointer to LanceDBVectorQuery on success, NULL when an argument is
+ *         missing, a kind is outside LanceDBQueryVectorType, or a vector has
+ *         NULL data or zero dimension.
+ *         Caller must free with lancedb_vector_query_free()
+ */
+LanceDBVectorQuery* lancedb_vector_query_new_typed(
+    const LanceDBTable* table,
+    const LanceDBQueryVector* vectors,
+    size_t num_vectors
+);
+
+/**
+ * Add a typed query vector to a vector query
+ *
+ * The vector is borrowed for this call and copied before it returns. On
+ * success it is appended to the SDK query as a batch query vector, with the
+ * same result schema and validation timing as lancedb_vector_query_new_typed().
+ * The builder may come from either constructor.
+ *
+ * A missing query or vector, NULL data, zero dimension, or a kind outside
+ * LanceDBQueryVectorType returns LANCEDB_INVALID_ARGUMENT without changing the
+ * builder, so it still executes with the vectors it already had.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param vector - borrowed typed vector
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_add_query_vector(
+    LanceDBVectorQuery* query,
+    const LanceDBQueryVector* vector,
+    char** error_message
 );
 
 /**

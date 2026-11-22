@@ -6,7 +6,7 @@
 //! This module provides complete query operations with proper Arrow integration
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_float, c_int};
+use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::ptr;
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{Array, RecordBatch, StructArray};
 use arrow_schema::ffi::FFI_ArrowSchema;
 use futures::TryStreamExt;
+use half::f16;
 
 use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
@@ -33,7 +34,7 @@ use crate::error::{
 };
 use crate::expr::LanceDBExpr;
 use crate::ipc::{self, LanceDBIpcBuffer};
-use crate::types::{LanceDBDistanceType, LanceDBNormalizeMethod};
+use crate::types::{LanceDBDistanceType, LanceDBNormalizeMethod, LanceDBQueryVectorType};
 
 /// Opaque handle to a LanceDB Query
 #[repr(C)]
@@ -59,11 +60,102 @@ pub struct LanceDBFtsQuery {
     inner: FullTextSearchQuery,
 }
 
+/// One borrowed typed query vector
+///
+/// `kind` selects the element type, `data` points to `dimension` elements of
+/// that type, and both constructors and the add setter copy the elements before
+/// returning.
+#[repr(C)]
+pub struct LanceDBQueryVector {
+    pub kind: c_int,
+    pub data: *const c_void,
+    pub dimension: usize,
+}
+
+/// A query vector copied from C and kept in its input form until the SDK query
+/// is built.
+#[derive(Clone, Debug)]
+enum StoredQueryVector {
+    F16(Vec<f16>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    Binary(Vec<u8>),
+}
+
+impl StoredQueryVector {
+    /// Copy one C vector, rejecting only a broken description. Values are
+    /// validated by the SDK when the query is configured, matching the legacy
+    /// f32 constructor.
+    unsafe fn copy_from_c(vector: &LanceDBQueryVector) -> Result<Self, ()> {
+        if vector.data.is_null() || vector.dimension == 0 {
+            return Err(());
+        }
+
+        let kind = LanceDBQueryVectorType::from_c_int(vector.kind).ok_or(())?;
+        match kind {
+            LanceDBQueryVectorType::F16 => {
+                let bits = std::slice::from_raw_parts(vector.data as *const u16, vector.dimension);
+                Ok(Self::F16(
+                    bits.iter().map(|bits| f16::from_bits(*bits)).collect(),
+                ))
+            }
+            LanceDBQueryVectorType::F32 => {
+                let values =
+                    std::slice::from_raw_parts(vector.data as *const f32, vector.dimension);
+                Ok(Self::F32(values.to_vec()))
+            }
+            LanceDBQueryVectorType::F64 => {
+                let values =
+                    std::slice::from_raw_parts(vector.data as *const f64, vector.dimension);
+                Ok(Self::F64(values.to_vec()))
+            }
+            LanceDBQueryVectorType::Binary => {
+                let values = std::slice::from_raw_parts(vector.data as *const u8, vector.dimension);
+                Ok(Self::Binary(values.to_vec()))
+            }
+        }
+    }
+}
+
+/// Start a vector query from one stored vector.
+fn nearest_to_stored(
+    query: Query,
+    vector: &StoredQueryVector,
+) -> Result<VectorQuery, lancedb::error::Error> {
+    match vector {
+        StoredQueryVector::F16(values) => query.nearest_to(values.as_slice()),
+        StoredQueryVector::F32(values) => query.nearest_to(values.as_slice()),
+        StoredQueryVector::F64(values) => query.nearest_to(values.as_slice()),
+        StoredQueryVector::Binary(values) => {
+            // The SDK exposes no byte-slice query input. Wide each byte to its
+            // numeric value so a UInt8 column is cast back at planning time.
+            let widened: Vec<f32> = values.iter().map(|value| f32::from(*value)).collect();
+            query.nearest_to(widened.as_slice())
+        }
+    }
+}
+
+/// Add one stored vector to an existing vector query.
+fn add_stored_query_vector(
+    query: VectorQuery,
+    vector: &StoredQueryVector,
+) -> Result<VectorQuery, lancedb::error::Error> {
+    match vector {
+        StoredQueryVector::F16(values) => query.add_query_vector(values.as_slice()),
+        StoredQueryVector::F32(values) => query.add_query_vector(values.as_slice()),
+        StoredQueryVector::F64(values) => query.add_query_vector(values.as_slice()),
+        StoredQueryVector::Binary(values) => {
+            let widened: Vec<f32> = values.iter().map(|value| f32::from(*value)).collect();
+            query.add_query_vector(widened.as_slice())
+        }
+    }
+}
+
 /// Opaque handle to a LanceDB VectorQuery
 #[repr(C)]
 pub struct LanceDBVectorQuery {
     table: Arc<Table>,
-    query_vector: Vec<f32>,
+    query_vectors: Vec<StoredQueryVector>,
     column: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -148,7 +240,7 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
 
     let vector_query = Box::new(LanceDBVectorQuery {
         table: Arc::new(tbl.clone()),
-        query_vector: vec_data,
+        query_vectors: vec![StoredQueryVector::F32(vec_data)],
         column: None,
         limit: None,
         offset: None,
@@ -169,6 +261,131 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
     });
 
     Box::into_raw(vector_query)
+}
+
+/// Create a vector query from one or more typed query vectors
+///
+/// `vectors` is borrowed for this call and every input is copied before the
+/// function returns. The first vector becomes the nearest-neighbour query and
+/// each later vector is added as an SDK batch query vector. `num_vectors` must
+/// be at least one.
+///
+/// F16, F32 and F64 inputs are passed to the SDK in their declared element
+/// type; the SDK converts F16 and F64 components to Float32 before planning.
+/// The binary form widens each byte to its numeric Float32 value, so a
+/// `FixedSizeList<UInt8>` column is cast back to UInt8 at planning time. Lance
+/// supports only `LANCEDB_DISTANCE_HAMMING` for such a column. No additional
+/// precision is preserved for F64 input.
+///
+/// Against a fixed-size-list float vector column, multiple vectors produce one
+/// top-K result set per vector and the result adds an Int32 `query_index`
+/// column. Against a `List<FixedSizeList<...>>` multivector column, multiple
+/// vectors form one multivector search and no `query_index` column is added. A
+/// UInt8 fixed-size vector column keeps one plan per vector and also adds
+/// `query_index`.
+///
+/// This constructor only copies and checks the description. Like
+/// `lancedb_vector_query_new`, the SDK reports non-finite values, F64 values
+/// that become non-finite after conversion, and mismatched dimensions when the
+/// query is executed or its plan or output schema is requested.
+///
+/// A native namespace connection forwards the SDK's Float32 query vectors in
+/// its QueryTable request when pushdown is selected. An Enterprise server 0.2.0
+/// or later receives all vectors in one request; older servers receive one
+/// request per vector. Binary column and distance handling on those backends is
+/// server-side.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `vectors` must point to `num_vectors` valid descriptions
+/// - each `data` pointer must point to `dimension` elements of its declared type
+///
+/// # Returns
+/// - Non-null pointer to LanceDBVectorQuery on success
+/// - Null pointer when an argument is missing, a kind is outside
+///   `LanceDBQueryVectorType`, or a vector has NULL data or zero dimension
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_new_typed(
+    table: *const LanceDBTable,
+    vectors: *const LanceDBQueryVector,
+    num_vectors: usize,
+) -> *mut LanceDBVectorQuery {
+    if table.is_null() || vectors.is_null() || num_vectors == 0 {
+        return ptr::null_mut();
+    }
+
+    let mut query_vectors = Vec::with_capacity(num_vectors);
+    for index in 0..num_vectors {
+        let vector = &*vectors.add(index);
+        match StoredQueryVector::copy_from_c(vector) {
+            Ok(vector) => query_vectors.push(vector),
+            Err(()) => return ptr::null_mut(),
+        }
+    }
+
+    let tbl = &(*table).inner;
+    Box::into_raw(Box::new(LanceDBVectorQuery {
+        table: Arc::new(tbl.clone()),
+        query_vectors,
+        column: None,
+        limit: None,
+        offset: None,
+        select: None,
+        with_row_id: false,
+        fast_search: false,
+        bypass_vector_index: false,
+        rrf_k: None,
+        norm: None,
+        filter: None,
+        df_filter: None,
+        full_text_search: None,
+        postfilter: false,
+        distance_type: None,
+        nprobes: None,
+        refine_factor: None,
+        ef: None,
+    }))
+}
+
+/// Add a typed query vector to a vector query
+///
+/// The vector is borrowed for this call and copied before it returns. On
+/// success it is appended to the SDK query as a batch query vector, with the
+/// same result schema and validation timing as `lancedb_vector_query_new_typed`.
+/// The builder may come from either constructor.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from a vector query constructor
+/// - `vector` must point to a valid description
+/// - its `data` pointer must point to `dimension` elements of its declared type
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// A missing query or vector, NULL data, zero dimension, or a kind outside
+/// `LanceDBQueryVectorType` returns `LANCEDB_INVALID_ARGUMENT` without changing
+/// the builder, so it still executes with the vectors it already had.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_add_query_vector(
+    query: *mut LanceDBVectorQuery,
+    vector: *const LanceDBQueryVector,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() || vector.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match StoredQueryVector::copy_from_c(&*vector) {
+        Ok(vector) => {
+            (*query).query_vectors.push(vector);
+            LanceDBError::Success
+        }
+        Err(()) => {
+            set_invalid_argument_message(error_message);
+            LanceDBError::InvalidArgument
+        }
+    }
 }
 
 /// Copy the query text and optional text column from C strings
@@ -1269,7 +1486,16 @@ fn configured_plain_query(query: &LanceDBQuery) -> Query {
 fn configured_vector_query(
     query: &LanceDBVectorQuery,
 ) -> Result<VectorQuery, lancedb::error::Error> {
-    let mut rust_query = query.table.query().nearest_to(query.query_vector.clone())?;
+    let mut vectors = query.query_vectors.iter();
+    let first = vectors
+        .next()
+        .ok_or_else(|| lancedb::error::Error::InvalidInput {
+            message: "query vector is required for vector search".to_string(),
+        })?;
+    let mut rust_query = nearest_to_stored(query.table.query(), first)?;
+    for vector in vectors {
+        rust_query = add_stored_query_vector(rust_query, vector)?;
+    }
 
     if let Some(ref column) = query.column {
         rust_query = rust_query.column(column);

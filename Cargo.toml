@@ -47,6 +47,7 @@ arrow-ipc = "59.2.0"
 arrow-schema = "59.2.0"
 datafusion-functions-json = "0.55"
 futures = "0"
+half = "2.7"
 stacker = "0.1"
 
 [profile.release]
