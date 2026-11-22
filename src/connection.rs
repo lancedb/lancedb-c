@@ -1028,6 +1028,10 @@ pub unsafe extern "C" fn lancedb_connect_builder_free(builder: *mut LanceDBConne
 /// The strings are borrowed for the duration of this call and copied into the
 /// returned builder. Invalid input returns NULL.
 ///
+/// For the `dir` implementation, properties whose names start with `storage.`
+/// apply to its own root object store. This is separate from the connection
+/// storage-options map set by `lancedb_connect_namespace_builder_storage_option`.
+///
 /// # Returns
 /// - Non-null pointer to LanceDBConnectNamespaceBuilder on success
 /// - Null pointer on invalid input
@@ -1056,6 +1060,11 @@ pub unsafe extern "C" fn lancedb_connect_namespace(
 }
 
 /// Execute the namespace connection and return a Connection handle
+///
+/// The builder is consumed on every path. `connection` is written only on
+/// success; on failure it is left unchanged. A non-NULL `error_message` slot is
+/// preserved on success, matching `lancedb_connect_builder_execute()`, and
+/// receives an owned diagnostic on error.
 ///
 /// # Safety
 /// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
@@ -1098,6 +1107,19 @@ pub unsafe extern "C" fn lancedb_connect_namespace_builder_execute(
 
 /// Set an option for the storage layer of a namespace connection
 ///
+/// These options apply to table access through the namespace connection. They
+/// are not the `storage.`-prefixed implementation properties that the `dir`
+/// namespace uses for its own root object store.
+///
+/// At the pinned SDK, the table creation path falls back to this map only when
+/// the namespace response omits `storage_options`. An explicit empty
+/// `storage_options` map prevents that fallback. The selected map overrides
+/// per-write keys with the same name.
+///
+/// Opening a table uses the `describe_table` storage options plus the options
+/// supplied on that open request, with namespace values winning on overlaps; it
+/// does not use this connection-level map there.
+///
 /// # Safety
 /// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`
 /// - `builder` will be consumed and must not be used after calling this function
@@ -1121,7 +1143,11 @@ pub unsafe extern "C" fn lancedb_connect_namespace_builder_storage_option(
 ///
 /// Namespace client properties are merged into the implementation properties
 /// when the connection is executed. The SDK decides which value wins when a key
-/// is set in both places.
+/// is set in both places. For the `dir` implementation, a property whose name
+/// starts with `storage.` configures its own root object store even when it is
+/// supplied through this setter; this differs from
+/// `lancedb_connect_namespace_builder_storage_option`, which configures table
+/// access for the connection.
 ///
 /// # Safety
 /// - `builder` must be a valid pointer returned from `lancedb_connect_namespace`

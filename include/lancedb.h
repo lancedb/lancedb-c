@@ -1070,6 +1070,11 @@ typedef enum {
  * builder. A zero property_count accepts NULL arrays. A positive count requires
  * both arrays and every entry to be non-NULL, NUL-terminated UTF-8 strings.
  *
+ * For the "dir" implementation, properties whose names start with "storage."
+ * apply to its own root object store. This is separate from the connection
+ * storage-options map set by
+ * lancedb_connect_namespace_builder_storage_option().
+ *
  * The returned builder must be freed with
  * lancedb_connect_namespace_builder_free() if it is not executed.
  */
@@ -1089,10 +1094,11 @@ LanceDBConnectNamespaceBuilder* lancedb_connect_namespace(
  * @return Error code indicating success or failure
  *
  * The builder is consumed on every path and must not be used after calling.
- * On success, connection receives a handle that must be freed with
- * lancedb_connection_free(). On failure, connection is left unchanged. If
- * error_message is provided and an error occurs, the caller must free the error
- * message with lancedb_free_string().
+ * connection is written only on success, when it receives a handle that must be
+ * freed with lancedb_connection_free(); on failure it is left unchanged. An
+ * existing *error_message value is preserved on success, consistent with
+ * lancedb_connect_builder_execute(). On error, a non-NULL error_message
+ * receives a message that the caller frees with lancedb_free_string().
  *
  * The SDK decides whether the implementation exists in this build, validates
  * the implementation properties, and performs the connection. The URI of the
@@ -1113,9 +1119,22 @@ LanceDBError lancedb_connect_namespace_builder_execute(
  * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
  *
  * The builder is consumed by this function and must not be used after calling.
- * A NULL or non-UTF-8 key or value returns NULL. The SDK applies these options
- * when it opens storage for tables; it does not validate every option during
- * the namespace connection itself.
+ * A NULL or non-UTF-8 key or value returns NULL. These options apply to table
+ * access through the namespace connection. They are not the "storage.*"
+ * implementation properties that the "dir" namespace uses for its own root
+ * object store.
+ *
+ * At the pinned SDK, the table creation path falls back to this map only when
+ * the namespace response omits storage_options. An explicit empty
+ * storage_options map prevents that fallback. The selected map overrides
+ * per-write keys with the same name.
+ *
+ * Opening a table uses the describe_table storage options plus the options
+ * supplied on that open request, with namespace values winning on overlaps; it
+ * does not use this connection-level map there.
+ *
+ * The SDK does not validate every option during the namespace connection
+ * itself.
  */
 LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_storage_option(
     LanceDBConnectNamespaceBuilder* builder,
@@ -1137,7 +1156,11 @@ LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_storage_option
  * Namespace client properties are merged into the implementation properties
  * when the builder is executed. The SDK decides which value wins when the same
  * key is supplied as an implementation property and as a namespace client
- * property.
+ * property. For the "dir" implementation, a property whose name starts with
+ * "storage." configures its own root object store even when it is supplied
+ * through this setter; this differs from
+ * lancedb_connect_namespace_builder_storage_option(), which configures table
+ * access for the connection.
  */
 LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_namespace_client_property(
     LanceDBConnectNamespaceBuilder* builder,
