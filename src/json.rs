@@ -13,12 +13,12 @@ use std::sync::Arc;
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, RecordBatch, StructArray};
 use arrow_schema::ffi::FFI_ArrowSchema;
-use datafusion_common::DFSchema;
-use datafusion_expr::execution_props::ExecutionProps;
-use datafusion_expr::expr::ScalarFunction;
-use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion_expr::{lit, ColumnarValue, Expr};
-use datafusion_physical_expr::create_physical_expr;
+use lancedb::datafusion::common::DFSchema;
+use lancedb::datafusion::logical_expr::execution_props::ExecutionProps;
+use lancedb::datafusion::logical_expr::expr::ScalarFunction;
+use lancedb::datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+use lancedb::datafusion::logical_expr::{lit, Cast, ColumnarValue, Expr};
+use lancedb::datafusion::physical_expr::create_physical_expr;
 
 use crate::error::{set_custom_error_message, set_invalid_argument_message, LanceDBError};
 use crate::expr::LanceDBExpr;
@@ -59,7 +59,7 @@ unsafe fn non_owning_import(
 }
 
 unsafe fn build_json_udf_expr(
-    udf: Arc<datafusion_expr::ScalarUDF>,
+    udf: Arc<lancedb::datafusion::logical_expr::ScalarUDF>,
     json_expr: *mut LanceDBExpr,
     path: *const *const c_char,
     path_len: usize,
@@ -235,15 +235,12 @@ pub unsafe extern "C" fn lancedb_expr_json_array_has(
     }
 
     let array_inner = Box::from_raw(array_expr_ptr).inner;
-    let udf = datafusion_functions_nested::array_has::array_has_udf();
+    let udf = lancedb::datafusion::functions_nested::array_has::array_has_udf();
 
-    let val_as_utf8 = Expr::Cast(datafusion_expr::Cast::new(
-        Box::new(val),
-        arrow_schema::DataType::Utf8,
-    ));
+    let val_as_utf8 = Expr::Cast(Cast::new(Box::new(val), arrow_schema::DataType::Utf8));
 
     let search_val = if quote_value {
-        let concat_udf = datafusion_functions::string::concat();
+        let concat_udf = lancedb::datafusion::functions::string::concat();
         Expr::ScalarFunction(ScalarFunction::new_udf(
             concat_udf,
             vec![lit("\""), val_as_utf8, lit("\"")],

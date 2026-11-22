@@ -882,7 +882,7 @@ pub unsafe extern "C" fn lancedb_table_nearest_to(
             for (i, batch) in batches.into_iter().enumerate() {
                 // Convert RecordBatch to StructArray first, then to FFI_ArrowArray
                 let struct_array: StructArray = batch.clone().into();
-                let array_data: arrow_data::ArrayData = struct_array.into_data();
+                let array_data: lancedb::arrow::arrow_data::ArrayData = struct_array.into_data();
                 let ffi_array = Box::new(arrow_array::ffi::FFI_ArrowArray::new(&array_data));
                 *arrays_ptr.add(i) = Box::into_raw(ffi_array);
             }

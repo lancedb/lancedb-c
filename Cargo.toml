@@ -30,18 +30,11 @@ lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta
 lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
 lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
 arrow-array = "59.2.0"
-arrow-data = "59.2.0"
 arrow-ipc = "59.2.0"
 arrow-schema = "59.2.0"
-datafusion-common = "55"
-datafusion-expr = "55"
 datafusion-functions-json = "0.55"
-datafusion-functions = { version = "55", default-features = false, features = ["string_expressions"] }
-datafusion-functions-nested = "55"
-datafusion-physical-expr = "55"
 futures = "0"
 stacker = "0.1"
-chrono = "0"
 
 [profile.release]
 opt-level = 3

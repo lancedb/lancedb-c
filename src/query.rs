@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{Array, RecordBatch, StructArray};
-use arrow_data::ArrayData;
 use futures::TryStreamExt;
 
-use datafusion_expr::Expr;
+use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
+use lancedb::datafusion::logical_expr::Expr;
 use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, HasQuery, QueryBase, QueryFilter, Select};
 use lancedb::{DistanceType, Table};

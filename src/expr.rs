@@ -10,8 +10,8 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
 use crate::error::set_invalid_argument_message;
-use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
-use datafusion_expr::{col, lit, Expr, Operator};
+use lancedb::datafusion::logical_expr::expr::{BinaryExpr, ScalarFunction};
+use lancedb::datafusion::logical_expr::{col, lit, Expr, Operator};
 
 /// Opaque handle to a DataFusion Expr
 pub struct LanceDBExpr {
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn lancedb_expr_starts_with(
         return std::ptr::null_mut();
     };
 
-    let udf = datafusion_functions::string::starts_with();
+    let udf = lancedb::datafusion::functions::string::starts_with();
 
     let func_expr = Expr::ScalarFunction(ScalarFunction::new_udf(udf, vec![str_e, pre_e]));
 
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn lancedb_expr_array_has(
         return std::ptr::null_mut();
     };
 
-    let udf = datafusion_functions_nested::array_has::array_has_udf();
+    let udf = lancedb::datafusion::functions_nested::array_has::array_has_udf();
     let func_expr = Expr::ScalarFunction(ScalarFunction::new_udf(udf, vec![arr, val]));
     Box::into_raw(Box::new(LanceDBExpr { inner: func_expr }))
 }

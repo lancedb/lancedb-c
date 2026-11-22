@@ -4650,16 +4650,9 @@ name = "lancedb-c"
 version = "0.0.0"
 dependencies = [
  "arrow-array",
- "arrow-data",
  "arrow-ipc",
  "arrow-schema",
- "chrono",
- "datafusion-common",
- "datafusion-expr",
- "datafusion-functions",
  "datafusion-functions-json",
- "datafusion-functions-nested",
- "datafusion-physical-expr",
  "futures",
  "lance",
  "lance-io",
