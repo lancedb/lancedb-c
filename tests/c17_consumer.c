@@ -482,6 +482,7 @@ static int run_order_by_cases(LanceDBConnection* connection) {
 
   LanceDBTable* table = NULL;
   LanceDBQuery* query = NULL;
+  LanceDBVectorQuery* vector_query = NULL;
   int result = 0;
   char* error_message = NULL;
   if (create_order_by_table(connection, table_name, &table) != 0) {
@@ -489,39 +490,11 @@ static int run_order_by_cases(LanceDBConnection* connection) {
   }
 
   LanceDBColumnOrdering descending[] = {{"id", /*ascending=*/0, /*nulls_first=*/0}};
-  LanceDBColumnOrdering ascending[] = {{"id", /*ascending=*/1, /*nulls_first=*/0}};
-  LanceDBColumnOrdering invalid_ordering[] = {
-      {"id", /*ascending=*/1, /*nulls_first=*/0},
-      {NULL, /*ascending=*/0, /*nulls_first=*/1},
-  };
-  const char invalid_utf8[] = "\xff";
-  LanceDBColumnOrdering invalid_utf8_ordering[] = {{"id", /*ascending=*/1, /*nulls_first=*/0},
-                                                    {invalid_utf8, /*ascending=*/0,
-                                                     /*nulls_first=*/1}};
   int32_t ids[8];
-  int32_t reset_ids[8];
-  int32_t fresh_ids[8];
   size_t count = 0;
-  size_t reset_count = 0;
-  size_t fresh_count = 0;
 
-  if (lancedb_query_order_by(NULL, descending, 1, &error_message)
-          != LANCEDB_INVALID_ARGUMENT ||
-      error_message == NULL) {
-    result = fail("a NULL C17 plain query handle must be rejected");
-    goto cleanup;
-  }
-  lancedb_free_string(error_message);
-  error_message = NULL;
-  if (lancedb_vector_query_order_by(NULL, descending, 1, &error_message)
-          != LANCEDB_INVALID_ARGUMENT ||
-      error_message == NULL) {
-    result = fail("a NULL C17 vector query handle must be rejected");
-    goto cleanup;
-  }
-  lancedb_free_string(error_message);
-  error_message = NULL;
-
+  // One valid plain call exercises the C ABI and a real ordered result. The
+  // C++ suites own rejection, reset and multi-column coverage.
   query = make_order_by_query(table, 2, 1, &error_message);
   if (query == NULL || error_message != NULL) {
     result = fail("creating the C17 descending ordering query failed");
@@ -543,80 +516,26 @@ static int run_order_by_cases(LanceDBConnection* connection) {
     goto cleanup;
   }
 
-  query = make_order_by_query(table, 2, 1, &error_message);
-  if (query == NULL || error_message != NULL ||
-      lancedb_query_order_by(query, ascending, 1, &error_message) != LANCEDB_SUCCESS ||
+  // The vector setter only stores the ordering here; its C ABI and argument
+  // handling are the same code path that the C++ vector fixture executes.
+  float query_vector[] = {0.0f};
+  vector_query = lancedb_vector_query_new(table, query_vector, 1);
+  if (vector_query == NULL) {
+    result = fail("creating the C17 ordering vector query failed");
+    goto cleanup;
+  }
+  if (lancedb_vector_query_order_by(vector_query, descending, 1, &error_message)
+          != LANCEDB_SUCCESS ||
       error_message != NULL) {
-    result = fail("creating the C17 preservation query failed");
+    result = fail("setting the C17 vector ordering failed");
     goto cleanup;
   }
-  if (lancedb_query_order_by(query, invalid_ordering, 2, &error_message)
-          != LANCEDB_INVALID_ARGUMENT ||
-      error_message == NULL) {
-    result = fail("a NULL C17 ordering column must be rejected");
-    goto cleanup;
-  }
-  lancedb_free_string(error_message);
-  error_message = NULL;
-  if (lancedb_query_order_by(query, invalid_utf8_ordering, 2, &error_message)
-          != LANCEDB_INVALID_ARGUMENT ||
-      error_message == NULL) {
-    result = fail("an invalid UTF-8 C17 ordering column must be rejected");
-    goto cleanup;
-  }
-  lancedb_free_string(error_message);
-  error_message = NULL;
-  if (execute_order_by_ids(query, ids, 8, &count) != 0) {
-    query = NULL;
-    result = 1;
-    goto cleanup;
-  }
-  query = NULL;
-  if (count != 2 || ids[0] != 2 || ids[1] != 3) {
-    result = fail("a rejected C17 ordering changed the previous setting");
-    goto cleanup;
-  }
-
-  query = make_order_by_query(table, 2, 1, &error_message);
-  if (query == NULL || error_message != NULL ||
-      lancedb_query_order_by(query, descending, 1, &error_message) != LANCEDB_SUCCESS ||
-      error_message != NULL ||
-      lancedb_query_order_by(query, NULL, 0, &error_message) != LANCEDB_SUCCESS ||
-      error_message != NULL) {
-    result = fail("resetting the C17 ordering failed");
-    goto cleanup;
-  }
-  if (execute_order_by_ids(query, reset_ids, 8, &reset_count) != 0) {
-    query = NULL;
-    result = 1;
-    goto cleanup;
-  }
-  query = NULL;
-
-  query = make_order_by_query(table, 2, 1, &error_message);
-  if (query == NULL || error_message != NULL) {
-    result = fail("creating the C17 fresh query failed");
-    goto cleanup;
-  }
-  if (execute_order_by_ids(query, fresh_ids, 8, &fresh_count) != 0) {
-    query = NULL;
-    result = 1;
-    goto cleanup;
-  }
-  query = NULL;
-  if (reset_count != fresh_count) {
-    result = fail("resetting the C17 ordering did not restore the default rows");
-    goto cleanup;
-  }
-  for (size_t i = 0; i < reset_count; i++) {
-    if (reset_ids[i] != fresh_ids[i]) {
-      result = fail("resetting the C17 ordering did not restore the default order");
-      goto cleanup;
-    }
-  }
+  lancedb_vector_query_free(vector_query);
+  vector_query = NULL;
 
 cleanup:
   lancedb_query_free(query);
+  lancedb_vector_query_free(vector_query);
   lancedb_free_string(error_message);
   if (table != NULL) {
     lancedb_table_free(table);

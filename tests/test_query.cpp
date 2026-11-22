@@ -371,13 +371,15 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - column ordering", "[query][ord
     REQUIRE(execute_ids(bucket_last, 2, 6, 0)
         == std::vector<int32_t>{3, 5, 0, 4, 1, 2});
 
-    LanceDBColumnOrdering rank_null_first[] = {{"rank", /*ascending=*/1, /*nulls_first=*/1}};
-    REQUIRE(execute_ids(rank_null_first, 1, 6, 0)
-        == std::vector<int32_t>{2, 1, 4, 0, 5, 3});
+    // NULL placement is independent of direction: these two cases use the
+    // opposite combinations from the bucket orderings above.
+    LanceDBColumnOrdering rank_desc_first[] = {{"rank", /*ascending=*/0, /*nulls_first=*/1}};
+    REQUIRE(execute_ids(rank_desc_first, 1, 6, 0)
+        == std::vector<int32_t>{2, 3, 5, 0, 4, 1});
 
-    LanceDBColumnOrdering rank_null_last[] = {{"rank", /*ascending=*/0, /*nulls_first=*/0}};
-    REQUIRE(execute_ids(rank_null_last, 1, 6, 0)
-        == std::vector<int32_t>{3, 5, 0, 4, 1, 2});
+    LanceDBColumnOrdering rank_asc_last[] = {{"rank", /*ascending=*/1, /*nulls_first=*/0}};
+    REQUIRE(execute_ids(rank_asc_last, 1, 6, 0)
+        == std::vector<int32_t>{1, 4, 0, 5, 3, 2});
 
     lancedb_table_free(ordered_table);
   }

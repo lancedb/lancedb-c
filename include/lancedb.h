@@ -3370,7 +3370,10 @@ LanceDBError lancedb_table_update_field_metadata(
  * `column` is a NUL-terminated UTF-8 column name. `ascending` is non-zero for
  * ascending order and 0 for descending. `nulls_first` is non-zero to place NULL
  * values first, regardless of direction. Entries are applied in array order, so
- * the first entry is the primary sort key.
+ * the first entry is the primary sort key. The ordering setters validate the
+ * array and UTF-8 but do not check that a named column exists; the SDK checks
+ * column names when it plans the query and reports an unknown column from
+ * execution or inspection.
  */
 typedef struct {
     const char* column;
@@ -3513,10 +3516,9 @@ LanceDBError lancedb_query_select_dynamic(
  *
  * The first entry is the primary sort key. A nonempty ordering sorts an
  * ordinary scan before limit and offset are applied. On a standalone full-text
- * search it sorts all matches before the search page is selected. On a hybrid
- * vector plus full-text query it applies to both search legs, and the reranker
- * still determines the final fused order. Execution, EXPLAIN, output-schema
- * inspection and ANALYZE use the same configured ordering.
+ * search it sorts all matches before the search page is selected. Execution,
+ * EXPLAIN, output-schema inspection and ANALYZE use the same configured
+ * ordering.
  *
  * A zero num_orderings clears the ordering, restoring the query's default
  * order; orderings may be NULL in that case. A positive count requires a
@@ -3870,14 +3872,14 @@ LanceDBError lancedb_vector_query_select_dynamic(
 /**
  * Set the column ordering for vector query
  *
- * The first entry is the primary sort key. A vector search first selects its
- * nearest-neighbour candidates using the configured limit and offset, or the
- * SDK's default top-K when no limit is set, and then orders those candidates.
- * It does not sort the whole table. On a hybrid vector plus full-text query it
- * applies to both search legs, and the reranker still determines the final
- * fused order. EXPLAIN, output-schema inspection and ANALYZE use the same
- * configured ordering, subject to the hybrid inspection limits documented
- * below.
+ * The first entry is the primary sort key. For an embedded vector search, the
+ * nearest-neighbour candidate count is limit + offset, or the SDK's default
+ * top-K + offset when no limit is set. The search orders those candidates and
+ * then applies offset and limit to the ordered page; it does not sort the whole
+ * table. On a hybrid vector plus full-text query it applies to both search
+ * legs, and the reranker still determines the final fused order. EXPLAIN,
+ * output-schema inspection and ANALYZE use the same configured ordering,
+ * subject to the hybrid inspection limits documented below.
  *
  * A zero num_orderings clears the ordering, restoring the query's default
  * order; orderings may be NULL in that case. A positive count requires a

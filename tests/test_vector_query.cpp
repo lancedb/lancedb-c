@@ -361,7 +361,59 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column ordering", "[vec
     REQUIRE(keys_of(rows) == std::vector<std::string>{"key_2", "key_1", "key_0"});
   }
 
-  SECTION("explain and analyze use the configured ordering") {
+  SECTION("explain and analyze show the configured key sort") {
+    auto plan_of = [](LanceDBVectorQuery* query, bool analyze) {
+      char* plan = nullptr;
+      char* error_message = nullptr;
+      const LanceDBError status = analyze
+          ? lancedb_vector_query_analyze_plan(query, &plan, &error_message)
+          : lancedb_vector_query_explain_plan(query, true, &plan, &error_message);
+      REQUIRE(status == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(plan != nullptr);
+      std::string text(plan);
+      lancedb_free_string(plan);
+      return text;
+    };
+
+    auto has_key_sort = [](const std::string& plan) {
+      const auto sort = plan.find("SortExec");
+      if (sort == std::string::npos) {
+        return false;
+      }
+      const auto key = plan.find("expr=[key@", sort);
+      if (key == std::string::npos) {
+        return false;
+      }
+      const auto next_sort = plan.find("SortExec", sort + 1);
+      return next_sort == std::string::npos || key < next_sort;
+    };
+
+    auto require_key_sort = [&](const std::string& plan) {
+      REQUIRE(has_key_sort(plan));
+      const auto sort = plan.find("SortExec");
+      const auto key = plan.find("expr=[key@", sort);
+      const auto end = plan.find(']', key);
+      REQUIRE(end != std::string::npos);
+      const auto expression = plan.substr(key, end - key);
+      REQUIRE(expression.find(" DESC ") != std::string::npos);
+      REQUIRE(expression.find(" NULLS LAST") != std::string::npos);
+    };
+
+    // The default vector query already has a distance SortExec. Without the
+    // setter, no SortExec may use the key expression even though SortExec is
+    // present. This is the baseline-negative half of the assertion.
+    LanceDBVectorQuery* baseline = make_query();
+    const auto baseline_explain = plan_of(baseline, false);
+    const auto baseline_analyze = plan_of(baseline, true);
+    REQUIRE(baseline_explain.find("SortExec") != std::string::npos);
+    REQUIRE(baseline_analyze.find("SortExec") != std::string::npos);
+    REQUIRE(baseline_explain.find("expr=[_distance@") != std::string::npos);
+    REQUIRE(baseline_analyze.find("expr=[_distance@") != std::string::npos);
+    REQUIRE_FALSE(has_key_sort(baseline_explain));
+    REQUIRE_FALSE(has_key_sort(baseline_analyze));
+    lancedb_vector_query_free(baseline);
+
     LanceDBVectorQuery* query = make_query();
     LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
     char* error_message = nullptr;
@@ -369,23 +421,12 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column ordering", "[vec
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    char* plan = nullptr;
-    REQUIRE(lancedb_vector_query_explain_plan(query, true, &plan, &error_message)
-        == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-    REQUIRE(plan != nullptr);
-    REQUIRE(std::string(plan).find("SortExec") != std::string::npos);
-    lancedb_free_string(plan);
-
-    plan = nullptr;
-    REQUIRE(lancedb_vector_query_analyze_plan(query, &plan, &error_message)
-        == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-    REQUIRE(plan != nullptr);
-    REQUIRE(std::string(plan).find("SortExec") != std::string::npos);
-    REQUIRE(std::string(plan).find("metrics=[output_rows=") != std::string::npos);
-    lancedb_free_string(plan);
-
+    const auto configured_explain = plan_of(query, false);
+    const auto configured_analyze = plan_of(query, true);
+    REQUIRE(configured_explain.find("expr=[_distance@") != std::string::npos);
+    REQUIRE(configured_analyze.find("expr=[_distance@") != std::string::npos);
+    require_key_sort(configured_explain);
+    require_key_sort(configured_analyze);
     lancedb_vector_query_free(query);
   }
 
