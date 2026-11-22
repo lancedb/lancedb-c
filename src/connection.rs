@@ -46,6 +46,32 @@ pub struct LanceDBTable {
     pub(crate) inner: Table,
 }
 
+/// Options for `lancedb_connection_clone_table`
+///
+/// A NULL options pointer or a zeroed struct keeps the SDK defaults: clone the
+/// source's current version into the root namespace, fail when the target
+/// already exists, and perform a shallow clone. The string and array fields are
+/// borrowed for the duration of the call.
+#[repr(C)]
+pub struct LanceDBCloneTableOptions {
+    /// Optional source tag; NULL leaves it unset
+    pub source_tag: *const c_char,
+    /// Target namespace components, or NULL when the length is zero
+    pub target_namespace: *const *const c_char,
+    /// Number of target namespace components; zero selects the root namespace
+    pub target_namespace_len: usize,
+    /// Source version, read only when `has_source_version` is non-zero
+    pub source_version: u64,
+    /// Non-zero to pass `source_version` to the SDK
+    pub has_source_version: c_int,
+    /// Non-zero to preserve an existing target without reading the source
+    pub exist_ok: c_int,
+    /// Non-zero to read `is_shallow`; zero keeps the SDK default
+    pub has_is_shallow: c_int,
+    /// Shallow clone flag, read only when `has_is_shallow` is non-zero
+    pub is_shallow: c_int,
+}
+
 /// Opaque handle to a TableNamesBuilder
 #[repr(C)]
 pub struct LanceDBTableNamesBuilder {
@@ -1453,6 +1479,106 @@ pub unsafe extern "C" fn lancedb_connection_open_table_with_options(
         Ok(table) => {
             let boxed_table = Box::new(LanceDBTable { inner: table });
             *table_out = Box::into_raw(boxed_table);
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Clone a table from an existing source table
+///
+/// A shallow clone shares the source's data files while keeping an independent
+/// manifest. Embedded directory connections support shallow clones only and
+/// reject a non-empty target namespace. Remote connections forward both
+/// settings to the server.
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `target_table_name` and `source_uri` must be valid null-terminated C strings
+/// - `options`, when not NULL, must point to a valid `LanceDBCloneTableOptions`
+///   whose selected string fields are valid C strings and whose namespace array
+///   obeys the same contract as the other namespace path entry points
+/// - `table_out` must be a valid pointer to receive the cloned table
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry, a non-NULL `table_out` is cleared and a non-NULL `error_message` is
+/// cleared. `table_out` is written only after the clone succeeds. The source and
+/// target strings and everything reached from `options` are borrowed for the
+/// duration of the call.
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_clone_table(
+    connection: *const LanceDBConnection,
+    target_table_name: *const c_char,
+    source_uri: *const c_char,
+    options: *const LanceDBCloneTableOptions,
+    table_out: *mut *mut LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+    if !table_out.is_null() {
+        *table_out = ptr::null_mut();
+    }
+
+    if connection.is_null()
+        || target_table_name.is_null()
+        || source_uri.is_null()
+        || table_out.is_null()
+    {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(target_table_name) = CStr::from_ptr(target_table_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let Ok(source_uri) = CStr::from_ptr(source_uri).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let mut builder = (*connection)
+        .inner
+        .clone_table(target_table_name, source_uri);
+
+    if !options.is_null() {
+        let has_source_version = ptr::addr_of!((*options).has_source_version).read();
+        if has_source_version != 0 {
+            builder = builder.source_version(ptr::addr_of!((*options).source_version).read());
+        }
+
+        let source_tag = ptr::addr_of!((*options).source_tag).read();
+        if !source_tag.is_null() {
+            let Ok(source_tag) = CStr::from_ptr(source_tag).to_str() else {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            };
+            builder = builder.source_tag(source_tag);
+        }
+
+        let Some(target_namespace) = namespace_path_from_c(
+            ptr::addr_of!((*options).target_namespace).read(),
+            ptr::addr_of!((*options).target_namespace_len).read(),
+            error_message,
+        ) else {
+            return LanceDBError::InvalidArgument;
+        };
+        builder = builder.target_namespace(target_namespace);
+
+        if ptr::addr_of!((*options).exist_ok).read() != 0 {
+            builder = builder.exist_ok(true);
+        }
+        if ptr::addr_of!((*options).has_is_shallow).read() != 0 {
+            builder = builder.is_shallow(ptr::addr_of!((*options).is_shallow).read() != 0);
+        }
+    }
+
+    match get_runtime().block_on(builder.execute()) {
+        Ok(table) => {
+            *table_out = Box::into_raw(Box::new(LanceDBTable { inner: table }));
             LanceDBError::Success
         }
         Err(error) => handle_error(&error, error_message),

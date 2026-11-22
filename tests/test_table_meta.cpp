@@ -382,6 +382,226 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table History", "[table]") {
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Clone", "[table]") {
+  const std::string source_name = "clone_source";
+  const std::string source_uri = uri + "/" + source_name + ".lance";
+  LanceDBTable* source = create_table_with_data(source_name, 10, 0);
+  REQUIRE(source != nullptr);
+
+  auto add_rows = [](LanceDBTable* table, int num_rows, int start_index) {
+    auto reader = create_reader_from_batch(create_test_record_batch(num_rows, start_index));
+    REQUIRE(reader != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  };
+
+  auto filtered_count = [](const LanceDBTable* table, const char* filter) -> size_t {
+    size_t count = 0;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_count_rows_filtered(table, filter, &count, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return count;
+  };
+
+  auto clone_ok = [&](const char* target_name, const char* source, const LanceDBCloneTableOptions* options) {
+    LanceDBTable* table = reinterpret_cast<LanceDBTable*>(1);
+    char* error_message = reinterpret_cast<char*>(1);
+    REQUIRE(lancedb_connection_clone_table(
+        db, target_name, source, options, &table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(table != nullptr);
+    REQUIRE(error_message == nullptr);
+    return table;
+  };
+
+  auto clone_error = [&](const char* target_name, const char* source,
+                         const LanceDBCloneTableOptions* options, LanceDBError expected,
+                         const std::string& expected_message) {
+    LanceDBTable* table = reinterpret_cast<LanceDBTable*>(1);
+    char* error_message = reinterpret_cast<char*>(1);
+    REQUIRE(lancedb_connection_clone_table(
+        db, target_name, source, options, &table, &error_message) == expected);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find(expected_message) != std::string::npos);
+    lancedb_free_string(error_message);
+  };
+
+  add_rows(source, 5, 10);
+  REQUIRE(lancedb_table_count_rows(source) == 15);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_tag(source, "snapshot", 1, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  SECTION("A NULL options pointer shallow clones the current source version") {
+    LanceDBTable* clone = clone_ok("clone_current", source_uri.c_str(), nullptr);
+    REQUIRE(lancedb_table_count_rows(clone) == 15);
+    REQUIRE(filtered_count(clone, "key = 'key_0'") == 1);
+    REQUIRE(filtered_count(clone, "key = 'key_14'") == 1);
+    lancedb_table_free(clone);
+  }
+
+  SECTION("Zero-initialized options keep the SDK shallow default") {
+    LanceDBCloneTableOptions options{};
+    LanceDBTable* clone = clone_ok("clone_default_options", source_uri.c_str(), &options);
+    REQUIRE(lancedb_table_count_rows(clone) == 15);
+    lancedb_table_free(clone);
+  }
+
+  SECTION("A version clone retains the source snapshot after the source advances") {
+    LanceDBCloneTableOptions options{};
+    options.has_source_version = 1;
+    options.source_version = 1;
+
+    LanceDBTable* clone = clone_ok("clone_by_version", source_uri.c_str(), &options);
+    REQUIRE(lancedb_table_count_rows(clone) == 10);
+    REQUIRE(filtered_count(clone, "key = 'key_9'") == 1);
+    REQUIRE(filtered_count(clone, "key = 'key_10'") == 0);
+
+    add_rows(source, 5, 15);
+    REQUIRE(lancedb_table_count_rows(source) == 20);
+    REQUIRE(lancedb_table_count_rows(clone) == 10);
+    REQUIRE(filtered_count(clone, "key = 'key_10'") == 0);
+
+    lancedb_table_free(clone);
+  }
+
+  SECTION("A tag clone reads the tagged snapshot") {
+    LanceDBCloneTableOptions options{};
+    options.source_tag = "snapshot";
+
+    LanceDBTable* clone = clone_ok("clone_by_tag", source_uri.c_str(), &options);
+    REQUIRE(lancedb_table_count_rows(clone) == 10);
+    REQUIRE(filtered_count(clone, "key = 'key_0'") == 1);
+    REQUIRE(filtered_count(clone, "key = 'key_10'") == 0);
+    lancedb_table_free(clone);
+  }
+
+  SECTION("A duplicate target fails before the source is read") {
+    LanceDBTable* target = create_table_with_data("clone_duplicate", 3, 100);
+    REQUIRE(target != nullptr);
+    lancedb_table_free(target);
+
+    clone_error("clone_duplicate", (uri + "/missing_source.lance").c_str(), nullptr,
+        LANCEDB_TABLE_ALREADY_EXISTS, "already exists");
+  }
+
+  SECTION("exist_ok returns an existing target unchanged without reading the source") {
+    LanceDBTable* target = create_table_with_data("clone_existing", 3, 100);
+    REQUIRE(target != nullptr);
+    const uint64_t target_version = lancedb_table_version(target);
+    lancedb_table_free(target);
+
+    LanceDBCloneTableOptions options{};
+    options.exist_ok = 1;
+    LanceDBTable* preserved = clone_ok(
+        "clone_existing", (uri + "/missing_source.lance").c_str(), &options);
+    REQUIRE(lancedb_table_count_rows(preserved) == 3);
+    REQUIRE(lancedb_table_version(preserved) == target_version);
+    REQUIRE(filtered_count(preserved, "key = 'key_100'") == 1);
+    REQUIRE(filtered_count(preserved, "key = 'key_0'") == 0);
+    lancedb_table_free(preserved);
+  }
+
+  SECTION("exist_ok preserves the target without validating an unused source reference") {
+    LanceDBTable* target = create_table_with_data("clone_existing_both", 2, 200);
+    REQUIRE(target != nullptr);
+    lancedb_table_free(target);
+
+    LanceDBCloneTableOptions options{};
+    options.exist_ok = 1;
+    options.has_source_version = 1;
+    options.source_version = 1;
+    options.source_tag = "snapshot";
+
+    LanceDBTable* preserved = clone_ok(
+        "clone_existing_both", (uri + "/missing_source.lance").c_str(), &options);
+    REQUIRE(lancedb_table_count_rows(preserved) == 2);
+    REQUIRE(filtered_count(preserved, "key = 'key_201'") == 1);
+    lancedb_table_free(preserved);
+  }
+
+  SECTION("A deep clone is rejected by embedded connections") {
+    LanceDBCloneTableOptions options{};
+    options.has_is_shallow = 1;
+    options.is_shallow = 0;
+
+    clone_error("clone_deep", source_uri.c_str(), &options, LANCEDB_NOT_SUPPORTED,
+        "Deep clone is not yet implemented");
+  }
+
+  SECTION("A target namespace is rejected by embedded connections") {
+    const char* target_namespace[] = {"clone_namespace"};
+    LanceDBCloneTableOptions options{};
+    options.target_namespace = target_namespace;
+    options.target_namespace_len = 1;
+
+    clone_error("clone_namespace_target", source_uri.c_str(), &options,
+        LANCEDB_NOT_SUPPORTED, "Namespace parameter is not supported");
+  }
+
+  SECTION("Version and tag together are rejected when the source is read") {
+    LanceDBCloneTableOptions options{};
+    options.has_source_version = 1;
+    options.source_version = 1;
+    options.source_tag = "snapshot";
+
+    clone_error("clone_version_and_tag", source_uri.c_str(), &options,
+        LANCEDB_INVALID_INPUT, "Cannot specify both source_version and source_tag");
+    require_table_not_found("clone_version_and_tag");
+  }
+
+  SECTION("An invalid target name is rejected by the SDK") {
+    clone_error("invalid target name", source_uri.c_str(), nullptr,
+        LANCEDB_INVALID_TABLE_NAME, "Invalid table name");
+  }
+
+  SECTION("A missing source reports the SDK error") {
+    const std::string missing_uri = uri + "/missing_source.lance";
+    clone_error("clone_missing_source", missing_uri.c_str(), nullptr,
+        LANCEDB_LANCE, "was not found");
+  }
+
+  SECTION("Invalid arguments fail without writing outputs") {
+    const char invalid_utf8[] = {'\xff', '\0'};
+    const std::string target_name = "clone_invalid_args";
+
+    auto expect_invalid = [&](const LanceDBConnection* connection, const char* target,
+                              const char* source, const LanceDBCloneTableOptions* options) {
+      LanceDBTable* table = reinterpret_cast<LanceDBTable*>(1);
+      char* error_message = reinterpret_cast<char*>(1);
+      REQUIRE(lancedb_connection_clone_table(
+          connection, target, source, options, &table, &error_message)
+          == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(table == nullptr);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+    };
+
+    expect_invalid(nullptr, target_name.c_str(), source_uri.c_str(), nullptr);
+    expect_invalid(db, nullptr, source_uri.c_str(), nullptr);
+    expect_invalid(db, target_name.c_str(), nullptr, nullptr);
+    expect_invalid(db, invalid_utf8, source_uri.c_str(), nullptr);
+    expect_invalid(db, target_name.c_str(), invalid_utf8, nullptr);
+
+    LanceDBCloneTableOptions bad_namespace{};
+    bad_namespace.target_namespace_len = 1;
+    expect_invalid(db, target_name.c_str(), source_uri.c_str(), &bad_namespace);
+
+    LanceDBCloneTableOptions bad_tag{};
+    bad_tag.source_tag = invalid_utf8;
+    expect_invalid(db, target_name.c_str(), source_uri.c_str(), &bad_tag);
+
+    REQUIRE(lancedb_connection_clone_table(
+        db, target_name.c_str(), source_uri.c_str(), nullptr, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+  }
+
+  lancedb_table_free(source);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema", "[table]") {
   SECTION("Get schema from table") {
     constexpr auto row_num = 5;
