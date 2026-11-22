@@ -97,6 +97,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_lf(path: Path, text: str) -> None:
+    """Write UTF-8 text with canonical LF newlines, including on Windows."""
+    path.write_bytes(text.encode("utf-8"))
+
+
 def package_version(repo_root: Path) -> str:
     try:
         return resolve_version(repo_root)
@@ -211,9 +216,7 @@ def create_package(args: argparse.Namespace) -> None:
             )
 
         manifest = package_manifest(target, args.commit, version)
-        (package_root / "manifest.json").write_text(
-            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-        )
+        write_lf(package_root / "manifest.json", json.dumps(manifest, indent=2) + "\n")
 
         checksummed_files = [
             path
@@ -224,9 +227,7 @@ def create_package(args: argparse.Namespace) -> None:
             f"{sha256_file(path)}  {path.relative_to(package_root).as_posix()}"
             for path in checksummed_files
         ]
-        (package_root / "SHA256SUMS").write_text(
-            "\n".join(checksum_lines) + "\n", encoding="utf-8"
-        )
+        write_lf(package_root / "SHA256SUMS", "\n".join(checksum_lines) + "\n")
 
         file_modes = {
             "LICENSE": 0o644,
@@ -243,7 +244,7 @@ def create_package(args: argparse.Namespace) -> None:
 
     digest = sha256_file(archive)
     checksum_file = output_dir / f"{archive.name}.sha256"
-    checksum_file.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+    write_lf(checksum_file, f"{digest}  {archive.name}\n")
 
     print(json.dumps({"archive": str(archive), "sha256": digest, "target": target.name}, indent=2))
     set_github_output(
