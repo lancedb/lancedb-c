@@ -27,7 +27,7 @@ use crate::expr::LanceDBExpr;
 use crate::ipc::{self, LanceDBIpcBuffer};
 use crate::types::{
     LanceDBMergeInsertConfig, LanceDBMergeInsertOptions, LanceDBMergeInsertResult,
-    LanceDBRecordBatchReader,
+    LanceDBMergeInsertResultV2, LanceDBRecordBatchReader,
 };
 
 /// Get table schema as Arrow C ABI
@@ -160,8 +160,10 @@ struct MergeInsertSettings<'a> {
     when_not_matched_insert_all: bool,
     when_not_matched_by_source_delete: bool,
     when_not_matched_by_source_delete_filter: Option<&'a str>,
+    when_not_matched_by_source_delete_expr: Option<&'a LanceDBExpr>,
     timeout: Option<Duration>,
     use_index: Option<bool>,
+    retries: Option<u8>,
 }
 
 /// Read the join columns, rejecting a missing array or an empty or non-UTF-8 name
@@ -215,17 +217,30 @@ fn execute_merge_insert(
             builder.when_not_matched_insert_all();
         }
         if settings.when_not_matched_by_source_delete {
-            builder.when_not_matched_by_source_delete(
-                settings
-                    .when_not_matched_by_source_delete_filter
-                    .map(|filter| filter.to_owned()),
-            );
+            match settings.when_not_matched_by_source_delete_expr {
+                // The expression is borrowed, ownership stays with the caller
+                Some(expr) => {
+                    builder.when_not_matched_by_source_delete_expr(expr.inner.clone());
+                }
+                None => {
+                    builder.when_not_matched_by_source_delete(
+                        settings
+                            .when_not_matched_by_source_delete_filter
+                            .map(|filter| filter.to_owned()),
+                    );
+                }
+            }
         }
         if let Some(timeout) = settings.timeout {
             builder.timeout(timeout);
         }
         if let Some(use_index) = settings.use_index {
             builder.use_index(use_index);
+        }
+        if let Some(retries) = settings.retries {
+            // An explicit 0 reaches the SDK as a disabled retry budget; an
+            // omitted retry leaves the SDK default in place.
+            builder.retries(retries);
         }
 
         builder.execute(reader).await
@@ -287,8 +302,10 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
         when_not_matched_insert_all: true,
         when_not_matched_by_source_delete: false,
         when_not_matched_by_source_delete_filter: None,
+        when_not_matched_by_source_delete_expr: None,
         timeout: None,
         use_index: None,
+        retries: None,
     };
 
     if !config.is_null() {
@@ -332,6 +349,104 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
         Ok(_) => LanceDBError::Success,
         Err(error) => handle_error(&error, error_message),
     }
+}
+
+/// Parse the options shared by the merge insert entry points that expose actions
+///
+/// Conditions for disabled actions are ignored, as on the existing entry points.
+/// The settings borrow the options struct, the DataFusion expression and the
+/// embedded C strings for the duration of the call.
+unsafe fn parse_merge_insert_options<'a>(
+    options: *const LanceDBMergeInsertOptions,
+    by_source_delete_expr: *const LanceDBExpr,
+    retries: *const u8,
+    error_message: *mut *mut c_char,
+) -> Option<MergeInsertSettings<'a>> {
+    let mut settings = MergeInsertSettings {
+        when_matched_update_all: true,
+        update_condition: None,
+        when_not_matched_insert_all: true,
+        when_not_matched_by_source_delete: false,
+        when_not_matched_by_source_delete_filter: None,
+        when_not_matched_by_source_delete_expr: None,
+        timeout: None,
+        use_index: None,
+        retries: if retries.is_null() {
+            None
+        } else {
+            Some(*retries)
+        },
+    };
+
+    // A NULL options pointer keeps the historical default upsert
+    if options.is_null() {
+        return Some(settings);
+    }
+
+    let options = &*options;
+    settings.when_matched_update_all = options.when_matched_update_all != 0;
+    settings.when_not_matched_insert_all = options.when_not_matched_insert_all != 0;
+    settings.when_not_matched_by_source_delete = options.when_not_matched_by_source_delete != 0;
+
+    if settings.when_matched_update_all && !options.when_matched_update_all_condition.is_null() {
+        let Ok(condition) = CStr::from_ptr(options.when_matched_update_all_condition).to_str()
+        else {
+            set_invalid_argument_message(error_message);
+            return None;
+        };
+        settings.update_condition = Some(MergeUpdateCondition::Sql(condition));
+    }
+
+    if settings.when_not_matched_by_source_delete {
+        let has_expr = !by_source_delete_expr.is_null();
+        let has_sql = !options.when_not_matched_by_source_delete_filter.is_null();
+
+        // The SQL filter and the expression are alternative forms of the same
+        // condition, so enabling both at once is ambiguous.
+        if has_expr && has_sql {
+            set_invalid_argument_message(error_message);
+            return None;
+        }
+
+        if has_expr {
+            settings.when_not_matched_by_source_delete_expr = Some(&*by_source_delete_expr);
+        } else if has_sql {
+            let Ok(filter) =
+                CStr::from_ptr(options.when_not_matched_by_source_delete_filter).to_str()
+            else {
+                set_invalid_argument_message(error_message);
+                return None;
+            };
+            settings.when_not_matched_by_source_delete_filter = Some(filter);
+        }
+    }
+
+    settings.use_index = match options.use_index {
+        -1 => None,
+        0 => Some(false),
+        1 => Some(true),
+        _ => {
+            set_custom_error_message(
+                error_message,
+                "Invalid argument: use_index must be -1, 0, or 1",
+            );
+            return None;
+        }
+    };
+
+    settings.timeout = match options.timeout_ms {
+        -1 => None,
+        timeout_ms if timeout_ms >= 0 => Some(Duration::from_millis(timeout_ms as u64)),
+        _ => {
+            set_custom_error_message(
+                error_message,
+                "Invalid argument: timeout_ms must be -1 or a non-negative number",
+            );
+            return None;
+        }
+    };
+
+    Some(settings)
 }
 
 /// Merge data into table with explicit actions and a result
@@ -392,70 +507,11 @@ pub unsafe extern "C" fn lancedb_table_merge_insert_with_result(
     };
     let on_columns: Vec<&str> = column_names.iter().map(String::as_str).collect();
 
-    // A NULL options pointer keeps the historical default upsert
-    let mut settings = MergeInsertSettings {
-        when_matched_update_all: true,
-        update_condition: None,
-        when_not_matched_insert_all: true,
-        when_not_matched_by_source_delete: false,
-        when_not_matched_by_source_delete_filter: None,
-        timeout: None,
-        use_index: None,
+    let Some(settings) =
+        parse_merge_insert_options(options, ptr::null(), ptr::null(), error_message)
+    else {
+        return LanceDBError::InvalidArgument;
     };
-
-    if !options.is_null() {
-        let options = &*options;
-        settings.when_matched_update_all = options.when_matched_update_all != 0;
-        settings.when_not_matched_insert_all = options.when_not_matched_insert_all != 0;
-        settings.when_not_matched_by_source_delete = options.when_not_matched_by_source_delete != 0;
-
-        if settings.when_matched_update_all && !options.when_matched_update_all_condition.is_null()
-        {
-            let Ok(condition) = CStr::from_ptr(options.when_matched_update_all_condition).to_str()
-            else {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            };
-            settings.update_condition = Some(MergeUpdateCondition::Sql(condition));
-        }
-
-        if settings.when_not_matched_by_source_delete
-            && !options.when_not_matched_by_source_delete_filter.is_null()
-        {
-            let Ok(filter) =
-                CStr::from_ptr(options.when_not_matched_by_source_delete_filter).to_str()
-            else {
-                set_invalid_argument_message(error_message);
-                return LanceDBError::InvalidArgument;
-            };
-            settings.when_not_matched_by_source_delete_filter = Some(filter);
-        }
-
-        settings.use_index = match options.use_index {
-            -1 => None,
-            0 => Some(false),
-            1 => Some(true),
-            _ => {
-                set_custom_error_message(
-                    error_message,
-                    "Invalid argument: use_index must be -1, 0, or 1",
-                );
-                return LanceDBError::InvalidArgument;
-            }
-        };
-
-        settings.timeout = match options.timeout_ms {
-            -1 => None,
-            timeout_ms if timeout_ms >= 0 => Some(Duration::from_millis(timeout_ms as u64)),
-            _ => {
-                set_custom_error_message(
-                    error_message,
-                    "Invalid argument: timeout_ms must be -1 or a non-negative number",
-                );
-                return LanceDBError::InvalidArgument;
-            }
-        };
-    }
 
     match execute_merge_insert(
         &(*table).inner,
@@ -471,6 +527,105 @@ pub unsafe extern "C" fn lancedb_table_merge_insert_with_result(
                 num_deleted_rows: merge_result.num_deleted_rows,
                 num_attempts: merge_result.num_attempts,
             };
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Merge data into table with the complete option set and an optional result
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `data` must be a valid pointer to a LanceDBRecordBatchReader. It carries both
+///   the source schema and every source batch, so one call performs one SDK merge
+/// - `on_columns` must be an array of `num_columns` valid null-terminated C strings
+/// - `options`, when not NULL, must point to a readable `LanceDBMergeInsertOptions`.
+///   Its actions, conditions, filters and timeout are borrowed for the call
+/// - `retries`, when not NULL, points to a readable `u8` that overrides the SDK
+///   remote transport retry budget. NULL keeps the SDK default, and a pointed-to
+///   zero is an explicit disabled budget
+/// - `when_not_matched_by_source_delete_expr`, when not NULL, must be a valid
+///   pointer returned from `lancedb_expr_*`. It is borrowed for the call, not
+///   consumed, and is only used when the by-source-delete action is enabled. It
+///   is mutually exclusive with the SQL filter of that enabled action
+/// - `result_out` can be NULL when the caller does not need the SDK result
+/// - `data` is always consumed, also when the other arguments are rejected
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*result_out`, when non-NULL, filled from the SDK result
+/// - `LANCEDB_INVALID_ARGUMENT` for a NULL pointer, an empty join-key list, a
+///   non-UTF-8 string, both by-source-delete condition forms, or an out-of-range
+///   `use_index`/`timeout_ms` sentinel
+/// - The SDK error code for a rejected merge
+///
+/// On entry, a non-NULL `result_out` and the error message are cleared. The
+/// result is only meaningful when the call succeeds. Free a returned error
+/// message with `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_merge_insert_with_options(
+    table: *const LanceDBTable,
+    data: *mut LanceDBRecordBatchReader,
+    on_columns: *const *const c_char,
+    num_columns: usize,
+    options: *const LanceDBMergeInsertOptions,
+    retries: *const u8,
+    when_not_matched_by_source_delete_expr: *const LanceDBExpr,
+    result_out: *mut LanceDBMergeInsertResultV2,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !result_out.is_null() {
+        *result_out = LanceDBMergeInsertResultV2::default();
+    }
+    clear_error_message(error_message);
+
+    if data.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    // Take ownership of the data reader before anything else, so that it is freed
+    // on every path, including the ones rejecting the rest of the arguments
+    let data_box = Box::from_raw(data);
+
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(column_names) = parse_on_columns(on_columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let on_columns: Vec<&str> = column_names.iter().map(String::as_str).collect();
+
+    let Some(settings) = parse_merge_insert_options(
+        options,
+        when_not_matched_by_source_delete_expr,
+        retries,
+        error_message,
+    ) else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    match execute_merge_insert(
+        &(*table).inner,
+        data_box.into_inner(),
+        &on_columns,
+        settings,
+    ) {
+        Ok(merge_result) => {
+            if !result_out.is_null() {
+                *result_out = LanceDBMergeInsertResultV2 {
+                    version: merge_result.version,
+                    num_inserted_rows: merge_result.num_inserted_rows,
+                    num_updated_rows: merge_result.num_updated_rows,
+                    num_deleted_rows: merge_result.num_deleted_rows,
+                    num_attempts: merge_result.num_attempts,
+                    num_rows: merge_result.num_rows,
+                };
+            }
             LanceDBError::Success
         }
         Err(error) => handle_error(&error, error_message),
@@ -2502,3 +2657,6 @@ pub unsafe extern "C" fn lancedb_table_drop_columns(
         Err(e) => handle_error(&e, error_message),
     }
 }
+
+#[cfg(test)]
+mod merge_insert_retry_tests;

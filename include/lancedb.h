@@ -377,7 +377,9 @@ typedef struct {
 } LanceDBMergeInsertConfig;
 
 /**
- * Options for lancedb_table_merge_insert_with_result
+ * Options for the merge insert entry points that expose explicit actions
+ * (lancedb_table_merge_insert_with_result and
+ * lancedb_table_merge_insert_with_options)
  *
  * Every action is disabled unless its flag is non-zero. A NULL options pointer
  * selects the same default upsert as lancedb_table_merge_insert(): update every
@@ -1507,6 +1509,83 @@ LanceDBError lancedb_table_merge_insert_with_result(
     size_t num_columns,
     const LanceDBMergeInsertOptions* options,
     LanceDBMergeInsertResult* result_out,
+    char** error_message
+);
+
+/**
+ * Result of lancedb_table_merge_insert_with_options
+ *
+ * This is the SDK's complete MergeResult, copied unchanged. It is a separate
+ * struct so LanceDBMergeInsertResult keeps its published layout. The SDK
+ * defaults each field missing from a remote response to zero, so zero means
+ * "not reported" rather than necessarily no work. num_attempts is the merge
+ * attempt count reported by the SDK or server, not the number of HTTP requests.
+ * num_rows is the SDK's total written-row count: on the standard path it equals
+ * num_inserted_rows + num_updated_rows, while the RTE write path can report only
+ * num_rows and leave the breakdown zero. A legacy remote empty response can
+ * succeed with every field zero, and a version of 0 means the backend did not
+ * report a commit version.
+ */
+typedef struct {
+    uint64_t version;           // Reported commit version; 0 may mean not reported
+    uint64_t num_inserted_rows; // Reported inserted rows; 0 may mean not reported
+    uint64_t num_updated_rows;  // Reported updated rows; 0 may mean not reported
+    uint64_t num_deleted_rows;  // Reported deleted rows; 0 may mean not reported
+    uint32_t num_attempts;      // Reported merge attempts; 0 may mean not reported
+    uint64_t num_rows;          // Reported total rows written; 0 may mean not reported
+} LanceDBMergeInsertResultV2;
+
+/**
+ * Merge insert with the complete option set and an optional result
+ *
+ * This entry point performs one SDK merge and reuses LanceDBMergeInsertOptions
+ * for its actions, SQL conditions, timeout and index choice. A NULL options
+ * pointer keeps the same default upsert as lancedb_table_merge_insert(): update
+ * every matched row and insert every unmatched source row.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param data - pointer to LanceDBRecordBatchReader with the source schema and batches
+ * @param on_columns - array of column names to join on (typically key/id columns)
+ * @param num_columns - number of columns in the on_columns array (must be > 0)
+ * @param options - pointer to LanceDBMergeInsertOptions, or NULL for the default upsert
+ * @param retries - optional pointer to a uint8_t retry budget, or NULL for the SDK default
+ * @param when_not_matched_by_source_delete_expr - optional borrowed DataFusion expression,
+ *        or NULL. Only used when the by-source-delete action is enabled
+ * @param result_out - optional pointer to receive the complete SDK result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The function takes ownership of the reader and frees it automatically on every
+ * path, including rejected arguments. Do NOT call
+ * lancedb_record_batch_reader_free() after calling this function. The options,
+ * their strings, retries and the expression are borrowed and remain owned by the
+ * caller; free the expression with lancedb_expr_free().
+ *
+ * retries overrides the SDK's remote transport retry budget for this call. A
+ * pointed-to 0 disables retries, while a NULL pointer keeps the SDK default.
+ * This budget is independent of local transaction-conflict retries, and the SDK
+ * never replays an ambiguous write result. Embedded tables ignore it.
+ *
+ * The by-source-delete expression is evaluated against unmatched target rows and
+ * uses target column references directly, like the SQL filter in
+ * LanceDBMergeInsertOptions. When that action is enabled, the expression and a
+ * non-NULL SQL filter are mutually exclusive; setting both fails with
+ * LANCEDB_INVALID_ARGUMENT. A condition set for a disabled action is ignored.
+ *
+ * On entry, a non-NULL *result_out and the error message are cleared. The result
+ * is only meaningful when the function returns LANCEDB_SUCCESS; on failure it
+ * stays zero. If error_message is provided and an error occurs, the caller must
+ * free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_merge_insert_with_options(
+    const LanceDBTable* table,
+    LanceDBRecordBatchReader* data,
+    const char* const* on_columns,
+    size_t num_columns,
+    const LanceDBMergeInsertOptions* options,
+    const uint8_t* retries,
+    const LanceDBExpr* when_not_matched_by_source_delete_expr,
+    LanceDBMergeInsertResultV2* result_out,
     char** error_message
 );
 
