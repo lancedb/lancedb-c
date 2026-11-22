@@ -5,6 +5,19 @@ cmake_minimum_required(VERSION 3.22)
 include(cmake/LanceDBVersion.cmake)
 project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
+# macOS support is Apple Silicon only. Require exactly one arm64 architecture
+# when CMAKE_OSX_ARCHITECTURES is explicit so a universal build cannot produce
+# two Cargo artifacts.
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES _apple_architecture_count)
+  if(NOT _apple_architecture_count EQUAL 1)
+    message(FATAL_ERROR "macOS builds must target exactly one architecture, but CMAKE_OSX_ARCHITECTURES is '${CMAKE_OSX_ARCHITECTURES}'. Intel and universal output are not supported.")
+  endif()
+  if(NOT CMAKE_OSX_ARCHITECTURES MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+  endif()
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -13,9 +26,21 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wtype-limits")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+# Keep the GNU-style warning and optimization flags for GNU-style drivers.
+# MSVC and clang-cl already get warning, optimization and debug defaults from
+# CMake; adding GNU flags makes cl.exe reject the compile line.
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
+else()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wtype-limits")
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+endif()
+
+# An explicit arm64 architecture selects the Rust target even on an Intel host.
+if(APPLE AND CMAKE_OSX_ARCHITECTURES AND NOT RUST_TARGET_TRIPLE)
+  set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
+endif()
 
 if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
   # Map CMake compiler architecture and platform to the corresponding Rust target triple.
@@ -32,8 +57,8 @@ if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
     endif()
   elseif(APPLE)
     if(CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x86_64")
-      set(RUST_TARGET_TRIPLE "x86_64-apple-darwin")
-    elseif(CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "arm64")
+      message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+    elseif(CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "arm64" OR CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "aarch64")
       set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
     endif()
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -62,6 +87,27 @@ else()
     OUTPUT_VARIABLE RUST_TARGET_TRIPLE
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
+endif()
+
+if(APPLE)
+  if(RUST_TARGET_TRIPLE STREQUAL "x86_64-apple-darwin")
+    message(FATAL_ERROR "Intel macOS (x86_64-apple-darwin) is not supported. Build for Apple Silicon (aarch64-apple-darwin) instead.")
+  elseif(RUST_TARGET_TRIPLE AND NOT RUST_TARGET_TRIPLE STREQUAL "aarch64-apple-darwin")
+    message(FATAL_ERROR "Unsupported macOS Rust target '${RUST_TARGET_TRIPLE}'. macOS support is Apple Silicon only (aarch64-apple-darwin).")
+  endif()
+
+  # With no explicit architecture, use the actual compiler target. This keeps
+  # native Apple Silicon working while rejecting an Intel host or compiler.
+  if(CMAKE_OSX_ARCHITECTURES)
+    set(_apple_compiler_architecture "${CMAKE_OSX_ARCHITECTURES}")
+  elseif(CMAKE_C_COMPILER_ARCHITECTURE_ID)
+    set(_apple_compiler_architecture "${CMAKE_C_COMPILER_ARCHITECTURE_ID}")
+  else()
+    set(_apple_compiler_architecture "${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+  if(NOT _apple_compiler_architecture MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "macOS compiler architecture '${_apple_compiler_architecture}' does not match the supported Apple Silicon Rust target. Set CMAKE_OSX_ARCHITECTURES=arm64 or build on Apple Silicon.")
+  endif()
 endif()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -96,6 +142,7 @@ endif()
 option(BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_TESTS "Build tests" OFF)
+option(BUILD_CONSUMER_TEST "Build the standalone package consumer smoke test" OFF)
 option(BUILD_COVERAGE "Enable Rust code coverage reporting (requires llvm-tools-preview)" OFF)
 
 if(BUILD_COVERAGE)
@@ -819,10 +866,23 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
       ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
   )
 
+  if(BUILD_CONSUMER_TEST)
+    add_executable(package_consumer tests/package_consumer.cpp)
+    target_link_libraries(package_consumer PRIVATE lancedb Threads::Threads)
+    target_include_directories(package_consumer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set_target_properties(package_consumer PROPERTIES BUILD_RPATH ${RUST_TARGET_DIR})
+    add_test(NAME package_consumer
+      COMMAND package_consumer "${CMAKE_BINARY_DIR}/package-consumer-db")
+  endif()
+
   if(WIN32 AND BUILD_SHARED_LIBS)
     # The DLL stays in the Rust target directory; put it on the test PATH
     # instead of adding a second DLL staging step.
-    set_tests_properties(lancedb_c17_consumer PROPERTIES
+    set(_consumer_tests lancedb_c17_consumer)
+    if(BUILD_CONSUMER_TEST)
+      list(APPEND _consumer_tests package_consumer)
+    endif()
+    set_tests_properties(${_consumer_tests} PROPERTIES
       ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${RUST_TARGET_DIR}"
     )
   endif()
@@ -897,6 +957,11 @@ if(BUILD_TESTS)
   message(STATUS "Tests: Enabled")
 else()
   message(STATUS "Tests: Disabled (use -DBUILD_TESTS=ON to enable)")
+endif()
+if(BUILD_CONSUMER_TEST)
+  message(STATUS "Consumer test: Enabled")
+else()
+  message(STATUS "Consumer test: Disabled (use -DBUILD_CONSUMER_TEST=ON to enable)")
 endif()
 if(BUILD_COVERAGE)
   message(STATUS "Coverage: Enabled")
