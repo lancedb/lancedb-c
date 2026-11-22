@@ -74,13 +74,22 @@ find_package(lancedb CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE lancedb::lancedb)
 ```
 
+CMake cannot express a prerelease in a version request, so a numeric
+requirement such as `find_package(lancedb 0.1.0)` is rejected for a preview
+package. Use unversioned discovery for previews.
+
 The package config and version file are installed under
 `${CMAKE_INSTALL_LIBDIR}/cmake/lancedb` and use paths relative to the installed
-prefix. pkg-config works from `${CMAKE_INSTALL_LIBDIR}/pkgconfig`:
+prefix. For Unix-like and GNU-style toolchains, pkg-config works from
+`${CMAKE_INSTALL_LIBDIR}/pkgconfig`:
 
 ```bash
 PKG_CONFIG_PATH=/opt/lancedb/lib64/pkgconfig pkg-config --cflags --libs lancedb
 ```
+
+MSVC shared consumers should use the `lancedb::lancedb` CMake target. The MSVC
+import library is named `lancedb.dll.lib`, which the conventional `-llancedb`
+pkg-config spelling does not select.
 
 On Linux the installed shared library records a SONAME derived from the binding
 version: before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the

@@ -515,7 +515,33 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertNotIn("darwin-amd64", {target.name for target in package.TARGETS.values()})
 
 
+class ConsumerEnvironmentTests(unittest.TestCase):
+    def test_macos_does_not_inject_dyld_library_path(self) -> None:
+        with mock.patch.dict(os.environ, {"DYLD_LIBRARY_PATH": "/inherited"}):
+            env = package.consumer_environment(
+                package.target_for("darwin-arm64"), Path("/tmp/package")
+            )
+        self.assertNotIn("DYLD_LIBRARY_PATH", env)
+
+    def test_linux_prepends_the_package_library_path(self) -> None:
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/inherited"}):
+            env = package.consumer_environment(
+                package.target_for("x86_64-unknown-linux-gnu"), Path("/tmp/package")
+            )
+        self.assertEqual(
+            env["LD_LIBRARY_PATH"],
+            f"/tmp/package/lib{os.pathsep}/inherited",
+        )
+
+
 class ParserTests(unittest.TestCase):
+    def test_parse_elf_soname(self) -> None:
+        output = """\
+ 0x000000000000000e (SONAME)             Library soname: [liblancedb.so.0.1]
+"""
+        self.assertEqual(package.parse_elf_soname(output), "liblancedb.so.0.1")
+        self.assertIsNone(package.parse_elf_soname("no soname here\n"))
+
     def test_parse_macho_install_name(self) -> None:
         output = """\
 liblancedb.dylib:

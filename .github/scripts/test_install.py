@@ -49,6 +49,56 @@ def prepend(env: dict[str, str], name: str, directory: Path) -> None:
     env[name] = f"{directory}{os.pathsep}{env.get(name, '')}"
 
 
+def installed_version(prefix: Path) -> str:
+    header = (prefix / "include" / "lancedb.h").read_text(encoding="utf-8")
+    match = re.search(r'^#define LANCEDB_VERSION_STRING "([^"]+)"$', header, re.MULTILINE)
+    if not match:
+        raise SystemExit("installed header has no LANCEDB_VERSION_STRING")
+    return match.group(1)
+
+
+def configure_version_case(
+    source_dir: Path,
+    work_dir: Path,
+    package_dir: Path,
+    generator: str,
+    generator_platform: str,
+    requested: str,
+    exact: bool,
+    expect_success: bool,
+) -> None:
+    name = requested or "unversioned"
+    if exact:
+        name += "-exact"
+    build_dir = work_dir / f"version-{name.replace('.', '-')}"
+    command = [
+        "cmake",
+        "-S",
+        str(source_dir / "tests" / "find_package_version"),
+        "-B",
+        str(build_dir),
+        f"-Dlancedb_DIR={package_dir}",
+        f"-DLANCEDB_FIND_VERSION={requested}",
+    ]
+    if exact:
+        command.append("-DLANCEDB_FIND_EXACT=ON")
+    if generator:
+        command.extend(["-G", generator])
+    if generator_platform:
+        command.extend(["-A", generator_platform])
+    print("+ " + " ".join(command))
+    completed = subprocess.run(command, text=True, capture_output=True)
+    if expect_success and completed.returncode != 0:
+        print(completed.stdout)
+        print(completed.stderr, file=sys.stderr)
+        raise SystemExit(f"version request {requested!r} should be accepted")
+    if not expect_success:
+        if completed.returncode == 0:
+            print(completed.stdout)
+            raise SystemExit(f"version request {requested!r} should be rejected")
+        print(f"rejected as expected: {requested!r}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", required=True)
@@ -127,6 +177,61 @@ def main() -> int:
     )
     run([str(c_consumer), str(work_dir / "c-consumer-db")], env=env)
     run([str(cxx_consumer), str(work_dir / "cxx-consumer-db")], env=env)
+
+    version = installed_version(prefix)
+    configure_version_case(
+        source_dir, work_dir, package_dir, generator, generator_platform, "", False, True
+    )
+    numeric_core = version.split("+", 1)[0].split("-", 1)[0]
+    if "-" in version.split("+", 1)[0]:
+        # CMake cannot parse prerelease request syntax, so every numeric request
+        # must fail rather than selecting the preview as its stable core.
+        configure_version_case(
+            source_dir,
+            work_dir,
+            package_dir,
+            generator,
+            generator_platform,
+            numeric_core,
+            False,
+            False,
+        )
+        major_minor = ".".join(numeric_core.split(".")[:2])
+        configure_version_case(
+            source_dir,
+            work_dir,
+            package_dir,
+            generator,
+            generator_platform,
+            major_minor,
+            False,
+            False,
+        )
+        configure_version_case(
+            source_dir,
+            work_dir,
+            package_dir,
+            generator,
+            generator_platform,
+            f"{numeric_core}...{numeric_core}",
+            False,
+            False,
+        )
+    else:
+        # Exact requests cannot express build metadata. Pure stable versions
+        # keep the standard EXACT path; versions with metadata use their
+        # numeric core through the normal compatibility check.
+        exact_version = version if "+" not in version else numeric_core
+        configure_version_case(
+            source_dir,
+            work_dir,
+            package_dir,
+            generator,
+            generator_platform,
+            exact_version,
+            "+" not in version,
+            True,
+        )
     print("installed package consumers OK")
     return 0
 

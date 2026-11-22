@@ -443,8 +443,28 @@ def read_macho_install_name(library: Path) -> str:
     return install_name
 
 
-def print_runtime_dependencies(target: Target, library: Path) -> None:
+def parse_elf_soname(readelf_output: str) -> str | None:
+    match = re.search(r"\(SONAME\).*\[([^]]+)\]", readelf_output)
+    return match.group(1) if match else None
+
+
+def read_elf_soname(library: Path) -> str:
+    output = run(["readelf", "-d", str(library)], show=False).stdout
+    soname = parse_elf_soname(output)
+    if not soname:
+        raise SystemExit(f"could not read SONAME from {library}")
+    return soname
+
+
+def print_runtime_dependencies(target: Target, library: Path, version: str) -> None:
     if target.os == "linux":
+        expected_soname = f"{target.library}.{soversion(version)}"
+        soname = read_elf_soname(library)
+        print("SONAME: " + soname)
+        if soname != expected_soname:
+            raise SystemExit(
+                f"{library} has SONAME {soname!r}, expected {expected_soname!r}"
+            )
         run(["file", str(library)])
         run(["readelf", "-d", str(library)])
         ldd = run(["ldd", str(library)]).stdout
@@ -518,6 +538,19 @@ def verify_checksums(package_root: Path) -> None:
             raise SystemExit(f"checksum mismatch for {relative}: {actual} != {expected}")
 
 
+def consumer_environment(target: Target, package_root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    if target.os == "linux":
+        env["LD_LIBRARY_PATH"] = (
+            f"{package_root / 'lib'}{os.pathsep}{env.get('LD_LIBRARY_PATH', '')}"
+        )
+    elif target.os == "darwin":
+        # The consumer records -rpath and the dylib records @rpath. Keep the
+        # check honest by not letting an inherited override find the library.
+        env.pop("DYLD_LIBRARY_PATH", None)
+    return env
+
+
 def build_and_run_consumer(
     target: Target,
     package_root: Path,
@@ -549,10 +582,10 @@ def build_and_run_consumer(
             consumer_ldd = run(["ldd", str(executable)]).stdout
             if str(package_root / "lib") not in consumer_ldd:
                 raise SystemExit("the consumer does not resolve liblancedb from the package")
-        env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('LD_LIBRARY_PATH', '')}"
-        env["DYLD_LIBRARY_PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('DYLD_LIBRARY_PATH', '')}"
-        run([str(executable), str(uri), version], env=env)
+        run(
+            [str(executable), str(uri), version],
+            env=consumer_environment(target, package_root),
+        )
     else:
         executable = work_dir / "package-consumer.exe"
         command = [
@@ -618,6 +651,19 @@ def verify_package(args: argparse.Namespace) -> None:
         for relative in [manifest["library"], manifest["include"], manifest["license"]]:
             if not (package_root / relative).is_file():
                 raise SystemExit(f"manifest entry is missing: {relative}")
+        if target.os == "linux":
+            library_path = package_root / manifest["library"]
+            expected_alias = f"{target.library}.{soversion(manifest['version'])}"
+            if not library_path.is_symlink():
+                raise SystemExit(f"packaged library is not a link: {manifest['library']}")
+            link_target = os.readlink(library_path)
+            if os.path.isabs(link_target) or link_target != expected_alias:
+                raise SystemExit(
+                    f"packaged library link {link_target!r} does not match "
+                    f"the relative SONAME name {expected_alias!r}"
+                )
+            if not (library_path.parent / link_target).is_file():
+                raise SystemExit(f"packaged library link target is missing: {link_target}")
         if manifest["importLibrary"] and not (package_root / manifest["importLibrary"]).is_file():
             raise SystemExit(f"manifest import library is missing: {manifest['importLibrary']}")
 
@@ -638,7 +684,7 @@ def verify_package(args: argparse.Namespace) -> None:
             raise SystemExit(f"library architecture is {actual_arch}, expected {target.arch}")
         print(f"Library architecture: {actual_arch}")
 
-        print_runtime_dependencies(target, library)
+        print_runtime_dependencies(target, library, manifest["version"])
         consumer_source = Path(args.consumer_source)
         if not consumer_source.is_absolute():
             consumer_source = repo_root / consumer_source

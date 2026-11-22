@@ -175,6 +175,24 @@ if(BUILD_SHARED_LIBS)
 else()
   set(LANCEDB_LIB_PATHS "${STATIC_LIB_PATH}")
 endif()
+
+# Cargo always builds the cdylib beside the selected static archive. Linux
+# consumers linked in the build tree record the versioned SONAME, so create the
+# matching alias there as part of the rust-lib command and output graph.
+set(LANCEDB_BUILD_OUTPUTS ${LANCEDB_LIB_PATHS})
+set(LANCEDB_ALIAS_COMMAND)
+if(UNIX AND NOT APPLE)
+  set(LANCEDB_BUILD_SONAME_ALIAS
+    "${RUST_TARGET_DIR}/${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}")
+  list(APPEND LANCEDB_BUILD_OUTPUTS "${LANCEDB_BUILD_SONAME_ALIAS}")
+  set(LANCEDB_ALIAS_COMMAND
+    COMMAND ${CMAKE_COMMAND}
+      "-DBUILD_DIR=${RUST_TARGET_DIR}"
+      "-DLIBRARY_NAME=${LANCEDB_SHARED_LIBRARY_NAME}"
+      "-DALIAS_NAME=${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SyncLibraryAlias.cmake")
+endif()
+
 option(BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_ASIO_COROUTINE_EXAMPLE "Build the Boost.Asio coroutine example" OFF)
 option(BUILD_DOCS "Build documentation" OFF)
@@ -240,9 +258,10 @@ endif()
 set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env "LANCEDB_BUILD_VERSION=${LANCEDB_VERSION}" ${CARGO_BUILD_COMMAND})
 add_custom_target(rust-lib ALL
   COMMAND ${CARGO_BUILD_COMMAND}
+  ${LANCEDB_ALIAS_COMMAND}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Building Rust library..."
-  BYPRODUCTS ${LANCEDB_LIB_PATHS}
+  BYPRODUCTS ${LANCEDB_BUILD_OUTPUTS}
 )
 
 # lancedb target
@@ -1037,11 +1056,32 @@ if(PROJECT_VERSION_MAJOR EQUAL 0)
 else()
   set(LANCEDB_CONFIG_VERSION_COMPATIBILITY SameMajorVersion)
 endif()
+set(LANCEDB_CONFIG_VERSION_BASE
+  "${CMAKE_BINARY_DIR}/lancedbConfigVersion.base.cmake")
 write_basic_package_version_file(
-  "${CMAKE_BINARY_DIR}/lancedbConfigVersion.cmake"
+  "${LANCEDB_CONFIG_VERSION_BASE}"
   VERSION "${LANCEDB_VERSION}"
   COMPATIBILITY "${LANCEDB_CONFIG_VERSION_COMPATIBILITY}"
 )
+# CMake cannot parse prerelease syntax in a version request, so its numeric
+# comparison would accept 0.1.0 for 0.1.0-preview.1. Keep the generated stable,
+# EXACT, range and architecture checks, but reject every numeric request against
+# a prerelease package before those checks run.
+file(READ "${LANCEDB_CONFIG_VERSION_BASE}" LANCEDB_CONFIG_VERSION_BASE_CONTENT)
+set(LANCEDB_CONFIG_VERSION_PRERELEASE_GUARD
+"# Reject numeric requirements against a prerelease package.
+set(PACKAGE_VERSION \"${LANCEDB_VERSION}\")
+if(PACKAGE_VERSION MATCHES \"^[0-9]+[.][0-9]+[.][0-9]+-\")
+  if(PACKAGE_FIND_VERSION)
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+    set(PACKAGE_VERSION_EXACT FALSE)
+    return()
+  endif()
+endif()
+")
+file(WRITE "${CMAKE_BINARY_DIR}/lancedbConfigVersion.cmake"
+  "${LANCEDB_CONFIG_VERSION_PRERELEASE_GUARD}\n${LANCEDB_CONFIG_VERSION_BASE_CONTENT}")
+file(REMOVE "${LANCEDB_CONFIG_VERSION_BASE}")
 
 if(BUILD_SHARED_LIBS)
   if(WIN32)
