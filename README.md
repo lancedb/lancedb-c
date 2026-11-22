@@ -76,6 +76,57 @@ If you prefer to build manually:
    ./examples/simple
    ```
 
+### Cloud Storage and Native Features
+
+`lancedb-c` declares its own Cargo features and forwards them to the pinned
+`lancedb` SDK, so the backends a build contains do not depend on what the SDK's
+dependencies happen to enable. The public header and the error codes are the
+same for every combination; a feature only changes which backends the built
+library can reach.
+
+| C feature | Forwarded to | What it enables in the library |
+|---|---|---|
+| `remote` | `lancedb/remote` | The `db://` remote client and the REST namespace |
+| `aws` | `lancedb/aws` | The SDK's AWS wiring and its `dir-aws` directory namespace |
+| `gcs` | `lancedb/gcs` | The SDK's GCS wiring and its `dir-gcp` directory namespace |
+| `azure` | `lancedb/azure` | `dir-azure` plus Azure namespace credential vending |
+| `dynamodb` | `lancedb/dynamodb` | The DynamoDB commit handler for `s3+ddb://`; also turns on the SDK's AWS support |
+| `oss` | `lancedb/oss` | The SDK's `dir-oss` directory namespace |
+| `geo` | `lancedb/geo` | Lance's native spatial index and geo functions |
+| `fp16kernels` | `lancedb/fp16kernels` | Native f16/bf16 SIMD kernels in `lance-linalg` |
+
+The default set is `remote,aws,gcs,azure,dynamodb`, and it is what the prebuilt
+shared libraries contain. `oss`, `geo` and `fp16kernels` are opt-in for source
+builds:
+
+```bash
+cargo build --release --locked -p lancedb-c
+cargo build --release --locked -p lancedb-c --features geo,fp16kernels
+cargo build --release --locked -p lancedb-c --no-default-features --features remote,gcs
+```
+
+Build the package with `-p lancedb-c`. A plain workspace build also builds
+`examples/external_provider`, which depends on this package and therefore turns
+its default features back on.
+
+`--no-default-features` turns off these forwarding declarations only. The
+`lance`, `lance-io` and `lance-namespace` dependencies keep their own defaults,
+and those already register the Lance-side storage providers for S3, GCS, Azure,
+OSS, COS, TOS, GooseFS and Hugging Face. Narrowing the list therefore removes the
+SDK's directory namespaces, credential vending and commit handlers for the
+dropped backends, not the underlying Lance providers.
+
+Without `remote`, the library cannot produce `LANCEDB_HTTP` or `LANCEDB_RETRY`
+because the SDK omits those error variants; both codes keep their values for
+source compatibility.
+
+`geo` is what builds an RTree index natively; the C index-type enumeration has
+no RTree entry yet, so enabling `geo` alone does not expose that index type to C
+callers. `fp16kernels` compiles C kernels for the target: AVX2 and, when the
+compiler supports it, AVX-512 and AMX-FP16 on x86_64, NEON on arm64, and nothing
+on Windows, where the Lance build script warns and skips them. An x86_64 build
+needs Clang 6 or GCC 12 and newer.
+
 ## Prebuilt Shared-Library Packages
 
 The `Shared Library Packages` workflow builds and tests five native targets:
