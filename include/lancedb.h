@@ -644,9 +644,10 @@ typedef struct {
  * LANCEDB_READ_CONSISTENCY_MANUAL means reads add no freshness constraint.
  * LANCEDB_READ_CONSISTENCY_STRONG means reads request the latest data.
  * LANCEDB_READ_CONSISTENCY_EVENTUAL means reads accept data within the
- * configured freshness bound. Native connections check for updates at most
- * once per interval; remote connections send the interval as a per-request
- * minimum freshness bound.
+ * configured freshness bound. Native tables may refresh in the background
+ * before the interval expires and refresh synchronously after it. Remote
+ * latest-timeline requests use the interval as a per-request minimum
+ * freshness bound; pinned snapshots omit that freshness routing header.
  */
 typedef enum {
     LANCEDB_READ_CONSISTENCY_MANUAL = 0,
@@ -720,7 +721,9 @@ LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuil
  * The builder is consumed by this function and must not be used after calling.
  * The value is only applied when the connection dispatches to the SDK remote
  * path, which is selected by a URI beginning with db. The setter does not add
- * it to native storage options. A NULL or non-UTF-8 api_key returns NULL.
+ * it to native storage options. Without the remote feature, the setter
+ * validates and returns the builder without applying the value. A NULL or
+ * non-UTF-8 api_key returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_api_key(LanceDBConnectBuilder* builder, const char* api_key);
 
@@ -735,7 +738,9 @@ LanceDBConnectBuilder* lancedb_connect_builder_api_key(LanceDBConnectBuilder* bu
  * The SDK requires a region for both LanceDB Cloud and LanceDB Enterprise
  * connections, including when a host override is used. This setter is only
  * applied when the connection dispatches to the SDK remote path, which is
- * selected by a URI beginning with db. A NULL or non-UTF-8 region returns NULL.
+ * selected by a URI beginning with db. Without the remote feature, the setter
+ * validates and returns the builder without applying the value. A NULL or
+ * non-UTF-8 region returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_region(LanceDBConnectBuilder* builder, const char* region);
 
@@ -750,7 +755,9 @@ LanceDBConnectBuilder* lancedb_connect_builder_region(LanceDBConnectBuilder* bui
  * The value is only applied when the connection dispatches to the SDK remote
  * path, which is selected by a URI beginning with db. Use the URI db:// together
  * with a host override to connect to LanceDB Enterprise tables stored directly
- * in the storage root. A NULL or non-UTF-8 host_override returns NULL.
+ * in the storage root. Without the remote feature, the setter validates and
+ * returns the builder without applying the value. A NULL or non-UTF-8
+ * host_override returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_host_override(LanceDBConnectBuilder* builder, const char* host_override);
 
@@ -765,7 +772,9 @@ LanceDBConnectBuilder* lancedb_connect_builder_host_override(LanceDBConnectBuild
  * The value is only applied when the connection dispatches to the SDK remote
  * path, which is selected by a URI beginning with db. The SQL endpoint is
  * contacted only when the connection executes SQL; setting this option does
- * not contact it. A NULL or non-UTF-8 sql_host_override returns NULL.
+ * not contact it. Without the remote feature, the setter validates and returns
+ * the builder without applying the value. A NULL or non-UTF-8
+ * sql_host_override returns NULL.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_sql_host_override(LanceDBConnectBuilder* builder, const char* sql_host_override);
 
@@ -814,12 +823,13 @@ LanceDBConnectBuilder* lancedb_connect_builder_manifest_enabled(LanceDBConnectBu
  * requests eventual consistency. The interval only affects reads; writes are
  * always consistent.
  *
- * Native connections check for updates at most once per interval. Remote
- * connections send the interval as a minimum freshness bound on each table
- * request; the server applies it rather than the client polling locally.
- * Reading the configured mode back through lancedb_connection_read_consistency()
- * is supported for native connections; the SDK reports LANCEDB_NOT_SUPPORTED
- * for remote connections.
+ * Native connections use the interval as a refresh target: the SDK may refresh
+ * in the background before it expires and refreshes synchronously on the next
+ * read after it. Remote latest-timeline requests send the interval as a
+ * per-request minimum freshness bound; pinned snapshots omit that freshness
+ * routing header. Reading the configured mode back through
+ * lancedb_connection_read_consistency() is supported for native connections;
+ * the SDK reports LANCEDB_NOT_SUPPORTED for remote connections.
  *
  * A NULL builder returns NULL.
  */

@@ -495,6 +495,46 @@ fn connect_builder_handle(builder: ConnectBuilder, is_remote: bool) -> *mut Lanc
     }))
 }
 
+#[cfg(feature = "remote")]
+fn apply_api_key(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.api_key(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_api_key(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+#[cfg(feature = "remote")]
+fn apply_region(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.region(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_region(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+#[cfg(feature = "remote")]
+fn apply_host_override(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.host_override(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_host_override(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+#[cfg(feature = "remote")]
+fn apply_sql_host_override(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.sql_host_override(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_sql_host_override(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
 /// Consume a builder and apply a remote-only string option
 ///
 /// A NULL builder or value leaves nothing to return. The builder is consumed
@@ -669,9 +709,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_api_key(
     builder: *mut LanceDBConnectBuilder,
     api_key: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
-    connect_builder_with_remote_string(builder, api_key, |builder, api_key| {
-        builder.api_key(api_key)
-    })
+    connect_builder_with_remote_string(builder, api_key, apply_api_key)
 }
 
 /// Set the region for a db:// connection
@@ -689,7 +727,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_region(
     builder: *mut LanceDBConnectBuilder,
     region: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
-    connect_builder_with_remote_string(builder, region, |builder, region| builder.region(region))
+    connect_builder_with_remote_string(builder, region, apply_region)
 }
 
 /// Set the host override for a LanceDB Enterprise connection
@@ -707,9 +745,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_host_override(
     builder: *mut LanceDBConnectBuilder,
     host_override: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
-    connect_builder_with_remote_string(builder, host_override, |builder, host_override| {
-        builder.host_override(host_override)
-    })
+    connect_builder_with_remote_string(builder, host_override, apply_host_override)
 }
 
 /// Set the SQL service host override for a LanceDB Enterprise connection
@@ -729,9 +765,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_sql_host_override(
     builder: *mut LanceDBConnectBuilder,
     sql_host_override: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
-    connect_builder_with_remote_string(builder, sql_host_override, |builder, sql_host_override| {
-        builder.sql_host_override(sql_host_override)
-    })
+    connect_builder_with_remote_string(builder, sql_host_override, apply_sql_host_override)
 }
 
 /// Set an additional property for the connection's namespace client
@@ -2415,6 +2449,7 @@ mod tests {
         unsafe { lancedb_connect_builder_free(builder) };
     }
 
+    #[cfg(feature = "remote")]
     #[test]
     fn dedicated_remote_strings_reach_the_remote_builder() {
         let uri = CString::new("db://test").unwrap();
@@ -2436,6 +2471,7 @@ mod tests {
         unsafe { lancedb_connect_builder_free(builder) };
     }
 
+    #[cfg(feature = "remote")]
     #[test]
     fn remote_classification_matches_the_sdk_db_prefix() {
         let uri = CString::new("db-not-a-uri").unwrap();
@@ -2449,6 +2485,34 @@ mod tests {
         let debug = builder_debug(builder);
         assert!(debug.contains("remote_database_api_key"));
         assert!(debug.contains(secret.to_str().unwrap()));
+
+        unsafe { lancedb_connect_builder_free(builder) };
+    }
+
+    #[cfg(not(feature = "remote"))]
+    #[test]
+    fn remote_setters_validate_and_return_the_builder_without_remote_feature() {
+        let uri = CString::new("db://test").unwrap();
+        let secret = CString::new("dummy-no-remote-secret").unwrap();
+
+        let builder = unsafe { lancedb_connect(uri.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_api_key(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_region(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_host_override(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder =
+            unsafe { lancedb_connect_builder_sql_host_override(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+
+        let debug = builder_debug(builder);
+        assert!(!debug.contains("remote_database_api_key"));
+        assert!(!debug.contains("remote_database_region"));
+        assert!(!debug.contains("remote_database_host_override"));
+        assert!(!debug.contains("remote_database_sql_host_override"));
+        assert!(!debug.contains(secret.to_str().unwrap()));
 
         unsafe { lancedb_connect_builder_free(builder) };
     }
