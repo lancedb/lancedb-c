@@ -188,8 +188,8 @@ this revision with the default flags contain it. `oss`, `geo` and
 
 ```bash
 cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh
-cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh --features geo,fp16kernels
-cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh --no-default-features --features remote,gcs
+cargo rustc --release --locked -p lancedb-c --features geo,fp16kernels -- -C linker=./cmake/export-linker.sh
+cargo rustc --release --locked -p lancedb-c --no-default-features --features remote,gcs -- -C linker=./cmake/export-linker.sh
 ```
 
 Feature selection applies to the packages Cargo selects. A workspace build also
@@ -218,7 +218,7 @@ callers.
   Clang 6 or GCC 12 and newer. GCC 11 rejects the AVX2 object with `'_Float16'
   is not supported on this target` and does not know `-mavx512fp16`. Point `CC`
   at a supported compiler when the default is older, for example
-  `CC=clang cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh --features fp16kernels`.
+  `CC=clang cargo rustc --release --locked -p lancedb-c --features fp16kernels -- -C linker=./cmake/export-linker.sh`.
 
 ## Prebuilt Shared-Library Packages
 
