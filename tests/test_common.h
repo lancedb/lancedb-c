@@ -57,6 +57,10 @@ LanceDBError lancedb_test_set_distance_type(
     LanceDBVectorQuery* query,
     int distance_type,
     char** error_message);
+LanceDBError lancedb_test_set_normalize_method(
+    LanceDBVectorQuery* query,
+    int normalize_method,
+    char** error_message);
 LanceDBExpr* lancedb_test_expr_binary(
     LanceDBExpr* left,
     int op,
