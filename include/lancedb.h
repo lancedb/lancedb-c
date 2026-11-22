@@ -2200,11 +2200,13 @@ void lancedb_free_blob_files(LanceDBBlobFile** files, size_t count);
  * lancedb_blob_file_free().
  *
  * On entry, *file_out and the error message are cleared. On failure *file_out
- * stays NULL. Bad pointers, out-of-range rows and incompatible descriptor
- * layouts return LANCEDB_INVALID_ARGUMENT; unreadable Arrow C Data returns
- * LANCEDB_ARROW; SDK failures keep the existing error mapping. If error_message
- * is provided and an error occurs, the caller must free the error message with
- * lancedb_free_string().
+ * stays NULL. NULL required pointers, a negative or out-of-range row_index,
+ * missing fields, wrong struct field types and NULL required values return
+ * LANCEDB_INVALID_ARGUMENT. A valid non-struct top-level Arrow type, or any
+ * Arrow C Data import failure, returns LANCEDB_ARROW. Non-NULL Arrow inputs
+ * must conform to the Arrow C Data Interface. SDK failures keep the existing
+ * error mapping. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_open_blob_file(
     const LanceDBTable* table,
@@ -2218,7 +2220,8 @@ LanceDBError lancedb_table_open_blob_file(
 /**
  * Free one blob file handle
  *
- * @param file - handle returned by lancedb_table_fetch_blob_files, or NULL
+ * @param file - handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file, or NULL
  *
  * The handle must not be used after this call. Freeing NULL is a no-op.
  */
@@ -2227,7 +2230,8 @@ void lancedb_blob_file_free(LanceDBBlobFile* file);
 /**
  * Return the blob length in bytes
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param size_out - pointer to receive the length in bytes
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2246,7 +2250,8 @@ LanceDBError lancedb_blob_file_size(
 /**
  * Return the physical byte offset of the blob inside its data file
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param position_out - pointer to receive the position
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2268,7 +2273,8 @@ LanceDBError lancedb_blob_file_position(
 /**
  * Move the read cursor to a byte offset inside the blob
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param position - new byte offset from the beginning of the blob
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2287,7 +2293,8 @@ LanceDBError lancedb_blob_file_seek(
 /**
  * Read from the current cursor to the end of the blob
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param buffer_out - pointer to receive the owned bytes
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2310,7 +2317,8 @@ LanceDBError lancedb_blob_file_read(
 /**
  * Read a blob-local byte range without moving the cursor
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param offset - byte offset from the beginning of the blob value
  * @param length - number of bytes to read
  * @param buffer_out - pointer to receive the owned bytes
@@ -2348,7 +2356,8 @@ void lancedb_blob_buffer_free(LanceDBBlobBuffer* buffer);
 /**
  * Close the blob file and release its resources
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *

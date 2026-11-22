@@ -467,6 +467,12 @@ unsafe fn read_descriptor_row(
 /// retention lease is acquired: dataset cleanup or external object changes can
 /// make later reads fail. SDK errors keep their existing mapping and timing.
 ///
+/// NULL required pointers, a negative or out-of-range `row_index`, missing
+/// fields, wrong struct field types and NULL required values return
+/// `LanceDBError::InvalidArgument`. A valid non-struct top-level Arrow type, or
+/// any Arrow C Data import failure, returns `LanceDBError::Arrow`. Non-NULL
+/// Arrow inputs must conform to the Arrow C Data Interface.
+///
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
 /// - `descriptors` and `descriptor_schema` must point to valid Arrow C Data structures
@@ -519,7 +525,8 @@ pub unsafe extern "C" fn lancedb_table_open_blob_file(
 /// Free one blob file handle.
 ///
 /// # Safety
-/// - `file` must be NULL or a handle returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be NULL or a handle returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - The handle must not be used after this call
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_blob_file_free(file: *mut LanceDBBlobFile) {
@@ -559,7 +566,8 @@ pub unsafe extern "C" fn lancedb_blob_buffer_free(buffer: *mut LanceDBBlobBuffer
 /// size for an empty blob.
 ///
 /// # Safety
-/// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be a valid pointer returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - `size_out` must be a valid pointer to receive the size
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
@@ -587,7 +595,8 @@ pub unsafe extern "C" fn lancedb_blob_file_size(
 /// `read_range` leaves it unchanged.
 ///
 /// # Safety
-/// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be a valid pointer returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - `position_out` must be a valid pointer to receive the position
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
@@ -622,7 +631,8 @@ pub unsafe extern "C" fn lancedb_blob_file_position(
 /// no bytes. Seeking a closed handle fails.
 ///
 /// # Safety
-/// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be a valid pointer returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_blob_file_seek(
@@ -649,7 +659,8 @@ pub unsafe extern "C" fn lancedb_blob_file_seek(
 /// the end succeeds with an empty buffer. Reading a closed handle fails.
 ///
 /// # Safety
-/// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be a valid pointer returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - `buffer_out` must be a valid pointer to receive the bytes
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
@@ -689,7 +700,8 @@ pub unsafe extern "C" fn lancedb_blob_file_read(
 /// closed handle fails.
 ///
 /// # Safety
-/// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be a valid pointer returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - `buffer_out` must be a valid pointer to receive the bytes
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
@@ -739,7 +751,8 @@ pub unsafe extern "C" fn lancedb_blob_file_read_range(
 /// complete.
 ///
 /// # Safety
-/// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`
+/// - `file` must be a valid pointer returned by
+///   `lancedb_table_fetch_blob_files` or `lancedb_table_open_blob_file`
 /// - `error_message` can be NULL to ignore detailed error messages
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_blob_file_close(
