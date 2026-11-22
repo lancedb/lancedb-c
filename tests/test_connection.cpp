@@ -719,9 +719,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
         db, child_path, 2, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    // The root path lists the top-level namespace.
+    // The root path lists the top-level namespace. A stale error slot is
+    // cleared on success.
     char** names_out = nullptr;
     size_t count_out = 0;
+    error_message = const_cast<char*>("stale error");
     REQUIRE(lancedb_connection_list_namespaces_path(
         db, nullptr, 0, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -740,8 +742,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
     lancedb_free_namespace_list(names_out, count_out);
 
     // The root reports an empty property map. The child was created without
-    // properties, so the SDK omits that map.
+    // properties, so the SDK omits that map. A stale error slot is cleared on
+    // success.
     LanceDBNamespaceDescription description{};
+    error_message = const_cast<char*>("stale error");
     REQUIRE(lancedb_connection_describe_namespace_path(
         db, nullptr, 0, &description, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
@@ -760,11 +764,30 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
     REQUIRE(description.has_context == false);
     lancedb_free_namespace_description(&description);
 
-    // A missing nested namespace keeps the SDK's not-found classification.
+    // A missing nested namespace keeps the SDK's not-found classification and
+    // leaves the provided description empty.
     const char* missing_path[] = {"parent", "missing"};
+    char* stale_names[] = {nullptr};
+    description.has_properties = true;
+    description.property_keys = stale_names;
+    description.property_values = stale_names;
+    description.property_count = 1;
+    description.has_context = true;
+    description.context_keys = stale_names;
+    description.context_values = stale_names;
+    description.context_count = 1;
+    error_message = const_cast<char*>("stale error");
     REQUIRE(lancedb_connection_describe_namespace_path(
         db, missing_path, 2, &description, &error_message) == LANCEDB_DATABASE_NOT_FOUND);
     REQUIRE(error_message != nullptr);
+    REQUIRE_FALSE(description.has_properties);
+    REQUIRE(description.property_keys == nullptr);
+    REQUIRE(description.property_values == nullptr);
+    REQUIRE(description.property_count == 0);
+    REQUIRE_FALSE(description.has_context);
+    REQUIRE(description.context_keys == nullptr);
+    REQUIRE(description.context_values == nullptr);
+    REQUIRE(description.context_count == 0);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
@@ -790,7 +813,30 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
     const char* invalid_utf8[] = {NON_UTF8};
     char** names_out = nullptr;
     size_t count_out = 0;
+    char* stale_names[] = {nullptr};
     LanceDBNamespaceDescription description{};
+
+    auto set_stale_description = [&]() {
+      description.has_properties = true;
+      description.property_keys = stale_names;
+      description.property_values = stale_names;
+      description.property_count = 1;
+      description.has_context = true;
+      description.context_keys = stale_names;
+      description.context_values = stale_names;
+      description.context_count = 1;
+    };
+
+    auto require_empty_description = [&]() {
+      REQUIRE_FALSE(description.has_properties);
+      REQUIRE(description.property_keys == nullptr);
+      REQUIRE(description.property_values == nullptr);
+      REQUIRE(description.property_count == 0);
+      REQUIRE_FALSE(description.has_context);
+      REQUIRE(description.context_keys == nullptr);
+      REQUIRE(description.context_values == nullptr);
+      REQUIRE(description.context_count == 0);
+    };
 
     REQUIRE(lancedb_connection_create_namespace_path(
         db, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
@@ -810,14 +856,34 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
     lancedb_free_string(error_message);
     error_message = nullptr;
 
+    names_out = stale_names;
+    count_out = 42;
+    error_message = const_cast<char*>("stale error");
     REQUIRE(lancedb_connection_list_namespaces_path(
         db, nullptr, 1, &names_out, &count_out, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(names_out == nullptr);
+    REQUIRE(count_out == 0);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;
 
+    const char* invalid_component[] = {"bad name"};
+    names_out = stale_names;
+    count_out = 42;
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, invalid_component, 1, &names_out, &count_out, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(names_out == nullptr);
+    REQUIRE(count_out == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    set_stale_description();
+    error_message = const_cast<char*>("stale error");
     REQUIRE(lancedb_connection_describe_namespace_path(
         db, nullptr, 1, &description, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    require_empty_description();
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
     error_message = nullptr;

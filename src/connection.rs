@@ -21,7 +21,7 @@ use lancedb::utils::validate_table_name;
 use lancedb::Table;
 
 use crate::error::{
-    handle_error, set_custom_error_message, set_invalid_argument_message,
+    clear_error_message, handle_error, set_custom_error_message, set_invalid_argument_message,
     set_unknown_error_message, LanceDBError,
 };
 use crate::types::LanceDBRecordBatchReader;
@@ -1075,6 +1075,20 @@ pub struct LanceDBNamespaceDescription {
     pub context_count: usize,
 }
 
+/// The empty state of a `LanceDBNamespaceDescription`.
+fn empty_namespace_description() -> LanceDBNamespaceDescription {
+    LanceDBNamespaceDescription {
+        has_properties: false,
+        property_keys: ptr::null_mut(),
+        property_values: ptr::null_mut(),
+        property_count: 0,
+        has_context: false,
+        context_keys: ptr::null_mut(),
+        context_values: ptr::null_mut(),
+        context_count: 0,
+    }
+}
+
 /// Free a namespace description returned by
 /// `lancedb_connection_describe_namespace_path`
 ///
@@ -1098,16 +1112,7 @@ pub unsafe extern "C" fn lancedb_free_namespace_description(
     free_c_string_array(description.context_keys, description.context_count);
     free_c_string_array(description.context_values, description.context_count);
 
-    *description = LanceDBNamespaceDescription {
-        has_properties: false,
-        property_keys: ptr::null_mut(),
-        property_values: ptr::null_mut(),
-        property_count: 0,
-        has_context: false,
-        context_keys: ptr::null_mut(),
-        context_values: ptr::null_mut(),
-        context_count: 0,
-    };
+    *description = empty_namespace_description();
 }
 
 /// Open an existing table
@@ -1240,11 +1245,19 @@ pub unsafe extern "C" fn lancedb_connection_drop_table_path(
 
 /// Rename a table in the database
 ///
+/// Renaming is supported in LanceDB Enterprise and by namespace backends that
+/// implement it. Directory namespaces support renaming tables resolved through
+/// their manifest, including within or across child namespaces; directory-listing
+/// root tables cannot be renamed.
+///
 /// # Safety
 /// - `connection` must be a valid pointer
 /// - `old_name` and `new_name` must be valid null-terminated C strings
 /// - `cur_namespace` and `new_namespace` can be NULL for no namespace, or valid null-terminated C strings
 /// - `error_message` can be NULL to ignore detailed error messages
+///
+/// A NULL `new_namespace` omits the target namespace from the request. It does
+/// not promise a move to the root namespace.
 ///
 /// # Returns
 /// - Error code indicating success or failure
@@ -1295,6 +1308,11 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
 
 /// Rename a table between multi-level namespace paths
 ///
+/// Renaming is supported in LanceDB Enterprise and by namespace backends that
+/// implement it. Directory namespaces support renaming tables resolved through
+/// their manifest, including within or across child namespaces; directory-listing
+/// root tables cannot be renamed.
+///
 /// # Safety
 /// - `connection` must be a valid pointer
 /// - `old_name` and `new_name` must be valid null-terminated C strings
@@ -1302,6 +1320,9 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
 ///   corresponding length of valid C strings, or be NULL when the length is zero
 ///   for the root namespace
 /// - `error_message` can be NULL to ignore detailed error messages
+///
+/// A zero-length `new_namespace_path` omits the target namespace from the
+/// request. It does not promise a move to the root namespace.
 ///
 /// # Returns
 /// - Error code indicating success or failure
@@ -1604,6 +1625,10 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces(
 /// - `error_message` can be NULL to ignore detailed error messages
 /// - The caller is responsible for freeing the returned strings and array
 ///
+/// On entry, a non-NULL `namespaces_out` is set to NULL and a non-NULL
+/// `count_out` to zero. They are published only after the complete list has been
+/// converted. A non-NULL `error_message` is cleared on entry.
+///
 /// # Returns
 /// - Error code indicating success or failure
 #[no_mangle]
@@ -1615,6 +1640,14 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces_path(
     count_out: *mut usize,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
+    clear_error_message(error_message);
+    if !namespaces_out.is_null() {
+        *namespaces_out = ptr::null_mut();
+    }
+    if !count_out.is_null() {
+        *count_out = 0;
+    }
+
     if connection.is_null() || namespaces_out.is_null() || count_out.is_null() {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
@@ -1632,7 +1665,23 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces_path(
             .list_namespaces(&namespace_path, Default::default())
             .try_collect::<Vec<String>>(),
     );
-    write_string_list(result, namespaces_out, count_out, error_message)
+    match result {
+        Ok(namespaces) => {
+            let count = namespaces.len();
+            match c_string_array(namespaces) {
+                Some(namespaces_array) => {
+                    *namespaces_out = namespaces_array;
+                    *count_out = count;
+                    LanceDBError::Success
+                }
+                None => {
+                    set_unknown_error_message(error_message);
+                    LanceDBError::Unknown
+                }
+            }
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
 }
 
 /// Describe a namespace at a multi-level namespace path
@@ -1643,6 +1692,10 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces_path(
 ///   when `namespace_path_len` is zero for the root namespace
 /// - `description_out` must be a valid pointer to receive the description
 /// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry, a non-NULL `description_out` is set to the empty description and a
+/// non-NULL `error_message` is cleared. The description is published only after
+/// the complete response has been converted.
 ///
 /// On success, free the description with `lancedb_free_namespace_description`.
 ///
@@ -1656,6 +1709,11 @@ pub unsafe extern "C" fn lancedb_connection_describe_namespace_path(
     description_out: *mut LanceDBNamespaceDescription,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
+    clear_error_message(error_message);
+    if !description_out.is_null() {
+        *description_out = empty_namespace_description();
+    }
+
     if connection.is_null() || description_out.is_null() {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;

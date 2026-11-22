@@ -730,11 +730,17 @@ LanceDBError lancedb_connection_drop_table_path(
  * @param old_name - null-terminated C string containing the current table name
  * @param new_name - null-terminated C string containing the new table name
  * @param cur_namespace - null-terminated C string containing the current namespace (NULL for no namespace)
- * @param new_namespace - null-terminated C string containing the new namespace (NULL for no namespace)
+ * @param new_namespace - null-terminated C string containing the new namespace (NULL omits the target namespace)
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * This operation is only supported in LanceDB Cloud.
+ * Renaming is supported in LanceDB Enterprise and by namespace backends that
+ * implement it. Directory namespaces support renaming tables resolved through
+ * their manifest, including within or across child namespaces; directory-listing
+ * root tables cannot be renamed.
+ *
+ * A NULL new_namespace omits the target namespace from the rename request. It
+ * does not promise a move to the root namespace.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
@@ -755,12 +761,18 @@ LanceDBError lancedb_connection_rename_table(
  * @param new_name - null-terminated C string containing the new table name
  * @param cur_namespace_path - array of current namespace components (NULL when cur_namespace_path_len is 0)
  * @param cur_namespace_path_len - number of current namespace components (0 for the root namespace)
- * @param new_namespace_path - array of new namespace components (NULL when new_namespace_path_len is 0)
- * @param new_namespace_path_len - number of new namespace components (0 for the root namespace)
+ * @param new_namespace_path - array of new namespace components; zero length omits the target namespace
+ * @param new_namespace_path_len - number of new namespace components; zero omits the target namespace
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * This operation is only supported in LanceDB Cloud.
+ * Renaming is supported in LanceDB Enterprise and by namespace backends that
+ * implement it. Directory namespaces support renaming tables resolved through
+ * their manifest, including within or across child namespaces; directory-listing
+ * root tables cannot be renamed.
+ *
+ * A zero-length new_namespace_path omits the target namespace from the rename
+ * request. It does not promise a move to the root namespace.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
@@ -919,6 +931,10 @@ LanceDBError lancedb_connection_list_namespaces(
  * The caller is responsible for freeing the returned strings and array
  * using lancedb_free_namespace_list(). If error_message is provided and an error
  * occurs, the caller must free the error message with lancedb_free_string().
+ *
+ * On entry, a non-NULL namespaces_out is set to NULL and a non-NULL count_out
+ * to zero. They are published only after the complete list has been converted.
+ * A non-NULL error_message is cleared on entry.
  */
 LanceDBError lancedb_connection_list_namespaces_path(
     const LanceDBConnection* connection,
@@ -957,6 +973,10 @@ typedef struct {
  * @param description_out - pointer to receive the namespace description
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
+ *
+ * On entry, a non-NULL description_out is set to the empty description and a
+ * non-NULL error_message is cleared. The description is published only after the
+ * complete response has been converted.
  *
  * On success, free the description with lancedb_free_namespace_description().
  * If error_message is provided and an error occurs, the caller must free
