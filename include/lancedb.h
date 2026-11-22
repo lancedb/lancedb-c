@@ -159,6 +159,11 @@ typedef struct LanceDBVectorQuery LanceDBVectorQuery;
 typedef struct LanceDBQueryResult LanceDBQueryResult;
 
 /**
+ * Opaque handle to a LanceDB TakeQuery
+ */
+typedef struct LanceDBTakeQuery LanceDBTakeQuery;
+
+/**
  * Opaque handle to a LanceDB TableDelta
  */
 typedef struct LanceDBTableDelta LanceDBTableDelta;
@@ -3303,6 +3308,151 @@ LanceDBError lancedb_vector_query_execute_with_status(
     LanceDBQueryResult** result_out,
     char** error_message
 );
+
+/**
+ * Create a take query that selects rows by dataset offset
+ *
+ * Offsets are 0-indexed and relative to the current table version; they can
+ * change when rows are added or deleted. The requested offsets are copied,
+ * including duplicates. Without lancedb_take_query_preserve_order() the result
+ * order is unspecified. Missing offsets are omitted.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param offsets - borrowed array of dataset offsets, or NULL when count is zero
+ * @param count - number of offsets in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of offsets and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_offsets(
+    const LanceDBTable* table,
+    const uint64_t* offsets,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Create a take query that selects rows by row ID
+ *
+ * Row IDs are relative to the current table version and can change after
+ * compaction or updates. The SDK follows the requested order, including
+ * repeated IDs, and omits missing or deleted IDs.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param row_ids - borrowed array of row IDs, or NULL when count is zero
+ * @param count - number of row IDs in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of row_ids and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_row_ids(
+    const LanceDBTable* table,
+    const uint64_t* row_ids,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Set the column projection of a take query
+ *
+ * Columns are returned in the requested order. A zero num_columns selects no
+ * columns and keeps an empty result schema; columns may then be NULL. The names
+ * are copied and are not borrowed after this call.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param columns - borrowed array of column names, or NULL when num_columns is zero
+ * @param num_columns - number of column names in the array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_select(
+    LanceDBTakeQuery* query,
+    const char* const* columns,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Ask a take query to return the `_rowid` metadata column
+ *
+ * The metadata column is appended to the projection. For an offset take it
+ * carries the row ID, which is not the same as the requested dataset offset.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_with_row_id(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Restore offset-take occurrences in the exact requested order
+ *
+ * Row-ID takes already follow the requested order and ignore this flag. For an
+ * offset take, the result follows the input order, including repeated offsets,
+ * and missing offsets are omitted.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_preserve_order(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Execute a take query and report why it could not start
+ *
+ * @param query - pointer to LanceDBTakeQuery (consumed by this function on every
+ *                path with a non-NULL pointer, including a rejected result pointer)
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The returned result uses the same Arrow C Data and Arrow IPC conversions as
+ * every other query result. On entry, *result_out and the error message are
+ * cleared. Caller must free a returned result with lancedb_query_result_free().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_execute(
+    LanceDBTakeQuery* query,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a TakeQuery
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ */
+void lancedb_take_query_free(LanceDBTakeQuery* query);
 
 /**
  * Convert query result to Arrow RecordBatch arrays
