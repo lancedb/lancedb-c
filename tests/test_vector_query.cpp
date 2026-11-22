@@ -1414,7 +1414,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - row id, fast search and
 
   const auto query_vector = vector_for_row(indexed_rows + 72);
 
-  auto run_query = [&](bool fast_search, bool bypass_vector_index) {
+  auto make_query = [&](bool fast_search, bool bypass_vector_index) {
     LanceDBVectorQuery* query = lancedb_vector_query_new(
         table, query_vector.data(), query_vector.size());
     REQUIRE(query != nullptr);
@@ -1436,8 +1436,34 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - row id, fast search and
       REQUIRE(lancedb_vector_query_bypass_vector_index(query, &error_message) == LANCEDB_SUCCESS);
       REQUIRE(error_message == nullptr);
     }
+    return query;
+  };
 
-    return collect_query_rows(lancedb_vector_query_execute(query));
+  auto run_query = [&](bool fast_search, bool bypass_vector_index) {
+    return collect_query_rows(
+        lancedb_vector_query_execute(make_query(fast_search, bypass_vector_index)));
+  };
+
+  auto plan_of = [&](bool fast_search, bool bypass_vector_index) {
+    LanceDBVectorQuery* query = make_query(fast_search, bypass_vector_index);
+    char* plan = nullptr;
+    char* plan_error = nullptr;
+    const auto status =
+        lancedb_vector_query_explain_plan(query, false, &plan, &plan_error);
+    lancedb_vector_query_free(query);
+
+    std::string plan_text;
+    if (plan != nullptr) {
+      plan_text = plan;
+      lancedb_free_string(plan);
+    }
+    if (plan_error != nullptr) {
+      lancedb_free_string(plan_error);
+    }
+    REQUIRE(status == LANCEDB_SUCCESS);
+    REQUIRE(plan_error == nullptr);
+    REQUIRE(!plan_text.empty());
+    return plan_text;
   };
 
   SECTION("with_row_id returns the actual metadata column beside the nearest row") {
@@ -1455,10 +1481,17 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - row id, fast search and
     REQUIRE(row_ids_of(rows).size() == 1);
   }
 
-  SECTION("bypass_vector_index returns the exhaustive nearest row") {
+  SECTION("bypass_vector_index removes the ANN node and returns the flat row") {
+    const auto indexed_plan = plan_of(false, false);
+    const auto bypassed_plan = plan_of(false, true);
+    REQUIRE(indexed_plan.find("ANNIvfPartition") != std::string::npos);
+    REQUIRE(indexed_plan.find("ANNSubIndex") != std::string::npos);
+    REQUIRE(bypassed_plan.find("ANNIvfPartition") == std::string::npos);
+    REQUIRE(bypassed_plan.find("ANNSubIndex") == std::string::npos);
+    REQUIRE(bypassed_plan.find("KNNVectorDistance") != std::string::npos);
+
     auto indexed_rows_result = run_query(false, false);
     auto bypassed = run_query(false, true);
-
     REQUIRE(bypassed.num_rows() == 1);
     REQUIRE(keys_of(bypassed) == std::vector<std::string>{"key_200"});
     REQUIRE(row_ids_of(bypassed) == row_ids_of(indexed_rows_result));

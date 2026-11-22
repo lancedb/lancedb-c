@@ -554,8 +554,13 @@ pub unsafe extern "C" fn lancedb_vector_query_with_row_id(
 ///
 /// The SDK turns this into an index-only search: rows appended or updated
 /// after the index was built may be absent, and a query with no usable vector
-/// index returns no rows. If `lancedb_vector_query_bypass_vector_index` is also
-/// set, fast search wins because the SDK applies it after the bypass flag.
+/// index returns no rows.
+///
+/// On a hybrid query this flag is part of the shared request, so it applies to
+/// both the full-text and vector legs. `lancedb_vector_query_bypass_vector_index`
+/// only affects the vector leg. Embedded LanceDB applies fast search after the
+/// bypass flag, so fast search wins when both are set. A remote LanceDB forwards
+/// both flags to the server, which decides their interaction.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -580,6 +585,10 @@ pub unsafe extern "C" fn lancedb_vector_query_fast_search(
 /// This performs an exhaustive flat search even when a vector index exists.
 /// It is useful as ground truth for recall measurements. A filter still keeps
 /// its configured pre-filter or post-filter placement.
+///
+/// On a hybrid query this only affects the vector leg. Embedded LanceDB applies
+/// fast search after this flag, so a query with both set behaves as a fast
+/// search. A remote LanceDB forwards both flags to the server.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -754,10 +763,10 @@ pub unsafe extern "C" fn lancedb_vector_query_rerank_rrf(
 /// that normalization starts from the scores or from their ranks.
 ///
 /// The built-in RRF reranker uses only row identities and list positions, so
-/// this setting does not change its ranking or `_relevance_score`; it exists
-/// for parity with the SDK and for rerankers that consume the normalized
-/// scores. When this setter is not called, the SDK's default normalization
-/// applies.
+/// this setting does not change its ranking or `_relevance_score`. It does
+/// change the normalized score columns preserved in the result. When this
+/// setter is not called, the SDK's default normalization applies. An invalid
+/// value is rejected before assignment, leaving any previous selection intact.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -944,6 +953,10 @@ pub unsafe extern "C" fn lancedb_query_explain_plan(
 /// Returns a human-readable string describing what steps will be taken
 /// to execute the query. Does NOT consume the query — it can still be
 /// executed afterwards.
+///
+/// Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
+/// full-text search at plan time with the SDK's unsupported-shape error. That is
+/// an SDK limitation, not a C-side argument error; execute the query instead.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`

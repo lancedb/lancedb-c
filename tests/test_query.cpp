@@ -469,14 +469,16 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Query - repeated queries popula
 
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - row id and fast search flags", "[query]") {
   const std::string table_name = "query_flags_test";
-  constexpr int indexed_rows = 8;
-  constexpr int appended_rows = 8;
+  constexpr size_t indexed_rows = 8;
+  constexpr size_t appended_rows = 8;
 
-  LanceDBTable* table = create_table_with_data(table_name, indexed_rows, 0);
+  LanceDBTable* table = create_table_with_data(
+      table_name, static_cast<int>(indexed_rows), 0);
   REQUIRE(table != nullptr);
   create_key_index(table);
 
-  auto appended = create_test_record_batch(appended_rows, indexed_rows);
+  auto appended = create_test_record_batch(
+      static_cast<int>(appended_rows), static_cast<int>(indexed_rows));
   REQUIRE(lancedb_table_add(table, create_reader_from_batch(appended), nullptr) == LANCEDB_SUCCESS);
 
   auto run_query = [&](const std::string& filter, bool fast_search) {

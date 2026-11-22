@@ -1678,8 +1678,14 @@ LanceDBError lancedb_vector_query_with_row_id(
  * The SDK turns this into an index-only search: rows appended or updated after
  * the index was built may be absent, and a query with no usable vector index
  * returns no rows. A SQL or DataFusion filter keeps its configured pre-filter
- * or post-filter placement. If lancedb_vector_query_bypass_vector_index() is
- * also set, fast search wins because the SDK applies it after the bypass flag.
+ * or post-filter placement.
+ *
+ * On a hybrid query, fast search is part of the vector query's shared request,
+ * so it applies to both the full-text and vector legs. In contrast,
+ * lancedb_vector_query_bypass_vector_index() only affects the vector leg.
+ * Embedded LanceDB applies fast search after the bypass flag, so fast search
+ * wins when both are set. A remote LanceDB forwards both flags to the server,
+ * which decides their interaction.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
@@ -1700,6 +1706,11 @@ LanceDBError lancedb_vector_query_fast_search(
  * is useful as ground truth for recall measurements and returns exact
  * distances without index quantization. A filter still keeps its configured
  * pre-filter or post-filter placement.
+ *
+ * On a hybrid query this only affects the vector leg; the full-text leg remains
+ * unchanged. Embedded LanceDB applies fast search after this flag, so a query
+ * with both set behaves as a fast search. A remote LanceDB forwards both flags
+ * to the server, which decides their interaction.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
@@ -1843,10 +1854,11 @@ LanceDBError lancedb_vector_query_rerank_rrf(
  * from. When this setter is not called, the SDK's default normalization applies.
  *
  * The built-in RRF reranker uses only row identities and list positions, so
- * this setting does not change its ranking or `_relevance_score`; it exists for
- * parity with the SDK and for rerankers that consume the normalized scores.
- * Out-of-range values are rejected with LANCEDB_INVALID_ARGUMENT and leave the
- * query's normalization unset.
+ * this setting does not change its ranking or `_relevance_score`. It does change
+ * the normalized score columns preserved in the result. When this setter is not
+ * called, the SDK's default normalization applies. Out-of-range values are
+ * rejected with LANCEDB_INVALID_ARGUMENT and leave any previously selected
+ * normalization unchanged.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param normalize_method - normalization method to use
@@ -2031,9 +2043,10 @@ LanceDBError lancedb_query_explain_plan(
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
  *
- * Embedded LanceDB rejects a plan for a query that has both nearest and
- * full-text search because one scanner cannot combine them. Execution of the
- * same hybrid query is supported.
+ * Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
+ * full-text search at plan time with the SDK's unsupported-shape error because
+ * one scanner cannot combine them. That is an SDK limitation, not a C-side
+ * argument error; execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
  * @param verbose - if true, include additional detail in the plan

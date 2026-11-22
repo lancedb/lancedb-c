@@ -174,26 +174,32 @@ std::set<int32_t> ids_of(const QueryResultBatches& result) {
   return std::set<int32_t>(ordered.begin(), ordered.end());
 }
 
-float relevance_score_of(const QueryResultBatches& result, int32_t id) {
-  float score = 0.0F;
+float float_column_of(const QueryResultBatches& result,
+                      const std::string& column,
+                      int32_t id) {
+  float value = 0.0F;
   bool found = false;
   for (const auto& batch : result.batches) {
     auto id_column = batch->GetColumnByName("id");
-    auto score_column = batch->GetColumnByName("_relevance_score");
+    auto value_column = batch->GetColumnByName(column);
     REQUIRE(id_column != nullptr);
-    REQUIRE(score_column != nullptr);
+    REQUIRE(value_column != nullptr);
     auto id_array = std::static_pointer_cast<arrow::Int32Array>(id_column);
-    auto score_array = std::static_pointer_cast<arrow::FloatArray>(score_column);
+    auto value_array = std::static_pointer_cast<arrow::FloatArray>(value_column);
     for (int64_t i = 0; i < id_array->length(); i++) {
       if (id_array->Value(i) == id) {
         REQUIRE(!found);
         found = true;
-        score = score_array->Value(i);
+        value = value_array->Value(i);
       }
     }
   }
   REQUIRE(found);
-  return score;
+  return value;
+}
+
+float relevance_score_of(const QueryResultBatches& result, int32_t id) {
+  return float_column_of(result, "_relevance_score", id);
 }
 
 std::map<int32_t, float> expected_rrf_scores(
@@ -220,6 +226,40 @@ std::vector<int32_t> ids_ordered_by_score(const std::map<int32_t, float>& scores
     return scores.at(left) > scores.at(right);
   });
   return ids;
+}
+
+std::map<int32_t, float> expected_normalized_distances(
+    const std::vector<int32_t>& ids,
+    const std::map<int32_t, float>& distances,
+    bool rank) {
+  REQUIRE(!ids.empty());
+  std::map<int32_t, float> normalized;
+  if (rank) {
+    auto ordered = ids;
+    std::sort(ordered.begin(), ordered.end(), [&](int32_t left, int32_t right) {
+      return distances.at(left) < distances.at(right);
+    });
+    const float denominator = static_cast<float>(ordered.size() - 1);
+    for (size_t i = 0; i < ordered.size(); i++) {
+      normalized[ordered[i]] = static_cast<float>(i) / denominator;
+    }
+    return normalized;
+  }
+
+  float min_distance = distances.at(ids.front());
+  float max_distance = min_distance;
+  for (const int32_t id : ids) {
+    min_distance = std::min(min_distance, distances.at(id));
+    max_distance = std::max(max_distance, distances.at(id));
+  }
+  const float range = (max_distance - min_distance < 10e-5F)
+                          ? max_distance
+                          : max_distance - min_distance;
+  for (const int32_t id : ids) {
+    normalized[id] = range != 0.0F ? (distances.at(id) - min_distance) / range
+                                   : distances.at(id);
+  }
+  return normalized;
 }
 
 using LanceDBTablePtr = std::unique_ptr<LanceDBTable, void (*)(LanceDBTable*)>;
@@ -634,7 +674,7 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - RRF k and normalization", "
   constexpr float custom_k = 12.0F;
   constexpr float default_k = 60.0F;
 
-  auto run_vector_ids = [&]() {
+  auto run_vector_leg = [&]() {
     LanceDBVectorQuery* query = lancedb_vector_query_new(
         table(), query_vector.data(), query_vector.size());
     REQUIRE(query != nullptr);
@@ -643,7 +683,7 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - RRF k and normalization", "
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_vector_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
-    return ordered_ids_of(collect_query_result(lancedb_vector_query_execute(query)));
+    return collect_query_result(lancedb_vector_query_execute(query));
   };
 
   auto run_fts_ids = [&]() {
@@ -683,12 +723,18 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - RRF k and normalization", "
     return collect_query_result(lancedb_vector_query_execute(query));
   };
 
-  const auto vector_ids = run_vector_ids();
+  const auto vector_leg = run_vector_leg();
+  const auto vector_ids = ordered_ids_of(vector_leg);
   const auto fts_ids = run_fts_ids();
   // The fixture's row i vector is i * 10 + j, so the ten nearest vectors are
   // rows 0..9. Only row 7 contains "doc7".
   REQUIRE(vector_ids == std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
   REQUIRE(fts_ids == std::vector<int32_t>{7});
+
+  std::map<int32_t, float> vector_distances;
+  for (const int32_t id : vector_ids) {
+    vector_distances[id] = float_column_of(vector_leg, "_distance", id);
+  }
 
   auto require_matches = [&](const QueryResultBatches& result, float k) {
     REQUIRE(result.num_rows() == limit);
@@ -707,24 +753,40 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - RRF k and normalization", "
   }
 
   SECTION("an explicit k changes every fusion score") {
-    auto custom = run_hybrid(custom_k, std::nullopt);
-    require_matches(custom, custom_k);
-
-    auto default_result = run_hybrid(std::nullopt, std::nullopt);
-    const auto expected_custom = expected_rrf_scores(vector_ids, fts_ids, custom_k);
-    const auto expected_default = expected_rrf_scores(vector_ids, fts_ids, default_k);
-    for (const auto& [id, score] : expected_custom) {
-      REQUIRE(std::abs(relevance_score_of(custom, id) - score) < 1e-6F);
-      REQUIRE(std::abs(relevance_score_of(default_result, id) - expected_default.at(id))
-          < 1e-6F);
-    }
+    require_matches(run_hybrid(custom_k, std::nullopt), custom_k);
   }
 
-  SECTION("both normalization methods keep the RRF ranking and relevance scores") {
+  SECTION("normalization changes the preserved hybrid _score without changing RRF") {
     auto score_norm = run_hybrid(custom_k, LANCEDB_NORMALIZE_SCORE);
     auto rank_norm = run_hybrid(custom_k, LANCEDB_NORMALIZE_RANK);
-    require_matches(score_norm, custom_k);
-    require_matches(rank_norm, custom_k);
+    const auto expected_order =
+        ids_ordered_by_score(expected_rrf_scores(vector_ids, fts_ids, custom_k));
+
+    REQUIRE(score_norm.schema->GetFieldByName("_score") != nullptr);
+    REQUIRE(rank_norm.schema->GetFieldByName("_score") != nullptr);
+    REQUIRE(ordered_ids_of(score_norm) == expected_order);
+    REQUIRE(ordered_ids_of(rank_norm) == expected_order);
+
+    // The SDK reranker merges with the FTS leg's schema. Both legs place their
+    // single metric column at the same position, so the vector leg's normalized
+    // distance survives as `_score`. Row 7 appears in both legs and the vector
+    // occurrence is merged first, so every returned row here carries the
+    // vector-side normalization.
+    const auto expected_score =
+        expected_normalized_distances(vector_ids, vector_distances, false);
+    const auto expected_rank =
+        expected_normalized_distances(vector_ids, vector_distances, true);
+    bool saw_different_score = false;
+    for (const int32_t id : vector_ids) {
+      const auto score = float_column_of(score_norm, "_score", id);
+      const auto rank = float_column_of(rank_norm, "_score", id);
+      REQUIRE(std::abs(score - expected_score.at(id)) < 1e-6F);
+      REQUIRE(std::abs(rank - expected_rank.at(id)) < 1e-6F);
+      REQUIRE(std::abs(relevance_score_of(score_norm, id) - relevance_score_of(rank_norm, id))
+          < 1e-6F);
+      saw_different_score = saw_different_score || std::abs(score - rank) >= 1e-4F;
+    }
+    REQUIRE(saw_different_score);
   }
 
   SECTION("a reranker on a vector-only query does not change the rows") {
