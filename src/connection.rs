@@ -17,6 +17,7 @@ use lance_namespace::models::{
     CreateNamespaceRequest, DescribeNamespaceRequest, DropNamespaceRequest,
 };
 use lancedb::connection::{connect, ConnectBuilder, Connection, TableNamesBuilder};
+use lancedb::database::ReadConsistency;
 use lancedb::utils::validate_table_name;
 use lancedb::Table;
 
@@ -84,6 +85,22 @@ pub struct LanceDBSessionCacheStats {
     pub misses: u64,
     pub num_entries: usize,
     pub size_bytes: usize,
+}
+
+/// Read consistency mode reported to C callers
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanceDBReadConsistencyType {
+    Manual = 0,
+    Eventual = 1,
+    Strong = 2,
+}
+
+/// Read consistency of a connection returned to C callers
+#[repr(C)]
+pub struct LanceDBReadConsistency {
+    pub kind: LanceDBReadConsistencyType,
+    pub interval_ms: u64,
 }
 
 const DEFAULT_INDEX_CACHE_SIZE_BYTES: usize = 6 * 1024 * 1024 * 1024;
@@ -261,6 +278,69 @@ unsafe fn write_string_list(
     }
 }
 
+/// Consume a builder and apply a single string option
+///
+/// A NULL builder or value leaves nothing to return. The builder is consumed
+/// even when the value is invalid, matching the other consuming setters.
+unsafe fn connect_builder_with_string(
+    builder: *mut LanceDBConnectBuilder,
+    value: *const c_char,
+    apply: impl FnOnce(ConnectBuilder, &str) -> ConnectBuilder,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if value.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(value) = CStr::from_ptr(value).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let updated_builder = apply(*builder_box.inner, value);
+    Box::into_raw(Box::new(LanceDBConnectBuilder {
+        inner: Box::new(updated_builder),
+    }))
+}
+
+/// Consume a builder and apply a key/value option
+///
+/// A NULL builder, key or value leaves nothing to return. The builder is
+/// consumed even when a string is invalid, matching the other consuming setters.
+unsafe fn connect_builder_with_key_value(
+    builder: *mut LanceDBConnectBuilder,
+    key: *const c_char,
+    value: *const c_char,
+    apply: impl FnOnce(ConnectBuilder, &str, &str) -> ConnectBuilder,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if key.is_null() || value.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(key) = CStr::from_ptr(key).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let Ok(value) = CStr::from_ptr(value).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let updated_builder = apply(*builder_box.inner, key, value);
+    Box::into_raw(Box::new(LanceDBConnectBuilder {
+        inner: Box::new(updated_builder),
+    }))
+}
+
 /// Create a ConnectBuilder for the given URI
 ///
 /// # Safety
@@ -348,31 +428,159 @@ pub unsafe extern "C" fn lancedb_connect_builder_storage_option(
     key: *const c_char,
     value: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_key_value(builder, key, value, |builder, key, value| {
+        builder.storage_option(key, value)
+    })
+}
+
+/// Set the API key for a LanceDB Enterprise or LanceDB Cloud connection
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `api_key` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_api_key(
+    builder: *mut LanceDBConnectBuilder,
+    api_key: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_string(builder, api_key, |builder, api_key| {
+        builder.api_key(api_key)
+    })
+}
+
+/// Set the LanceDB Cloud (legacy) region
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `region` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_region(
+    builder: *mut LanceDBConnectBuilder,
+    region: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_string(builder, region, |builder, region| builder.region(region))
+}
+
+/// Set the host override for a LanceDB Enterprise connection
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `host_override` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_host_override(
+    builder: *mut LanceDBConnectBuilder,
+    host_override: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_string(builder, host_override, |builder, host_override| {
+        builder.host_override(host_override)
+    })
+}
+
+/// Set the SQL service host override for a LanceDB Enterprise connection
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `sql_host_override` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_sql_host_override(
+    builder: *mut LanceDBConnectBuilder,
+    sql_host_override: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_string(builder, sql_host_override, |builder, sql_host_override| {
+        builder.sql_host_override(sql_host_override)
+    })
+}
+
+/// Set an additional property for the connection's namespace client
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `key` and `value` must be valid null-terminated C strings
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_namespace_client_property(
+    builder: *mut LanceDBConnectBuilder,
+    key: *const c_char,
+    value: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_key_value(builder, key, value, |builder, key, value| {
+        builder.namespace_client_property(key, value)
+    })
+}
+
+/// Enable or disable manifest-backed directory namespace mode
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_manifest_enabled(
+    builder: *mut LanceDBConnectBuilder,
+    enabled: bool,
+) -> *mut LanceDBConnectBuilder {
     if builder.is_null() {
         return ptr::null_mut();
     }
 
     let builder_box = Box::from_raw(builder);
+    let updated_builder = (*builder_box.inner).manifest_enabled(enabled);
+    Box::into_raw(Box::new(LanceDBConnectBuilder {
+        inner: Box::new(updated_builder),
+    }))
+}
 
-    if key.is_null() || value.is_null() {
+/// Set the read consistency interval in milliseconds
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_read_consistency_interval_ms(
+    builder: *mut LanceDBConnectBuilder,
+    interval_ms: u64,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
         return ptr::null_mut();
     }
 
-    let Ok(key_str) = CStr::from_ptr(key).to_str() else {
-        return ptr::null_mut();
-    };
-
-    let Ok(value_str) = CStr::from_ptr(value).to_str() else {
-        return ptr::null_mut();
-    };
-
-    let connect_builder = *builder_box.inner;
-    let updated_builder = connect_builder.storage_option(key_str, value_str);
-    let boxed_builder = Box::new(LanceDBConnectBuilder {
+    let builder_box = Box::from_raw(builder);
+    let updated_builder = (*builder_box.inner)
+        .read_consistency_interval(std::time::Duration::from_millis(interval_ms));
+    Box::into_raw(Box::new(LanceDBConnectBuilder {
         inner: Box::new(updated_builder),
-    });
-
-    Box::into_raw(boxed_builder)
+    }))
 }
 
 /// Set a session for the connection builder
@@ -451,6 +659,49 @@ pub unsafe extern "C" fn lancedb_connection_uri(
     });
 
     cached_uri.as_ptr()
+}
+
+/// Get the read consistency of a connection
+///
+/// # Safety
+/// - `connection` must be a valid pointer returned from `lancedb_connect_builder_execute`
+/// - `consistency_out` must be a valid pointer to receive the read consistency
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On success, `consistency_out` is set to the SDK's read consistency. On
+/// failure, it is left unchanged, so a caller can keep its own sentinel there.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_read_consistency(
+    connection: *const LanceDBConnection,
+    consistency_out: *mut LanceDBReadConsistency,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if connection.is_null() || consistency_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let read_consistency = match get_runtime().block_on((*connection).inner.read_consistency()) {
+        Ok(read_consistency) => read_consistency,
+        Err(error) => return handle_error(&error, error_message),
+    };
+
+    let (kind, interval_ms) = match read_consistency {
+        ReadConsistency::Manual => (LanceDBReadConsistencyType::Manual, 0),
+        ReadConsistency::Eventual(interval) => (
+            LanceDBReadConsistencyType::Eventual,
+            // The C setter only creates whole-millisecond intervals. Clamping
+            // keeps a duration from any other source representable in the
+            // fixed-width C field instead of truncating it.
+            u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
+        ),
+        ReadConsistency::Strong => (LanceDBReadConsistencyType::Strong, 0),
+    };
+
+    *consistency_out = LanceDBReadConsistency { kind, interval_ms };
+    LanceDBError::Success
 }
 
 /// Internal helper to create a session with optional custom registry
