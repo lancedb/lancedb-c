@@ -1418,7 +1418,7 @@ pub unsafe extern "C" fn lancedb_vector_query_analyze_plan(
 fn run_plain_query(
     query: Box<LanceDBQuery>,
 ) -> Result<SendableRecordBatchStream, lancedb::error::Error> {
-    get_runtime().block_on(async move { configured_plain_query(&query).execute().await })
+    get_runtime().block_on(async move { configured_plain_query(query.as_ref()).execute().await })
 }
 
 /// Run the vector query held by `query` and return the stream the SDK started
@@ -1426,7 +1426,7 @@ fn run_vector_query(
     query: Box<LanceDBVectorQuery>,
 ) -> Result<SendableRecordBatchStream, lancedb::error::Error> {
     get_runtime().block_on(async move {
-        let rust_query = configured_vector_query(&query)?;
+        let rust_query = configured_vector_query(query.as_ref())?;
         rust_query.execute().await
     })
 }
