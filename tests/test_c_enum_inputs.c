@@ -25,6 +25,7 @@ _Static_assert(sizeof(LanceDBCreateTableMode) == sizeof(int),
                "LanceDBCreateTableMode must have the C int ABI");
 _Static_assert(sizeof(LanceDBWriteOptionsField) == sizeof(int),
                "LanceDBWriteOptionsField must have the C int ABI");
+_Static_assert(sizeof(LanceDBBranchSourceKind) == sizeof(int), "LanceDBBranchSourceKind must have the C int ABI");
 _Static_assert(sizeof(float) == sizeof(int), "LanceDBVectorIndexConfig assumes int-sized fields");
 _Static_assert(offsetof(LanceDBVectorIndexConfig, distance_type) == 4 * sizeof(int),
                "LanceDBVectorIndexConfig layout changed");
@@ -100,6 +101,23 @@ LanceDBError lancedb_test_set_distance_type(
     char** error_message) {
   return lancedb_vector_query_distance_type(
       query, (LanceDBDistanceType)distance_type, error_message);
+}
+
+LanceDBError lancedb_test_create_branch_with_source_kind(
+    const LanceDBTable* table,
+    const char* name,
+    int source_kind,
+    const char* source_name,
+    int has_version,
+    uint64_t version,
+    LanceDBTable** table_out,
+    char** error_message) {
+  const LanceDBBranchSource source = {
+      .kind = (LanceDBBranchSourceKind)source_kind,
+      .name = source_name,
+      .has_version = has_version,
+      .version = version};
+  return lancedb_table_create_branch(table, name, &source, table_out, error_message);
 }
 
 LanceDBError lancedb_test_set_normalize_method(

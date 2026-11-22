@@ -207,7 +207,7 @@ jobs:
         run: ninja -C build
 
       - name: Test
-        run: ctest --test-dir build -j
+        run: ctest --test-dir build -j --output-on-failure
 
   cross_compile:
     name: Cross-compile Windows on Linux
