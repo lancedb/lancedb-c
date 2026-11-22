@@ -1548,6 +1548,120 @@ LanceDBError lancedb_table_schema_ipc_file(
 );
 
 /**
+ * List row-addressable Blob v1 and v2 columns in declaration order
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns_out - pointer to receive the array of column-name strings
+ * @param count_out - pointer to receive the number of names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Struct-nested blobs use dotted paths such as `info.blob`. Blobs inside lists
+ * are omitted because a row id cannot identify an individual list element.
+ * On entry, both outputs and the error message are cleared. An empty list
+ * succeeds with *columns_out NULL and *count_out zero. The caller owns the
+ * strings and array and frees them with lancedb_free_blob_columns(). If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_blob_columns(
+    const LanceDBTable* table,
+    char*** columns_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free the blob column-name array returned by lancedb_table_blob_columns
+ *
+ * @param columns - array of string pointers returned by lancedb_table_blob_columns
+ * @param count - number of strings in the array
+ */
+void lancedb_free_blob_columns(char** columns, size_t count);
+
+/**
+ * One borrowed request for lancedb_table_fetch_blob_ranges
+ *
+ * `row_id` selects the row, `offset` is the byte offset from the beginning of
+ * that row's blob value, and `length` is the number of bytes to read. The
+ * request array is borrowed for the duration of the call.
+ */
+typedef struct {
+    uint64_t row_id;
+    uint64_t offset;
+    uint64_t length;
+} LanceDBBlobRangeRequest;
+
+/**
+ * Materialize blob bytes for borrowed row ids
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param row_ids - borrowed row id array; NULL is allowed only when num_row_ids is 0
+ * @param num_row_ids - number of row ids
+ * @param array_out - pointer to receive one Arrow C Data LargeBinary array
+ * @param schema_out - pointer to receive its Arrow C Data schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The result follows row_ids in length, order and duplicates. NULL blobs stay
+ * NULL and valid empty blobs are empty byte strings. An empty input succeeds
+ * without reading blob bytes and returns an empty array. One missing or deleted
+ * row id rejects the whole request without partial results.
+ * On entry, both outputs and the error message are cleared. On success the
+ * array and schema are independent of the table and of each other; the caller
+ * frees the array with lancedb_free_arrow_array() and the schema with
+ * lancedb_free_arrow_schema(). On failure both outputs stay clear. Blob
+ * availability and errors on remote tables are returned unchanged from the
+ * SDK. If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blobs(
+    const LanceDBTable* table,
+    const char* column,
+    const uint64_t* row_ids,
+    size_t num_row_ids,
+    FFI_ArrowArray** array_out,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
+ * Materialize borrowed blob-local byte ranges
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param requests - borrowed request array; NULL is allowed only when num_requests is 0
+ * @param num_requests - number of requests
+ * @param array_out - pointer to receive one Arrow C Data LargeBinary array
+ * @param schema_out - pointer to receive its Arrow C Data schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The result follows the request order exactly, including duplicate and
+ * reordered requests. NULL blobs stay NULL, empty ranges on non-NULL blobs are
+ * empty byte strings, and an empty request list succeeds without reading blob
+ * bytes. One missing row id or invalid range rejects the whole request without
+ * partial results.
+ * On entry, both outputs and the error message are cleared. On success the
+ * array and schema are independent of the table and of each other; the caller
+ * frees the array with lancedb_free_arrow_array() and the schema with
+ * lancedb_free_arrow_schema(). On failure both outputs stay clear. Blob
+ * availability and errors on remote tables are returned unchanged from the
+ * SDK. If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blob_ranges(
+    const LanceDBTable* table,
+    const char* column,
+    const LanceDBBlobRangeRequest* requests,
+    size_t num_requests,
+    FFI_ArrowArray** array_out,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Get table version
  *
  * @param table - pointer to LanceDBTable
@@ -3732,6 +3846,14 @@ void lancedb_free_arrow_arrays(
     struct FFI_ArrowArray** arrays,
     size_t count
 );
+
+/**
+ * Free one Arrow C ABI array returned by a blob fetch function
+ *
+ * @param array - Arrow C ABI array pointer returned by lancedb_table_fetch_blobs()
+ *                or lancedb_table_fetch_blob_ranges()
+ */
+void lancedb_free_arrow_array(FFI_ArrowArray* array);
 
 /**
  * Information about one index on a table

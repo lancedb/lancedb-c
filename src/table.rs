@@ -13,14 +13,15 @@ use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow_array::{Array, RecordBatch, RecordBatchReader, StructArray};
-use arrow_schema::{ArrowError, Schema};
+use arrow_array::{Array, LargeBinaryArray, RecordBatch, RecordBatchReader, StructArray};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
+use lancedb::blob::BlobRangeRequest;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::{ColumnAlteration, FieldMetadataUpdate, NewColumnTransform, Ref};
 
-use crate::connection::{get_runtime, LanceDBTable};
+use crate::connection::{c_string_array, free_c_string_array, get_runtime, LanceDBTable};
 use crate::error::{
     clear_error_message, handle_error, set_custom_error_message, set_invalid_argument_message,
     set_not_supported_message, set_unknown_error_message, LanceDBError,
@@ -113,6 +114,259 @@ pub unsafe extern "C" fn lancedb_table_schema_ipc_file(
                 error_message,
             ),
         },
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// One borrowed request for `lancedb_table_fetch_blob_ranges`.
+///
+/// The request names a row id and a byte range inside that row's blob value.
+/// Requests may be repeated or reordered; the result follows this array's order.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LanceDBBlobRangeRequest {
+    /// Row id of the blob value to read.
+    pub row_id: u64,
+    /// Byte offset from the beginning of the blob value.
+    pub offset: u64,
+    /// Number of bytes to read.
+    pub length: u64,
+}
+
+/// Validate a borrowed C array before forming a Rust slice.
+fn c_array_len_is_valid<T>(count: usize) -> bool {
+    count
+        .checked_mul(std::mem::size_of::<T>())
+        .is_some_and(|bytes| bytes <= isize::MAX as usize)
+}
+
+/// Borrow a caller-owned C array for the duration of one FFI call.
+///
+/// A zero count accepts a NULL pointer and yields an empty slice. A positive
+/// count requires a non-NULL pointer whose byte length is representable as a
+/// Rust slice.
+unsafe fn borrowed_slice<'a, T>(
+    ptr: *const T,
+    count: usize,
+    error_message: *mut *mut c_char,
+) -> Option<&'a [T]> {
+    if count == 0 {
+        return Some(&[]);
+    }
+    if ptr.is_null() || !c_array_len_is_valid::<T>(count) {
+        set_invalid_argument_message(error_message);
+        return None;
+    }
+    Some(std::slice::from_raw_parts(ptr, count))
+}
+
+/// Hand a materialized blob array and its schema to the caller as Arrow C Data.
+unsafe fn publish_blob_array(
+    array: LargeBinaryArray,
+    column: &str,
+    array_out: *mut *mut arrow_array::ffi::FFI_ArrowArray,
+    schema_out: *mut *mut arrow_schema::ffi::FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    let field = Field::new(column, DataType::LargeBinary, true);
+    let schema = match arrow_schema::ffi::FFI_ArrowSchema::try_from(&field) {
+        Ok(schema) => schema,
+        Err(error) => {
+            return handle_error(
+                &lancedb::error::Error::Arrow { source: error },
+                error_message,
+            )
+        }
+    };
+
+    let ffi_array = arrow_array::ffi::FFI_ArrowArray::new(&array.into_data());
+    *array_out = Box::into_raw(Box::new(ffi_array));
+    *schema_out = Box::into_raw(Box::new(schema));
+    LanceDBError::Success
+}
+
+/// List row-addressable Blob v1 and v2 columns in declaration order.
+///
+/// Struct-nested blobs use dotted paths. Blobs inside lists are omitted because
+/// a row id cannot identify an individual list element. An empty table list
+/// succeeds with a NULL array and a zero count.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns_out` must be a valid pointer to receive the string array
+/// - `count_out` must be a valid pointer to receive the string count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+/// - The caller frees the strings and array with `lancedb_free_blob_columns`
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_blob_columns(
+    table: *const LanceDBTable,
+    columns_out: *mut *mut *mut c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !columns_out.is_null() {
+        *columns_out = ptr::null_mut();
+    }
+    if !count_out.is_null() {
+        *count_out = 0;
+    }
+    clear_error_message(error_message);
+
+    if table.is_null() || columns_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = &(*table).inner;
+    match get_runtime().block_on(tbl.blob_columns()) {
+        Ok(columns) => {
+            let count = columns.len();
+            match c_string_array(columns) {
+                Some(columns) => {
+                    *columns_out = columns;
+                    *count_out = count;
+                    LanceDBError::Success
+                }
+                None => {
+                    set_unknown_error_message(error_message);
+                    LanceDBError::Unknown
+                }
+            }
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Free the blob column-name array returned by `lancedb_table_blob_columns`.
+///
+/// # Safety
+/// - `columns` must be a pointer returned by `lancedb_table_blob_columns`
+/// - `count` must match the count returned by that call
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_blob_columns(columns: *mut *mut c_char, count: usize) {
+    free_c_string_array(columns, count);
+}
+
+/// Materialize blob bytes for borrowed row ids.
+///
+/// The result is one Arrow C Data `LargeBinary` array whose values match
+/// `row_ids` in length, order and duplicates. NULL blobs stay NULL and valid
+/// empty blobs are empty byte strings. An empty input succeeds without reading
+/// blob bytes and yields an empty array. One missing or deleted row id rejects
+/// the whole request without partial results.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `column` must be a valid NUL-terminated UTF-8 string
+/// - `row_ids` is borrowed for this call; it may be NULL only when `num_row_ids` is 0
+/// - `array_out` must be a valid pointer to receive the Arrow C Data array
+/// - `schema_out` must be a valid pointer to receive its Arrow C Data schema
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+/// - The caller frees the array with `lancedb_free_arrow_array` and the schema
+///   with `lancedb_free_arrow_schema`. Both results own their storage and stay
+///   valid independently of the table and of each other.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_fetch_blobs(
+    table: *const LanceDBTable,
+    column: *const c_char,
+    row_ids: *const u64,
+    num_row_ids: usize,
+    array_out: *mut *mut arrow_array::ffi::FFI_ArrowArray,
+    schema_out: *mut *mut arrow_schema::ffi::FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !array_out.is_null() {
+        *array_out = ptr::null_mut();
+    }
+    if !schema_out.is_null() {
+        *schema_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if table.is_null() || array_out.is_null() || schema_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    let Some(column) = required_c_string(column, error_message) else {
+        return LanceDBError::InvalidArgument;
+    };
+    let Some(row_ids) = borrowed_slice(row_ids, num_row_ids, error_message) else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    let tbl = &(*table).inner;
+    match get_runtime().block_on(tbl.fetch_blobs(column, row_ids)) {
+        Ok(array) => publish_blob_array(array, column, array_out, schema_out, error_message),
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Materialize borrowed blob-local byte ranges.
+///
+/// The result is one Arrow C Data `LargeBinary` array that follows the request
+/// order exactly, including duplicate and reordered requests. NULL blobs stay
+/// NULL, empty ranges on non-NULL blobs are empty byte strings, and an empty
+/// request list succeeds without reading blob bytes. One missing row id or
+/// invalid range rejects the whole request without partial results.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `column` must be a valid NUL-terminated UTF-8 string
+/// - `requests` is borrowed for this call; it may be NULL only when `num_requests` is 0
+/// - `array_out` must be a valid pointer to receive the Arrow C Data array
+/// - `schema_out` must be a valid pointer to receive its Arrow C Data schema
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+/// - The caller frees the array with `lancedb_free_arrow_array` and the schema
+///   with `lancedb_free_arrow_schema`. Both results own their storage and stay
+///   valid independently of the table and of each other.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_fetch_blob_ranges(
+    table: *const LanceDBTable,
+    column: *const c_char,
+    requests: *const LanceDBBlobRangeRequest,
+    num_requests: usize,
+    array_out: *mut *mut arrow_array::ffi::FFI_ArrowArray,
+    schema_out: *mut *mut arrow_schema::ffi::FFI_ArrowSchema,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !array_out.is_null() {
+        *array_out = ptr::null_mut();
+    }
+    if !schema_out.is_null() {
+        *schema_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if table.is_null() || array_out.is_null() || schema_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    let Some(column) = required_c_string(column, error_message) else {
+        return LanceDBError::InvalidArgument;
+    };
+    let Some(requests) = borrowed_slice(requests, num_requests, error_message) else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    let tbl = &(*table).inner;
+    match get_runtime().block_on(
+        tbl.fetch_blob_ranges(
+            column,
+            requests.iter().map(|request| {
+                BlobRangeRequest::new(request.row_id, request.offset, request.length)
+            }),
+        ),
+    ) {
+        Ok(array) => publish_blob_array(array, column, array_out, schema_out, error_message),
         Err(error) => handle_error(&error, error_message),
     }
 }
@@ -833,6 +1087,18 @@ pub unsafe extern "C" fn lancedb_free_arrow_schema(
 ) {
     if !schema.is_null() {
         let _ = Box::from_raw(schema);
+    }
+}
+
+/// Free one Arrow C ABI array returned by a blob fetch function
+///
+/// # Safety
+/// - `array` must be a valid pointer returned by LanceDB functions
+/// - `array` must not be used after calling this function
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_arrow_array(array: *mut arrow_array::ffi::FFI_ArrowArray) {
+    if !array.is_null() {
+        let _ = Box::from_raw(array);
     }
 }
 
