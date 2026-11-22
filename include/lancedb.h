@@ -3431,6 +3431,59 @@ LanceDBError lancedb_query_select(
 );
 
 /**
+ * Reset a plain query to every non-system column
+ *
+ * This clears a projection set by lancedb_query_select() or
+ * lancedb_query_select_dynamic(). The most recent projection call wins.
+ * lancedb_query_with_row_id() still appends the `_rowid` metadata column.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_select_all(
+    LanceDBQuery* query,
+    char** error_message
+);
+
+/**
+ * Set an expression-based column projection for query
+ *
+ * Each pair adds one output column: names[i] is the output name and
+ * expressions[i] is an SQL expression over the table columns. Columns are
+ * returned in the given order, which may differ from the table order. The names
+ * and expressions are copied; the arrays may be released after the call.
+ *
+ * A zero num_columns selects no columns. Both arrays must still be non-NULL.
+ * Calling this function replaces a projection from lancedb_query_select() or
+ * lancedb_query_select_all(), and a later call to either of those replaces this
+ * projection.
+ *
+ * The SDK evaluates the expressions and decides whether a backend supports
+ * dynamic projection. An unsupported backend's SDK error is returned unchanged.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param names - array of num_columns output column names
+ * @param expressions - array of num_columns SQL expressions
+ * @param num_columns - number of entries in each array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_select_dynamic(
+    LanceDBQuery* query,
+    const char* const* names,
+    const char* const* expressions,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
  * Ask a plain query to return the `_rowid` metadata column
  *
  * This applies to ordinary scans and standalone full-text searches built with
@@ -3605,6 +3658,60 @@ LanceDBError lancedb_vector_query_select(
 );
 
 /**
+ * Reset a vector query to every non-system column
+ *
+ * This clears a projection set by lancedb_vector_query_select() or
+ * lancedb_vector_query_select_dynamic(). The most recent projection call wins.
+ * lancedb_vector_query_with_row_id() still appends the `_rowid` metadata
+ * column.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_select_all(
+    LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
+ * Set an expression-based column projection for vector query
+ *
+ * Each pair adds one output column: names[i] is the output name and
+ * expressions[i] is an SQL expression over the table columns. Columns are
+ * returned in the given order, which may differ from the table order. The names
+ * and expressions are copied; the arrays may be released after the call.
+ *
+ * A zero num_columns selects no columns. Both arrays must still be non-NULL.
+ * Calling this function replaces a projection from lancedb_vector_query_select()
+ * or lancedb_vector_query_select_all(), and a later call to either of those
+ * replaces this projection.
+ *
+ * The SDK evaluates the expressions and decides whether a backend supports
+ * dynamic projection. An unsupported backend's SDK error is returned unchanged.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param names - array of num_columns output column names
+ * @param expressions - array of num_columns SQL expressions
+ * @param num_columns - number of entries in each array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_select_dynamic(
+    LanceDBVectorQuery* query,
+    const char* const* names,
+    const char* const* expressions,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
  * Ask a vector query to return the `_rowid` metadata column
  *
  * This also applies to a hybrid vector plus full-text query. The UInt64
@@ -3708,8 +3815,12 @@ LanceDBError lancedb_vector_query_where_filter(
  * that text column; embedded LanceDB can also scan it without an index, while
  * an index is recommended for larger tables.
  *
- * Embedded LanceDB does not support lancedb_vector_query_explain_plan() for a
- * query with both nearest and full-text search. Execute the query instead.
+ * Embedded LanceDB executes this hybrid query as two searches and fuses their
+ * results. EXPLAIN, output schema inspection, and ANALYZE need a single SDK
+ * plan, so lancedb_vector_query_explain_plan(),
+ * lancedb_vector_query_output_schema() and
+ * lancedb_vector_query_analyze_plan() may return the SDK's unsupported-shape
+ * error. Execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
@@ -3964,6 +4075,35 @@ LanceDBError lancedb_vector_query_ef(
 );
 
 /**
+ * Get the output schema of a query
+ *
+ * The schema comes from the same configured query that
+ * lancedb_query_execute() would run, so a dynamic projection's aliases, types
+ * and order are visible before execution. The query is not consumed. The SDK
+ * decides how a backend resolves the plan; an Enterprise table may send the
+ * SDK's `/query/` request and read the schema from the returned stream.
+ *
+ * On entry, *schema_out and the error message are cleared. On success,
+ * *schema_out holds an owned Arrow C Data schema; release it with
+ * lancedb_free_arrow_schema(). On failure it stays NULL and the error message is
+ * set when requested. A schema that the C data interface cannot represent
+ * returns LANCEDB_ARROW with the conversion detail.
+ *
+ * @param query - pointer to LanceDBQuery (NOT consumed)
+ * @param schema_out - pointer to receive the Arrow schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_output_schema(
+    const LanceDBQuery* query,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Get the query execution plan without executing the query
  *
  * Returns a human-readable string describing what steps will be taken
@@ -3988,15 +4128,75 @@ LanceDBError lancedb_query_explain_plan(
 );
 
 /**
+ * Execute the query and return an analyzed plan with runtime metrics
+ *
+ * ANALYZE executes an analyzable query plan to collect runtime metrics. It
+ * reads the same data and has the same side effects as execution while
+ * returning no rows. The query is not consumed and can still be executed.
+ *
+ * On entry, *plan_out and the error message are cleared. On success, *plan_out
+ * holds a NUL-terminated plan string; release it with lancedb_free_string(). On
+ * failure it stays NULL and the error message is set when requested.
+ *
+ * @param query - pointer to LanceDBQuery (NOT consumed)
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_analyze_plan(
+    const LanceDBQuery* query,
+    char** plan_out,
+    char** error_message
+);
+
+/**
+ * Get the output schema of a vector query
+ *
+ * The schema comes from the same configured query that
+ * lancedb_vector_query_execute() would run, so a dynamic projection's aliases,
+ * types and order are visible before execution. The query is not consumed. The
+ * SDK decides how a backend resolves the plan; an Enterprise table may send the
+ * SDK's `/query/` request and read the schema from the returned stream.
+ *
+ * Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+ * two searches and fuses their results. Output schema inspection requires a
+ * single SDK plan, so it may return the same unsupported hybrid error as
+ * lancedb_vector_query_explain_plan().
+ *
+ * On entry, *schema_out and the error message are cleared. On success,
+ * *schema_out holds an owned Arrow C Data schema; release it with
+ * lancedb_free_arrow_schema(). On failure it stays NULL and the error message is
+ * set when requested. A schema that the C data interface cannot represent
+ * returns LANCEDB_ARROW with the conversion detail.
+ *
+ * @param query - pointer to LanceDBVectorQuery (NOT consumed)
+ * @param schema_out - pointer to receive the Arrow schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_output_schema(
+    const LanceDBVectorQuery* query,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Get the vector query execution plan without executing the query
  *
  * Returns a human-readable string describing what steps will be taken
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
  *
- * Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
- * full-text search at plan time with the SDK's unsupported-shape error because
- * one scanner cannot combine them. That is an SDK limitation, not a C-side
+ * Embedded LanceDB executes a hybrid query that combines nearest-neighbour and
+ * full-text search as two searches and fuses their results. EXPLAIN requires a
+ * single SDK plan, so embedded LanceDB rejects that hybrid at plan time with
+ * the SDK's unsupported-shape error. That is an SDK limitation, not a C-side
  * argument error; execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
@@ -4012,6 +4212,36 @@ LanceDBError lancedb_query_explain_plan(
 LanceDBError lancedb_vector_query_explain_plan(
     const LanceDBVectorQuery* query,
     bool verbose,
+    char** plan_out,
+    char** error_message
+);
+
+/**
+ * Execute the vector query and return an analyzed plan with runtime metrics
+ *
+ * ANALYZE executes an analyzable query plan to collect runtime metrics. It
+ * reads the same data and has the same side effects as execution while
+ * returning no rows. The query is not consumed and can still be executed.
+ *
+ * Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+ * two searches and fuses their results. ANALYZE requires one analyzable SDK
+ * plan, so it may return the same unsupported hybrid error as
+ * lancedb_vector_query_explain_plan().
+ *
+ * On entry, *plan_out and the error message are cleared. On success, *plan_out
+ * holds a NUL-terminated plan string; release it with lancedb_free_string(). On
+ * failure it stays NULL and the error message is set when requested.
+ *
+ * @param query - pointer to LanceDBVectorQuery (NOT consumed)
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_analyze_plan(
+    const LanceDBVectorQuery* query,
     char** plan_out,
     char** error_message
 );
