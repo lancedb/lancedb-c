@@ -743,27 +743,31 @@ typedef enum {
  *
  * index_cache_size and version are read only when their set_fields bit is set.
  * Setting the bit selects the value, including zero, instead of treating zero as
- * omitted. managed_versioning is also read only when its bit is set: 0 selects
- * false and 1 selects true; every other value is rejected. Leaving the bit unset
- * passes no managed-versioning preference.
+ * omitted. The SDK still owns precedence: an embedded open attaches the
+ * connection's Session to the dataset builder, and that Session supplies the
+ * effective index cache capacity. An explicit index_cache_size, including zero,
+ * is therefore forwarded but does not resize or disable the Session's cache.
+ * managed_versioning is also read only when its bit is set: 0 selects false and
+ * 1 selects true; every other value is rejected. Leaving the bit unset passes no
+ * managed-versioning preference.
  *
  * The C layer forwards these options to the SDK unchanged. The SDK decides which
  * backend accepts them and may resolve values from the backend. At the pinned
  * SDK version:
  * - An embedded listing root table uses location in place of the derived table
  *   path, and per-table storage options override connection options on the same
- *   key. index_cache_size applies only when the SDK open request has no other
- *   read parameters. Per-table storage options create such parameters, and so
- *   do connection-level storage options; in either case the separate cache size
- *   is ignored. version selects a read-only detached snapshot.
- *   managed_versioning is forwarded, but a plain listing connection has no
- *   namespace client, so it does not enable namespace-managed commits.
+ *   key. index_cache_size follows the Session precedence above, so the
+ *   connection Session's current effective capacity remains in use. version
+ *   selects a read-only detached snapshot. managed_versioning is forwarded, but
+ *   a plain listing connection has no namespace client, so it does not enable
+ *   namespace-managed commits.
  * - An embedded namespace table (a non-empty namespace_path) gets its location,
  *   namespace storage options and managed-versioning state from the namespace.
- *   The SDK does not apply the request location, index_cache_size or
- *   managed_versioning value to that open. Per-table storage options are passed
- *   through, but namespace values win on the same key. version and branch still
- *   compose in the SDK after the namespace table is opened.
+ *   The SDK does not apply the request location or managed_versioning value to
+ *   that open, and index_cache_size follows the Session precedence above.
+ *   Per-table storage options are passed through, but namespace values win on
+ *   the same key. version and branch still compose in the SDK after the
+ *   namespace table is opened.
  * - An Enterprise connection rejects index_cache_size, per-table storage
  *   options, location and managed_versioning (whether true or false) with
  *   LANCEDB_NOT_SUPPORTED. namespace_path is part of the table identifier, and

@@ -115,7 +115,9 @@ pub struct LanceDBOpenTableOptions {
     pub storage_values: *const *const c_char,
     /// Number of per-table storage options
     pub storage_count: usize,
-    /// Index cache size in entries; read only when its bit is set
+    /// Index cache size in entries; read only when its bit is set. The SDK
+    /// forwards it, but an attached connection Session keeps its own effective
+    /// capacity.
     pub index_cache_size: u32,
     /// Table version; read only when its bit is set
     pub version: u64,

@@ -1063,6 +1063,19 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
     lancedb_table_free(opened);
   }
 
+  SECTION("Unused initialized fields do not change the latest open") {
+    LanceDBOpenTableOptions options{};
+    options.version = 1;
+    options.managed_versioning = 2;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+  }
+
   SECTION("A selected version opens a read-only snapshot") {
     LanceDBOpenTableOptions options{};
     options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
@@ -1224,6 +1237,24 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
         == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(opened == nullptr);
     REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+  }
+
+  SECTION("An invalid scheduler_error_mode is diagnosed by the SDK") {
+    const char* keys[] = {"scheduler_error_mode"};
+    const char* values[] = {"invalid"};
+    LanceDBOpenTableOptions options{};
+    options.storage_keys = keys;
+    options.storage_values = values;
+    options.storage_count = 1;
+
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("scheduler_error_mode") != std::string::npos);
     lancedb_free_string(error_message);
     error_message = nullptr;
   }
