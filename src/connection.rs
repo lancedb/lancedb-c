@@ -410,7 +410,7 @@ unsafe fn single_namespace_from_c(
 ///
 /// An empty input returns a NULL array, matching the empty list contract of the
 /// public API. Returns NULL on allocation or interior-NUL failure.
-unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
+pub(crate) unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
     let count = values.len();
     if count == 0 {
         return Some(ptr::null_mut());
@@ -433,7 +433,7 @@ unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
 }
 
 /// Free an array returned by `c_string_array`.
-unsafe fn free_c_string_array(values: *mut *mut c_char, count: usize) {
+pub(crate) unsafe fn free_c_string_array(values: *mut *mut c_char, count: usize) {
     if values.is_null() {
         return;
     }
