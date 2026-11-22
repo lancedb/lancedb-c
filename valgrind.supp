@@ -178,3 +178,37 @@
    ...
    fun:*BLOB_V2_DESC*
 }
+
+# Rust 1.95 inlines the LazyLock closure symbols for the Lance blob v2 global
+# schema fields into core::ops::function::FnOnce::call_once, so the
+# *BLOB_V2_DESC* frame above is no longer visible. These stacks still come from
+# FileReader::decode_schema -> normalize_blob_footer_schema -> BLOB_V2_DESC_*
+# initialization. Match only the nested LazyLock/Field construction, not
+# arbitrary work in decode_schema.
+{
+   lance_blob_v2_global_schema_fields_inlined_lazy
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:*Once*call_once_force*
+   ...
+   fun:*Once*call_once_force*
+   ...
+   fun:*FileReader*decode_schema*
+   ...
+}
+
+{
+   lance_blob_v2_global_schema_fields_inlined_field
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:*Field*try_from*
+   ...
+   fun:*Once*call_once_force*
+   ...
+   fun:*FileReader*decode_schema*
+   ...
+}
