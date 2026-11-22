@@ -1067,6 +1067,28 @@ LanceDBError lancedb_table_count_rows_with_status(
 );
 
 /**
+ * Count rows in table matching an optional SQL filter, preserving failures
+ *
+ * @param table - pointer to LanceDBTable
+ * @param filter - optional SQL predicate; NULL counts every row. A non-NULL
+ *                 string, including an empty one, is passed to the SDK unchanged
+ * @param count_out - pointer to receive the matching row count
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, count_out is set to the number of matching rows, which is 0 when
+ * none match. On failure, count_out is left unchanged.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_count_rows_filtered(
+    const LanceDBTable* table,
+    const char* filter,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
  * Statistics on the number of rows in table fragments
  */
 typedef struct {
@@ -1229,6 +1251,36 @@ LanceDBError lancedb_table_merge_insert_with_result(
 );
 
 /**
+ * Update option fields of LanceDBUpdateOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB default, so an omitted retry stays distinct from an explicit
+ * zero retry budget.
+ */
+typedef enum {
+    LANCEDB_UPDATE_RETRIES = 1 << 0
+} LanceDBUpdateField;
+
+/**
+ * Options for lancedb_table_update_with_options
+ *
+ * set_fields selects the fields that are read; every other field keeps the SDK
+ * default. An unknown set_fields bit is rejected with LANCEDB_INVALID_ARGUMENT
+ * before the update starts.
+ *
+ * retries is the per-call remote retry budget. Embedded tables ignore it. Leave
+ * the LANCEDB_UPDATE_RETRIES bit unset to keep the SDK default; set it with 0 to
+ * disable retries explicitly, or with a positive value to allow that many.
+ * Ambiguous write results are never replayed.
+ *
+ * The options struct is borrowed for the duration of the call and is not consumed.
+ */
+typedef struct {
+    uint32_t set_fields;  // Bitmask of LanceDBUpdateField values (0 = defaults)
+    uint8_t retries;      // Per-call remote retry budget; 0 disables retries
+} LanceDBUpdateOptions;
+
+/**
  * Result of an update operation
  *
  * Embedded tables report the actual affected rows and commit version. A
@@ -1278,6 +1330,53 @@ LanceDBError lancedb_table_update(
 );
 
 /**
+ * Update rows in a table using SQL expressions, with options and an optional result
+ *
+ * Assignments are paired and evaluated exactly like lancedb_table_update(). The
+ * options are borrowed for the call and are not consumed. A NULL options pointer
+ * uses the SDK defaults. result_out may be NULL when the caller does not need the
+ * affected rows or commit version; when non-NULL, it is written only after a
+ * successful commit and is left unchanged on failure.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns - array of column names to update
+ * @param expressions - array of SQL expressions, one per column
+ * @param num_assignments - number of entries in columns and expressions (must be > 0)
+ * @param predicate - SQL predicate selecting the rows to update; NULL or an empty
+ *                    string updates every row
+ * @param options - pointer to LanceDBUpdateOptions, or NULL for the SDK defaults
+ * @param result_out - optional pointer to receive the affected rows and committed
+ *                     version; NULL discards the result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_update_with_options(
+    const LanceDBTable* table,
+    const char* const* columns,
+    const char* const* expressions,
+    size_t num_assignments,
+    const char* predicate,
+    const LanceDBUpdateOptions* options,
+    LanceDBUpdateResult* result_out,
+    char** error_message
+);
+
+/**
+ * Result of a delete operation
+ *
+ * Embedded tables report the number of deleted rows and the commit version. A
+ * legacy remote server that returns an empty delete response can report zero
+ * for either field, which means unknown there rather than a literal zero.
+ */
+typedef struct {
+    uint64_t num_deleted_rows;  // Rows deleted; 0 may mean unknown on legacy remote responses
+    uint64_t version;           // Committed table version; 0 may mean unknown on legacy remote responses
+} LanceDBDeleteResult;
+
+/**
  * Delete rows from table based on predicate
  *
  * @param table - pointer to LanceDBTable
@@ -1295,6 +1394,29 @@ LanceDBError lancedb_table_delete(
 );
 
 /**
+ * Delete rows from table based on predicate, with an optional SDK result
+ *
+ * The predicate and error reporting follow lancedb_table_delete(). When result_out
+ * is non-NULL it receives the number of deleted rows and the commit version after
+ * a successful delete; it is left unchanged on failure. NULL discards the result.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param predicate - null-terminated C string containing SQL WHERE clause
+ * @param result_out - optional pointer to receive the deleted rows and committed version
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_delete_with_result(
+    const LanceDBTable* table,
+    const char* predicate,
+    LanceDBDeleteResult* result_out,
+    char** error_message
+);
+
+/**
  * Delete rows from table using a DataFusion expression
  *
  * @param table - pointer to LanceDBTable
@@ -1308,6 +1430,30 @@ LanceDBError lancedb_table_delete(
 LanceDBError lancedb_table_df_delete(
     const LanceDBTable* table,
     LanceDBExpr* expr,
+    char** error_message
+);
+
+/**
+ * Delete rows from table using a DataFusion expression, with an optional SDK result
+ *
+ * The expression is consumed on every path, exactly like lancedb_table_df_delete().
+ * When result_out is non-NULL it receives the number of deleted rows and the commit
+ * version after a successful delete; it is left unchanged on failure. NULL discards
+ * the result.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param expr - pointer to LanceDBExpr (consumed by this function; do not use or free after calling)
+ * @param result_out - optional pointer to receive the deleted rows and committed version
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_df_delete_with_result(
+    const LanceDBTable* table,
+    LanceDBExpr* expr,
+    LanceDBDeleteResult* result_out,
     char** error_message
 );
 

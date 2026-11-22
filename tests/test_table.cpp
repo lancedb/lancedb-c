@@ -337,6 +337,76 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - status-returning count and ver
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - filtered count", "[table]") {
+  const std::string table_name = "test_table_filtered_count";
+  constexpr auto row_num = 6;
+  LanceDBTable* table = create_table_with_data(table_name, row_num, 0);
+
+  SECTION("A NULL filter counts every row") {
+    size_t count = 42;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_filtered(table, nullptr, &count, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == row_num);
+    REQUIRE(count == lancedb_table_count_rows(table));
+  }
+
+  SECTION("An SQL filter counts only matching rows") {
+    size_t count = 42;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_filtered(
+        table, "key IN ('key_1', 'key_4')", &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 2);
+
+    // The old getters keep counting every row.
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+  }
+
+  SECTION("An invalid filter keeps the previous count") {
+    const auto initial_version = lancedb_table_version(table);
+    size_t count = 42;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_filtered(
+        table, "no_such_column = 1", &count, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
+    lancedb_free_string(error_message);
+    REQUIRE(count == 42);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+  }
+
+  SECTION("Invalid input is rejected and keeps the previous count") {
+    size_t count = 42;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_filtered(nullptr, nullptr, &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(count == 42);
+
+    REQUIRE(lancedb_table_count_rows_filtered(table, nullptr, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_count_rows_filtered(table, "\xff\xfe", &count, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    REQUIRE(count == 42);
+  }
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
   // Create a test table
   const std::string table_name = "test_add_table";
@@ -1533,10 +1603,105 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Update", "[table]") {
     REQUIRE(version_value(table, "key_2") == 12);
   }
 
+  SECTION("Update with options reports an explicit zero retry budget") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 3"};
+    LanceDBUpdateOptions options = {
+      .set_fields = LANCEDB_UPDATE_RETRIES,
+      .retries = 0,
+    };
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update_with_options(
+        table, columns, expressions, 1, "key = 'key_1'", &options, &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 1);
+    REQUIRE(update_result.version == initial_version + 1);
+    REQUIRE(update_result.version == lancedb_table_version(table));
+
+    REQUIRE(version_value(table, "key_0") == 10);
+    REQUIRE(version_value(table, "key_1") == 13);
+    REQUIRE(version_value(table, "key_2") == 10);
+  }
+
+  SECTION("Update with a positive retry budget succeeds") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 2"};
+    LanceDBUpdateOptions options = {
+      .set_fields = LANCEDB_UPDATE_RETRIES,
+      .retries = 3,
+    };
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update_with_options(
+        table, columns, expressions, 1, "key = 'key_2'", &options, &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 1);
+    REQUIRE(update_result.version == initial_version + 1);
+    REQUIRE(version_value(table, "key_2") == 12);
+  }
+
+  SECTION("Update with omitted options and a null result succeeds") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 4"};
+
+    REQUIRE(lancedb_table_update_with_options(
+        table, columns, expressions, 1, nullptr, nullptr, nullptr, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_version(table) == initial_version + 1);
+
+    REQUIRE(version_value(table, "key_0") == 14);
+    REQUIRE(version_value(table, "key_1") == 14);
+    REQUIRE(version_value(table, "key_2") == 14);
+  }
+
+  SECTION("Update ignores a retry value whose option bit is unset") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 5"};
+    LanceDBUpdateOptions options = {
+      .set_fields = 0,
+      .retries = 7,
+    };
+    LanceDBUpdateResult update_result = {};
+
+    REQUIRE(lancedb_table_update_with_options(
+        table, columns, expressions, 1, nullptr, &options, &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 3);
+    REQUIRE(update_result.version == initial_version + 1);
+    REQUIRE(version_value(table, "key_0") == 15);
+  }
+
+  SECTION("Update with an unknown option mask is rejected") {
+    const char* columns[] = {"version"};
+    const char* expressions[] = {"version + 1"};
+    LanceDBUpdateOptions options = {
+      .set_fields = 1U << 31,
+      .retries = 0,
+    };
+    LanceDBUpdateResult update_result = {123, 456};
+
+    REQUIRE(lancedb_table_update_with_options(
+        table, columns, expressions, 1, nullptr, &options, &update_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("unknown update option bits") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(update_result.rows_updated == 123);
+    REQUIRE(update_result.version == 456);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+    REQUIRE(version_value(table, "key_0") == 10);
+  }
+
   SECTION("Invalid expression preserves the SDK error") {
     const char* columns[] = {"version"};
     const char* expressions[] = {"no_such_column + 1"};
-    LanceDBUpdateResult update_result = {};
+    LanceDBUpdateResult update_result = {123, 456};
 
     REQUIRE(lancedb_table_update(
         table, columns, expressions, 1, "key = 'key_1'", &update_result, &error_message)
@@ -1545,6 +1710,9 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Update", "[table]") {
     REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
     lancedb_free_string(error_message);
 
+    // The old entry point keeps its result unchanged when the SDK rejects the update.
+    REQUIRE(update_result.rows_updated == 123);
+    REQUIRE(update_result.version == 456);
     REQUIRE(lancedb_table_version(table) == initial_version);
     REQUIRE(version_value(table, "key_0") == 10);
     REQUIRE(version_value(table, "key_1") == 10);
@@ -1677,17 +1845,34 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Update evaluates against the ori
   // the original row rather than the batch changed by the other assignment.
   const char* columns[] = {"a", "b"};
   const char* expressions[] = {"b", "a"};
-  LanceDBUpdateResult update_result = {};
-  REQUIRE(lancedb_table_update(
-      table, columns, expressions, 2, nullptr, &update_result, &error_message)
-      == LANCEDB_SUCCESS);
-  REQUIRE(error_message == nullptr);
-  REQUIRE(update_result.rows_updated == 1);
-  REQUIRE(update_result.version != 0);
 
-  const auto values = pair_values(table);
-  REQUIRE(values.first == 2);
-  REQUIRE(values.second == 1);
+  SECTION("The old update entry evaluates against the original row") {
+    LanceDBUpdateResult update_result = {};
+    REQUIRE(lancedb_table_update(
+        table, columns, expressions, 2, nullptr, &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 1);
+    REQUIRE(update_result.version != 0);
+
+    const auto values = pair_values(table);
+    REQUIRE(values.first == 2);
+    REQUIRE(values.second == 1);
+  }
+
+  SECTION("The options entry evaluates against the original row") {
+    LanceDBUpdateResult update_result = {};
+    REQUIRE(lancedb_table_update_with_options(
+        table, columns, expressions, 2, nullptr, nullptr, &update_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(update_result.rows_updated == 1);
+    REQUIRE(update_result.version != 0);
+
+    const auto values = pair_values(table);
+    REQUIRE(values.first == 2);
+    REQUIRE(values.second == 1);
+  }
 
   lancedb_table_free(table);
 }
@@ -1709,6 +1894,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   REQUIRE(lancedb_table_count_rows(table) == row_num);
+  const auto initial_version = lancedb_table_version(table);
 
   SECTION("Delete row matching predicate") {
     char* error_message = nullptr;
@@ -1754,6 +1940,69 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_table_count_rows(table) == 0);
+  }
+
+  SECTION("Delete with a result reports rows and the commit") {
+    char* error_message = nullptr;
+    LanceDBDeleteResult delete_result = {123, 456};
+    LanceDBError result = lancedb_table_delete_with_result(
+        table, "key IN ('key_0', 'key_1', 'key_2')", &delete_result, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(delete_result.num_deleted_rows == 3);
+    REQUIRE(delete_result.version == initial_version + 1);
+    REQUIRE(delete_result.version == lancedb_table_version(table));
+    REQUIRE(lancedb_table_count_rows(table) == row_num - 3);
+  }
+
+  SECTION("Delete with a null result succeeds") {
+    char* error_message = nullptr;
+    LanceDBError result = lancedb_table_delete_with_result(
+        table, "key = 'key_0'", nullptr, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == row_num - 1);
+  }
+
+  SECTION("Delete with a result leaves it unchanged on failure") {
+    char* error_message = nullptr;
+    LanceDBDeleteResult delete_result = {123, 456};
+
+    REQUIRE(lancedb_table_delete_with_result(
+        nullptr, "key = 'key_0'", &delete_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(delete_result.num_deleted_rows == 123);
+    REQUIRE(delete_result.version == 456);
+
+    REQUIRE(lancedb_table_delete_with_result(
+        table, nullptr, &delete_result, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(delete_result.num_deleted_rows == 123);
+    REQUIRE(delete_result.version == 456);
+
+    REQUIRE(lancedb_table_delete_with_result(
+        table, "\xff\xfe", &delete_result, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(delete_result.num_deleted_rows == 123);
+    REQUIRE(delete_result.version == 456);
+
+    REQUIRE(lancedb_table_delete_with_result(
+        table, "unknown = 'key_0'", &delete_result, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    REQUIRE(delete_result.num_deleted_rows == 123);
+    REQUIRE(delete_result.version == 456);
+    REQUIRE(lancedb_table_count_rows(table) == row_num);
+    REQUIRE(lancedb_table_version(table) == initial_version);
   }
 
   SECTION("Delete with unknown column should fail") {
@@ -1817,6 +2066,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table DF Delete", "[table]") {
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   REQUIRE(lancedb_table_count_rows(table) == row_num);
+  const auto initial_version = lancedb_table_version(table);
 
   SECTION("Delete row matching expression") {
     char* error_message = nullptr;
@@ -1892,6 +2142,66 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table DF Delete", "[table]") {
     REQUIRE(result == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_table_count_rows(table) == 0);
+  }
+
+  SECTION("Delete with a result reports rows and the commit") {
+    char* error_message = nullptr;
+    LanceDBExpr* expr = lancedb_expr_binary(
+        lancedb_expr_column("key"),
+        LANCEDB_BINARY_OP_EQ,
+        lancedb_expr_literal_string("key_0"));
+    REQUIRE(expr != nullptr);
+
+    LanceDBDeleteResult delete_result = {123, 456};
+    LanceDBError result = lancedb_table_df_delete_with_result(
+        table, expr, &delete_result, &error_message);
+
+    REQUIRE(result == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(delete_result.num_deleted_rows == 1);
+    REQUIRE(delete_result.version == initial_version + 1);
+    REQUIRE(delete_result.version == lancedb_table_version(table));
+    REQUIRE(lancedb_table_count_rows(table) == row_num - 1);
+  }
+
+  SECTION("DF delete with a null result succeeds") {
+    char* error_message = nullptr;
+    LanceDBExpr* expr = lancedb_expr_binary(
+        lancedb_expr_column("key"),
+        LANCEDB_BINARY_OP_EQ,
+        lancedb_expr_literal_string("key_0"));
+    REQUIRE(expr != nullptr);
+
+    REQUIRE(lancedb_table_df_delete_with_result(table, expr, nullptr, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == row_num - 1);
+  }
+
+  SECTION("DF delete with a result leaves it unchanged on failure") {
+    char* error_message = nullptr;
+    LanceDBExpr* expr = lancedb_expr_binary(
+        lancedb_expr_column("key"),
+        LANCEDB_BINARY_OP_EQ,
+        lancedb_expr_literal_string("key_0"));
+    REQUIRE(expr != nullptr);
+
+    LanceDBDeleteResult delete_result = {123, 456};
+    REQUIRE(lancedb_table_df_delete_with_result(
+        nullptr, expr, &delete_result, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    REQUIRE(delete_result.num_deleted_rows == 123);
+    REQUIRE(delete_result.version == 456);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_table_df_delete_with_result(table, nullptr, &delete_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    REQUIRE(delete_result.num_deleted_rows == 123);
+    REQUIRE(delete_result.version == 456);
   }
 
   SECTION("Delete with null table should fail") {
