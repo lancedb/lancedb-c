@@ -30,7 +30,7 @@ This repository contains comprehensive C FFI bindings for LanceDB, allowing you 
 ### Prerequisites
 
 - Rust 1.95.0 or newer (`rustc` and `cargo`; the minimum declared by the locked dependency graph)
-- CMake (3.15 or later)
+- CMake (3.22 or later)
 - C++ compiler with C++20 support (gcc, clang)
 - Apache Arrow C++ library
 - pkg-config
@@ -50,6 +50,43 @@ This repository contains comprehensive C FFI bindings for LanceDB, allowing you 
    ./simple
    ./full
    ```
+
+The Boost.Asio coroutine example is optional because it needs Boost. Enable it
+with `-DBUILD_ASIO_COROUTINE_EXAMPLE=ON` in addition to `-DBUILD_EXAMPLES=ON`.
+
+### Installing and downstream discovery
+
+Install into a prefix of your choice. `GNUInstallDirs` controls the layout, so
+the library, header, pkg-config file and CMake package all follow
+`CMAKE_INSTALL_LIBDIR` and `CMAKE_INSTALL_INCLUDEDIR`:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/opt/lancedb -DCMAKE_INSTALL_LIBDIR=lib64
+cmake --build build
+cmake --install build
+```
+
+A CMake consumer then uses the installed `lancedb::lancedb` target:
+
+```cmake
+find_package(lancedb CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE lancedb::lancedb)
+```
+
+The package config and version file are installed under
+`${CMAKE_INSTALL_LIBDIR}/cmake/lancedb` and use paths relative to the installed
+prefix. pkg-config works from `${CMAKE_INSTALL_LIBDIR}/pkgconfig`:
+
+```bash
+PKG_CONFIG_PATH=/opt/lancedb/lib64/pkgconfig pkg-config --cflags --libs lancedb
+```
+
+On Linux the installed shared library records a SONAME derived from the binding
+version: before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the
+major version is. The unversioned `liblancedb.so` linker name remains available.
+On macOS the library records `@rpath/liblancedb.dylib`. Prebuilt packages keep
+the same metadata and package the unversioned library path used by consumers.
 
 ### Manual Build Process
 

@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+if(NOT TARGET lancedb::lancedb)
+  if(@LANCEDB_CONFIG_SHARED@)
+    add_library(lancedb::lancedb SHARED IMPORTED)
+    if(WIN32)
+      set_target_properties(lancedb::lancedb PROPERTIES
+        IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_BINDIR@/@LANCEDB_CONFIG_SHARED_LIBRARY@"
+        IMPORTED_IMPLIB "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@LANCEDB_CONFIG_IMPORT_LIBRARY@"
+      )
+    else()
+      set_target_properties(lancedb::lancedb PROPERTIES
+        IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@LANCEDB_CONFIG_SHARED_LIBRARY@"
+      )
+      if(APPLE)
+        set(_lancedb_shared_library "@LANCEDB_CONFIG_SHARED_LIBRARY@")
+        set_property(TARGET lancedb::lancedb PROPERTY
+          IMPORTED_SONAME "@rpath/${_lancedb_shared_library}")
+      else()
+        set_property(TARGET lancedb::lancedb PROPERTY
+          IMPORTED_SONAME "@LANCEDB_CONFIG_SHARED_LIBRARY@")
+      endif()
+    endif()
+  else()
+    add_library(lancedb::lancedb STATIC IMPORTED)
+    set_target_properties(lancedb::lancedb PROPERTIES
+      IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@LANCEDB_CONFIG_STATIC_LIBRARY@"
+    )
+  endif()
+
+  set_target_properties(lancedb::lancedb PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@"
+    INTERFACE_LINK_LIBRARIES "@LANCEDB_CONFIG_LINK_LIBRARIES@"
+  )
+endif()
+
+check_required_components(lancedb)

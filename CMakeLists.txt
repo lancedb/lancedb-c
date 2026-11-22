@@ -5,6 +5,18 @@ cmake_minimum_required(VERSION 3.22)
 include(cmake/LanceDBVersion.cmake)
 project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# The binding follows its own tag-derived SemVer line. Before 1.0 a minor
+# release may change the C ABI, so the Linux SONAME tracks major.minor. From
+# 1.0 onward the major version is the compatibility boundary.
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+  set(LANCEDB_SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+else()
+  set(LANCEDB_SOVERSION "${PROJECT_VERSION_MAJOR}")
+endif()
+
 set(LANCEDB_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
 set(LANCEDB_GENERATED_HEADER "${LANCEDB_GENERATED_INCLUDE_DIR}/lancedb.h")
 lancedb_render_header(
@@ -134,14 +146,25 @@ option(BUILD_SHARED_LIBS "Build shared library (OFF for static)" ON)
 
 set(STATIC_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}lancedb${CMAKE_STATIC_LIBRARY_SUFFIX}")
 set(SHARED_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
+set(LANCEDB_STATIC_LIBRARY_NAME "${CMAKE_STATIC_LIBRARY_PREFIX}lancedb${CMAKE_STATIC_LIBRARY_SUFFIX}")
+set(LANCEDB_SHARED_LIBRARY_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
 if(WIN32)
   set(SHARED_LIB_PATH "${RUST_TARGET_DIR}/lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(LANCEDB_SHARED_LIBRARY_NAME "lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}")
   if(MSVC)
     # Rust names its MSVC import library after the DLL: lancedb.dll.lib.
     set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}.lib")
+    set(LANCEDB_IMPORT_LIBRARY_NAME "lancedb${CMAKE_SHARED_LIBRARY_SUFFIX}.lib")
   else()
     set(IMPORT_LIB_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb${CMAKE_IMPORT_LIBRARY_SUFFIX}")
+    set(LANCEDB_IMPORT_LIBRARY_NAME "${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb${CMAKE_IMPORT_LIBRARY_SUFFIX}")
   endif()
+endif()
+
+if(WIN32 OR APPLE)
+  set(LANCEDB_INSTALLED_SHARED_LIBRARY_NAME "${LANCEDB_SHARED_LIBRARY_NAME}")
+else()
+  set(LANCEDB_INSTALLED_SHARED_LIBRARY_NAME "${LANCEDB_SHARED_LIBRARY_NAME}.${LANCEDB_SOVERSION}")
 endif()
 
 if(BUILD_SHARED_LIBS)
@@ -153,6 +176,7 @@ else()
   set(LANCEDB_LIB_PATHS "${STATIC_LIB_PATH}")
 endif()
 option(BUILD_EXAMPLES "Build examples" OFF)
+option(BUILD_ASIO_COROUTINE_EXAMPLE "Build the Boost.Asio coroutine example" OFF)
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_TESTS "Build tests" OFF)
 option(BUILD_CONSUMER_TEST "Build the standalone package consumer smoke test" OFF)
@@ -173,10 +197,44 @@ endif()
 
 include(cmake/ProbeRustNativeLibs.cmake)
 
+# Make pkg-config relocatable when the install layout is relative. The prefix
+# is derived from the .pc file location, so a staged or relocated installation
+# still reports its own directories.
+if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+  set(LANCEDB_PKGCONFIG_PREFIX "${CMAKE_INSTALL_PREFIX}")
+  set(LANCEDB_PKGCONFIG_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
+else()
+  file(RELATIVE_PATH LANCEDB_PKGCONFIG_PREFIX_REL
+    "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig"
+    "${CMAKE_INSTALL_PREFIX}")
+  set(LANCEDB_PKGCONFIG_PREFIX "\${pcfiledir}/${LANCEDB_PKGCONFIG_PREFIX_REL}")
+  set(LANCEDB_PKGCONFIG_LIBDIR "\${prefix}/${CMAKE_INSTALL_LIBDIR}")
+endif()
+if(IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+  set(LANCEDB_PKGCONFIG_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}")
+else()
+  set(LANCEDB_PKGCONFIG_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+endif()
+
 configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
+# Linker metadata is part of the built artifact, not only the release
+# workflow. Linux records the versioned SONAME and macOS records an @rpath
+# install name so local installs and prebuilt packages resolve the same way.
+set(LANCEDB_RUST_LINK_ARGS)
+if(APPLE)
+  list(APPEND LANCEDB_RUST_LINK_ARGS
+    "-C" "link-arg=-Wl,-install_name,@rpath/${LANCEDB_SHARED_LIBRARY_NAME}")
+elseif(UNIX)
+  list(APPEND LANCEDB_RUST_LINK_ARGS
+    "-C" "link-arg=-Wl,-soname,${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}")
+endif()
+
 # rust-lib target
-  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --target-dir "${CMAKE_BINARY_DIR}/target")
+set(CARGO_BUILD_COMMAND cargo rustc ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --lib --target-dir "${CMAKE_BINARY_DIR}/target")
+if(LANCEDB_RUST_LINK_ARGS)
+  list(APPEND CARGO_BUILD_COMMAND -- ${LANCEDB_RUST_LINK_ARGS})
+endif()
 # The resolved version changes the embedded runtime string. Pass it as a
 # private build variable so a cached Cargo build rebuilds when it changes.
 set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env "LANCEDB_BUILD_VERSION=${LANCEDB_VERSION}" ${CARGO_BUILD_COMMAND})
@@ -298,26 +356,32 @@ if(BUILD_EXAMPLES)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
-  # asio spawn coroutine example
-  add_executable(asio_coroutine examples/asio_coroutine.cpp)
-  find_package(Boost REQUIRED COMPONENTS coroutine context)
-  target_link_libraries(asio_coroutine
-    lancedb
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-    Boost::coroutine
-    Boost::context
-  )
-  target_include_directories(asio_coroutine
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-  )
-  target_compile_options(asio_coroutine PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(asio_coroutine PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
+  set(LANCEDB_EXAMPLE_TARGETS simple full s3 lancedb_registry)
 
-  add_custom_target(examples DEPENDS simple full s3 lancedb_registry asio_coroutine)
+  # asio spawn coroutine example. Boost is optional, so it has its own option
+  # instead of making every BUILD_EXAMPLES build install Boost.
+  if(BUILD_ASIO_COROUTINE_EXAMPLE)
+    find_package(Boost REQUIRED COMPONENTS coroutine context)
+    add_executable(asio_coroutine examples/asio_coroutine.cpp)
+    target_link_libraries(asio_coroutine
+      lancedb
+      Threads::Threads
+      ${ARROW_LIBRARIES}
+      Boost::coroutine
+      Boost::context
+    )
+    target_include_directories(asio_coroutine
+      PRIVATE ${ARROW_INCLUDE_DIRS}
+      PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
+    )
+    target_compile_options(asio_coroutine PRIVATE ${ARROW_CFLAGS_OTHER})
+    set_target_properties(asio_coroutine PROPERTIES
+      BUILD_RPATH ${RUST_TARGET_DIR}
+    )
+    list(APPEND LANCEDB_EXAMPLE_TARGETS asio_coroutine)
+  endif()
+
+  add_custom_target(examples DEPENDS ${LANCEDB_EXAMPLE_TARGETS})
 endif()
 
 if(BUILD_DOCS)
@@ -948,18 +1012,96 @@ add_custom_target(check-abi
 )
 
 # Install
+set(LANCEDB_CONFIG_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/lancedb")
+set(LANCEDB_CONFIG_SHARED ${BUILD_SHARED_LIBS})
 if(BUILD_SHARED_LIBS)
+  set(LANCEDB_CONFIG_SHARED_LIBRARY "${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}")
   if(WIN32)
-    install(FILES "${SHARED_LIB_PATH}" DESTINATION bin)
-    install(FILES "${IMPORT_LIB_PATH}" DESTINATION lib)
-  else()
-    install(FILES "${SHARED_LIB_PATH}" DESTINATION lib)
+    set(LANCEDB_CONFIG_IMPORT_LIBRARY "${LANCEDB_IMPORT_LIBRARY_NAME}")
   endif()
 else()
-  install(FILES "${STATIC_LIB_PATH}" DESTINATION lib)
+  set(LANCEDB_CONFIG_STATIC_LIBRARY "${LANCEDB_STATIC_LIBRARY_NAME}")
 endif()
-install(FILES "${LANCEDB_GENERATED_HEADER}" DESTINATION include)
-install(FILES "${CMAKE_BINARY_DIR}/lancedb.pc" DESTINATION lib/pkgconfig)
+set(LANCEDB_CONFIG_LINK_LIBRARIES "Threads::Threads")
+if(NOT BUILD_SHARED_LIBS AND LANCEDB_NATIVE_STATIC_LIBS)
+  list(APPEND LANCEDB_CONFIG_LINK_LIBRARIES ${LANCEDB_NATIVE_STATIC_LIBS})
+endif()
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/lancedbConfig.cmake.in"
+  "${CMAKE_BINARY_DIR}/lancedbConfig.cmake"
+  INSTALL_DESTINATION "${LANCEDB_CONFIG_INSTALL_CMAKEDIR}"
+  PATH_VARS CMAKE_INSTALL_BINDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR
+)
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+  set(LANCEDB_CONFIG_VERSION_COMPATIBILITY SameMinorVersion)
+else()
+  set(LANCEDB_CONFIG_VERSION_COMPATIBILITY SameMajorVersion)
+endif()
+write_basic_package_version_file(
+  "${CMAKE_BINARY_DIR}/lancedbConfigVersion.cmake"
+  VERSION "${LANCEDB_VERSION}"
+  COMPATIBILITY "${LANCEDB_CONFIG_VERSION_COMPATIBILITY}"
+)
+
+if(BUILD_SHARED_LIBS)
+  if(WIN32)
+    install(FILES "${SHARED_LIB_PATH}"
+      DESTINATION "${CMAKE_INSTALL_BINDIR}"
+      RENAME "${LANCEDB_SHARED_LIBRARY_NAME}"
+      PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    install(FILES "${IMPORT_LIB_PATH}"
+      DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+      RENAME "${LANCEDB_IMPORT_LIBRARY_NAME}")
+  elseif(APPLE)
+    install(FILES "${SHARED_LIB_PATH}"
+      DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+      RENAME "${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}"
+      PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+  else()
+    install(FILES "${SHARED_LIB_PATH}"
+      DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+      RENAME "${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}"
+      PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+
+    # Keep the unversioned linker name used by -llancedb and existing package
+    # consumers, while the SONAME points at the versioned file.
+    if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+      set(LANCEDB_INSTALL_LIBDIR_EXPR "\$ENV{DESTDIR}${CMAKE_INSTALL_LIBDIR}")
+    else()
+      set(LANCEDB_INSTALL_LIBDIR_EXPR "\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
+    endif()
+    install(CODE "
+      set(_lancedb_libdir \"${LANCEDB_INSTALL_LIBDIR_EXPR}\")
+      file(REMOVE \"\${_lancedb_libdir}/${LANCEDB_SHARED_LIBRARY_NAME}\")
+      file(CREATE_LINK \"${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}\" \"\${_lancedb_libdir}/${LANCEDB_SHARED_LIBRARY_NAME}\" SYMBOLIC)
+    ")
+  endif()
+else()
+  install(FILES "${STATIC_LIB_PATH}"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RENAME "${LANCEDB_STATIC_LIBRARY_NAME}")
+endif()
+install(FILES "${LANCEDB_GENERATED_HEADER}" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(FILES "${CMAKE_BINARY_DIR}/lancedb.pc"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+install(FILES
+  "${CMAKE_BINARY_DIR}/lancedbConfig.cmake"
+  "${CMAKE_BINARY_DIR}/lancedbConfigVersion.cmake"
+  DESTINATION "${LANCEDB_CONFIG_INSTALL_CMAKEDIR}")
+
+# Build and run small installed-package consumers from the current build.
+# The script installs into a temporary prefix and uses the same C and C++
+# sources as the packaged consumers.
+add_custom_target(check-install
+  COMMAND ${PYTHON3_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/test_install.py"
+    --build-dir "${CMAKE_BINARY_DIR}"
+    --source-dir "${CMAKE_CURRENT_SOURCE_DIR}"
+    --config "$<CONFIG>"
+  DEPENDS lancedb
+  COMMENT "Checking find_package(lancedb) with installed C and C++ consumers..."
+  VERBATIM
+)
 
 message(STATUS "=== LanceDB C/C++ Bindings Configuration ===")
 message(STATUS "Version: ${LANCEDB_VERSION}")

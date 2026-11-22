@@ -1,6 +1,7 @@
-prefix=@CMAKE_INSTALL_PREFIX@
-libdir=${prefix}/lib
-includedir=${prefix}/include
+prefix=@LANCEDB_PKGCONFIG_PREFIX@
+exec_prefix=${prefix}
+libdir=@LANCEDB_PKGCONFIG_LIBDIR@
+includedir=@LANCEDB_PKGCONFIG_INCLUDEDIR@
 
 Name: lancedb
 Description: LanceDB C/C++ bindings

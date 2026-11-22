@@ -10,6 +10,7 @@ The package layout is the contract the later pure-Go loader consumes:
       include/lancedb.h
       lib/<shared library>
       lib/<import library>       (Windows only)
+      lib/<soname>               (Linux; lib/liblancedb.so is the link)
       manifest.json
       SHA256SUMS
 
@@ -34,7 +35,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from version import DEV_VERSION, parse_resolved, resolve_version
+from version import DEV_VERSION, parse_resolved, resolve_version, soversion
 
 
 SCHEMA_VERSION = 1
@@ -166,6 +167,26 @@ def copy_file(source: Path, destination: Path, mode: int) -> None:
     destination.chmod(mode)
 
 
+def library_members(target: Target, version: str) -> set[str]:
+    """Return the package-relative library members for a target.
+
+    Linux carries a versioned SONAME beside the unversioned linker name. The
+    unversioned path stays in the manifest because that is what package
+    consumers open.
+    """
+    members = {f"lib/{target.library}"}
+    if target.os == "linux":
+        members.add(f"lib/{target.library}.{soversion(version)}")
+    if target.import_library:
+        members.add(f"lib/{target.import_library}")
+    return members
+
+
+def create_symlink(link_target: str, link_path: Path) -> None:
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(link_target, link_path)
+
+
 def write_deterministic_tar(
     source_root: Path, archive: Path, file_modes: dict[str, int]
 ) -> None:
@@ -184,7 +205,15 @@ def write_deterministic_tar(
                     info.uname = ""
                     info.gname = ""
                     info.mtime = 0
-                    if path.is_dir():
+                    if path.is_symlink():
+                        if relative not in file_modes:
+                            raise SystemExit(f"no deterministic mode for package member: {relative}")
+                        if os.path.isabs(info.linkname):
+                            raise SystemExit(f"package symlink must be relative: {relative}")
+                        info.size = 0
+                        info.mode = file_modes[relative]
+                        tar.addfile(info)
+                    elif path.is_dir():
                         # Do not take directory modes from the caller's umask.
                         info.mode = 0o755
                         tar.addfile(info)
@@ -198,14 +227,37 @@ def write_deterministic_tar(
 
 def extract_tar(archive: Path, destination: Path) -> None:
     destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar.getmembers():
-            if not (member.isfile() or member.isdir()):
-                raise SystemExit(f"unsupported archive member: {member.name}")
             target = (destination / member.name).resolve()
             if target != destination and destination not in target.parents:
                 raise SystemExit(f"archive member escapes destination: {member.name}")
-            tar.extract(member, destination)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                target.chmod(member.mode & 0o777)
+            elif member.issym():
+                if os.path.isabs(member.linkname):
+                    raise SystemExit(
+                        f"archive symlink is absolute: {member.name} -> {member.linkname}"
+                    )
+                link_target = (target.parent / member.linkname).resolve()
+                if link_target != destination and destination not in link_target.parents:
+                    raise SystemExit(
+                        f"archive symlink escapes destination: {member.name} -> {member.linkname}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(member.linkname, target)
+            elif member.isfile():
+                source = tar.extractfile(member)
+                if source is None:
+                    raise SystemExit(f"cannot read archive member: {member.name}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                target.chmod(member.mode & 0o777)
+            else:
+                raise SystemExit(f"unsupported archive member: {member.name}")
 
 
 def package_manifest(target: Target, commit: str, version: str) -> dict:
@@ -252,6 +304,12 @@ def create_package(args: argparse.Namespace) -> None:
         (package_root / "include").mkdir(parents=True, exist_ok=True)
         (package_root / "include" / "lancedb.h").write_bytes(header)
         copy_file(required_libraries[0], package_root / "lib" / target.library, 0o755)
+        if target.os == "linux":
+            versioned_library = f"{target.library}.{soversion(version)}"
+            (package_root / "lib" / target.library).rename(
+                package_root / "lib" / versioned_library
+            )
+            create_symlink(versioned_library, package_root / "lib" / target.library)
         if target.import_library:
             copy_file(
                 required_libraries[1],
@@ -280,6 +338,9 @@ def create_package(args: argparse.Namespace) -> None:
             "SHA256SUMS": 0o644,
             manifest["library"]: 0o755,
         }
+        if target.os == "linux":
+            file_modes[f"lib/{target.library}.{soversion(version)}"] = 0o755
+            file_modes[manifest["library"]] = 0o777
         if manifest["importLibrary"]:
             file_modes[manifest["importLibrary"]] = 0o644
 
