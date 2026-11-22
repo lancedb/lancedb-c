@@ -535,3 +535,77 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - hybrid search invalid input
     REQUIRE(lancedb_vector_query_execute(query) == nullptr);
   }
 }
+
+// The status executors and the IPC file share the same plain and vector
+// executors as the legacy entry points, so full-text and hybrid search have to
+// survive that path unchanged.
+TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text search through status and IPC",
+                 "[fts][ipc]") {
+  SECTION("the status executor keeps the plain full-text result in the file") {
+    LanceDBQuery* query = lancedb_query_new(table());
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search(query, "doc7", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(result != nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->GetFieldByName("_score") != nullptr);
+    size_t rows = 0;
+    for (const auto& batch : contents.batches) {
+      rows += static_cast<size_t>(batch->num_rows());
+    }
+    REQUIRE(rows == 1);
+
+    lancedb_ipc_buffer_free(&buffer);
+  }
+
+  SECTION("the vector status executor keeps the fused hybrid result in the file") {
+    const auto query_vector = vector_for_row(0);
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_full_text_search(query, "doc7", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_vector_query_execute_with_status(query, &result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(result != nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->GetFieldByName("_relevance_score") != nullptr);
+    size_t rows = 0;
+    for (const auto& batch : contents.batches) {
+      rows += static_cast<size_t>(batch->num_rows());
+    }
+    REQUIRE(rows == 2);
+
+    lancedb_ipc_buffer_free(&buffer);
+  }
+}
