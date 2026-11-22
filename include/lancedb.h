@@ -551,6 +551,72 @@ typedef struct {
 } LanceDBTag;
 
 /**
+ * Source kind for lancedb_table_create_branch()
+ *
+ * The kind selects which fields of LanceDBBranchSource are read. A version is
+ * resolved on the table handle's current branch, a tag is global, and a branch
+ * may be used at its head or at a pinned version.
+ */
+typedef enum {
+    LANCEDB_BRANCH_SOURCE_VERSION = 0, // Version on the current branch
+    LANCEDB_BRANCH_SOURCE_TAG = 1,     // Global tag name
+    LANCEDB_BRANCH_SOURCE_BRANCH = 2   // Branch name with an optional version
+} LanceDBBranchSourceKind;
+
+/**
+ * Source reference for lancedb_table_create_branch()
+ *
+ * Only the fields selected by kind are read; the caller may leave the other
+ * fields uninitialized.
+ * - LANCEDB_BRANCH_SOURCE_VERSION: has_version and version are read; has_version
+ *   must be nonzero. name is not read.
+ * - LANCEDB_BRANCH_SOURCE_TAG: only name is read; it is the tag name.
+ * - LANCEDB_BRANCH_SOURCE_BRANCH: name and has_version are read. version is
+ *   read only when has_version is nonzero; otherwise the branch head is used.
+ *
+ * The pointed-to name is only read during the call.
+ */
+typedef struct {
+    LanceDBBranchSourceKind kind; // Source kind; out-of-range values are rejected
+    const char* name;             // Tag or branch name; ignored for VERSION
+    int has_version;              // 1 to use version, 0 to omit it
+    uint64_t version;             // Version number when has_version is 1
+} LanceDBBranchSource;
+
+/**
+ * Optional version for lancedb_table_checkout_branch()
+ *
+ * has_version set to 0 checks out the branch head and keeps the handle
+ * writable. Any other value pins the handle to version, which makes it a
+ * read-only detached view. version is read only when has_version is nonzero;
+ * otherwise it may be left uninitialized.
+ */
+typedef struct {
+    int has_version;   // 1 to pin the checkout to version, 0 for the branch head
+    uint64_t version;  // Version number when has_version is 1
+} LanceDBBranchCheckoutOptions;
+
+/**
+ * Branch metadata returned by lancedb_table_list_branches()
+ *
+ * The array, every string and every metadata array are owned by the result.
+ * Callers must not modify or free them individually. The strings remain valid
+ * until lancedb_free_branches() is called with the same array and count.
+ * parent_version is the parent branch version the branch diverged from, and
+ * manifest_size is the parent version's manifest size in bytes at divergence.
+ */
+typedef struct {
+    const char* name;                 // Read-only branch name
+    const char* parent_branch;        // Read-only parent branch name (NULL when forked from main)
+    uint64_t parent_version;          // Version on the parent branch the branch started from
+    uint64_t created_at;              // Creation time in seconds since the Unix epoch
+    uint64_t manifest_size;           // Parent version manifest size in bytes at divergence
+    const char* const* metadata_keys;   // Read-only metadata keys, NULL when metadata_count is 0
+    const char* const* metadata_values; // Read-only metadata values, parallel to metadata_keys
+    size_t metadata_count;            // Number of metadata key-value pairs
+} LanceDBBranch;
+
+/**
  * Kind of endpoint a table delta compares
  */
 typedef enum {
@@ -3650,6 +3716,110 @@ LanceDBError lancedb_table_update_tag(
 );
 
 /**
+ * Create a new branch and return a table handle scoped to it
+ *
+ * @param table - pointer to LanceDBTable; the handle keeps its own branch
+ * @param name - null-terminated C string containing the new branch name
+ * @param source - source reference for the branch
+ * @param table_out - pointer to receive the new branch table handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The returned handle is independent of the source handle: writes through it
+ * do not change the source branch, and the source handle stays usable. The
+ * caller must free the returned handle with lancedb_table_free().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_create_branch(
+    const LanceDBTable* table,
+    const char* name,
+    const LanceDBBranchSource* source,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
+ * Check out an existing branch and return a table handle scoped to it
+ *
+ * @param table - pointer to LanceDBTable; the handle keeps its own branch
+ * @param name - null-terminated C string containing the branch name
+ * @param options - optional version selection for the checkout
+ * @param table_out - pointer to receive the new branch table handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Without a version the returned handle tracks the branch head and stays
+ * writable. With a version the returned handle is pinned to that branch
+ * version and is read-only. The original handle is not modified and stays
+ * usable. The caller must free the returned handle with lancedb_table_free().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_checkout_branch(
+    const LanceDBTable* table,
+    const char* name,
+    const LanceDBBranchCheckoutOptions* options,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
+ * List the branches of the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param branches_out - pointer to receive the read-only array of LanceDBBranch structs
+ * @param count_out - pointer to receive the number of branches
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, branches_out points to a read-only array of LanceDBBranch structs
+ * sorted by name and count_out receives its length. An empty result sets
+ * branches_out to NULL and count_out to zero. The array, its strings, and its
+ * metadata arrays are owned by the library and must not be modified or freed
+ * individually. Free the whole result with lancedb_free_branches() using the
+ * returned count.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_branches(
+    const LanceDBTable* table,
+    const LanceDBBranch** branches_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free branch metadata returned by lancedb_table_list_branches
+ *
+ * @param branches - array of LanceDBBranch structs returned by lancedb_table_list_branches
+ * @param count - number of entries, exactly as returned by lancedb_table_list_branches
+ *
+ * The library owns the array, every string and every metadata array. Callers
+ * must not modify entries or free them individually, and must pass the count
+ * returned with the array. Safe to call with a NULL pointer.
+ */
+void lancedb_free_branches(const LanceDBBranch* branches, size_t count);
+
+/**
+ * Delete a branch from the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param name - null-terminated C string containing the branch name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Existing handles are not modified by the deletion. If error_message is
+ * provided and an error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_table_delete_branch(
+    const LanceDBTable* table,
+    const char* name,
+    char** error_message
+);
+
+/**
  * Create a delta between two endpoints on the table's current branch
  *
  * @param table - pointer to LanceDBTable
@@ -3677,6 +3847,26 @@ LanceDBError lancedb_table_delta(
     const LanceDBDeltaRef* begin,
     const LanceDBDeltaRef* end,
     LanceDBTableDelta** delta_out,
+    char** error_message
+);
+
+/**
+ * Get the branch a table handle is scoped to
+ *
+ * @param table - pointer to LanceDBTable
+ * @param branch_out - pointer to receive the branch name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, branch_out is NULL when the handle is on main, or points to an
+ * allocated null-terminated branch name. The caller must free a non-NULL name
+ * with lancedb_free_string(). On failure, branch_out is set to NULL.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_current_branch(
+    const LanceDBTable* table,
+    char** branch_out,
     char** error_message
 );
 
@@ -3854,7 +4044,6 @@ LanceDBError lancedb_table_delta_deleted_row_ids(
  * Results already returned by a reader stay valid after the delta is freed.
  */
 void lancedb_table_delta_free(LanceDBTableDelta* delta);
-
 
 /**
  * Get table metadata as key-value pairs
