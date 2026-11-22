@@ -60,6 +60,14 @@ cmake --build build
 ./build/s3
 ```
 
+Those paths are for Unix single-config generators such as Makefiles or Ninja.
+With Visual Studio or Xcode, build with
+`cmake --build build --config Release` and run the executables from
+`build/Release`. On Windows the build-tree DLL stays in
+`build/target/release`; add that directory to `PATH` before running. CMake sets
+the build-tree RPATH on Unix only; installed consumers still need the loader
+setup described below.
+
 The Boost.Asio coroutine example is optional because it needs Boost. Enable it
 with `-DBUILD_ASIO_COROUTINE_EXAMPLE=ON` in addition to `-DBUILD_EXAMPLES=ON`.
 
@@ -108,13 +116,14 @@ MSVC shared consumers should use the `lancedb::lancedb` CMake target. The MSVC
 import library is named `lancedb.dll.lib`, which the conventional `-llancedb`
 pkg-config spelling does not select.
 
-On Linux, builds from this revision and releases from `v0.1.0-preview.2`
-onward record a SONAME derived from the binding version: before 1.0 the
-major.minor pair is the ABI boundary, and from 1.0 the major version is. The
-unversioned `liblancedb.so` linker name remains available. The published
-`v0.1.0-preview.1` Linux package predates this and has no SONAME. On macOS the
-library records `@rpath/liblancedb.dylib`. Prebuilt packages from preview.2 keep
-the same metadata and package the unversioned library path used by consumers.
+On Linux, CMake shared-library builds from this revision and release packages
+from `v0.1.0-preview.2` onward record a SONAME derived from the binding version:
+before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the major
+version is. The unversioned `liblancedb.so` linker name remains available. The
+published `v0.1.0-preview.1` Linux package predates this and has no SONAME.
+CMake shared-library builds and packages from preview.2 use
+`@rpath/liblancedb.dylib` on macOS. Prebuilt packages from preview.2 keep the
+same metadata and package the unversioned library path used by consumers.
 
 ### Minimal C17 program
 
@@ -176,9 +185,8 @@ If you prefer to build manually:
 
 2. **Compile the C++ simple example with Arrow:**
    ```bash
-   g++ -std=c++20 -Wall -Wextra -O2 \
+   g++ $(pkg-config --cflags arrow) -std=c++20 -Wall -Wextra -O2 \
        -I./include \
-       $(pkg-config --cflags arrow) \
        -o examples/simple examples/simple.cpp \
        -L./target/release -llancedb \
        $(pkg-config --libs arrow) \

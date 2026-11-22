@@ -52,9 +52,10 @@ Creating a table with Arrow C++
 The program below uses Arrow C++ to build one record batch, exports it through
 the Arrow C Data interface, and adds it to a new table. It is a complete C++20
 translation unit; compile it with the same compiler and Arrow installation used
-to build the examples. Link it with the installed ``lancedb::lancedb`` target or
-the pkg-config flags from the Quick Start, and use the same runtime loader
-setup.
+to build the examples. Link it against both the installed ``lancedb::lancedb``
+target and Arrow C++ (for example, ``pkg-config --libs arrow``). The lancedb
+package does not carry the Arrow C++ link dependencies. Use the same runtime
+loader setup as the Quick Start.
 
 .. code-block:: cpp
 
@@ -214,10 +215,11 @@ build takes:
        fprintf(stderr, "the index is not fully built yet\n");
    } else if (result != LANCEDB_SUCCESS) {
        fprintf(stderr, "Error: %s\n", error_message);
-       lancedb_free_string(error_message);
    }
+   lancedb_free_string(error_message);
 
-The budget is a polling budget in milliseconds and must be greater than zero: the SDK
+Free the optional message after either branch; ``lancedb_free_string()`` accepts
+NULL. The budget is a polling budget in milliseconds and must be greater than zero: the SDK
 starts a polling round while less than that much time has elapsed, sleeping one second
 between rounds, and caps the budget at two hours, rejecting a longer one with the maximum
 it accepts. It is not a wall-clock bound: the listing and statistics requests of a round,

@@ -53,8 +53,8 @@ declarations. Adding a field to an existing public struct changes its size and
 layout and is a breaking ABI change. Changing a function signature, an existing
 enum value or documented behavior also requires a major version.
 
-Builds from this revision and releases from ``v0.1.0-preview.2`` onward follow
-this shared-library metadata:
+CMake shared-library builds from this revision, and release packages from
+``v0.1.0-preview.2`` onward, use this metadata:
 
 - On Linux, before 1.0 the SONAME is ``liblancedb.so.<major>.<minor>``; from 1.0
   it is ``liblancedb.so.<major>``. The unversioned ``liblancedb.so`` linker name
