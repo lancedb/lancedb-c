@@ -3,10 +3,12 @@
 
 //! Lazy blob-file handles for the C API.
 //!
-//! `Table::fetch_blob_files` opens one seekable handle per row without reading
-//! payload bytes. The handle owns its SDK file, so its cursor, lifetime and
-//! snapshot are independent of the table handle and of other handles for the
-//! same value.
+//! `Table::fetch_blob_files` opens one seekable handle per row without
+//! materializing a blob. External blobs without a stored size may be sized
+//! during fetch. Each handle owns its SDK file and cursor independently of the
+//! table handle and of other handles for the same value. No retention lease is
+//! acquired for a handle, so later cleanup or external changes can invalidate
+//! it.
 
 use std::os::raw::c_char;
 use std::ptr;
@@ -105,9 +107,23 @@ unsafe fn publish_blob_files(
 ///
 /// The result follows `row_ids` in length, order and duplicates. A NULL blob
 /// yields a NULL handle; a valid empty blob yields a non-NULL handle whose size
-/// is zero. Bytes are not read until a handle is read. An empty input succeeds
-/// without opening handles. One missing or deleted row id rejects the whole
-/// request without partial handles.
+/// is zero. An empty input succeeds without opening handles. One missing or
+/// deleted row id rejects the whole request without partial handles.
+///
+/// Fetching opens handles without materializing a blob, but it is not always
+/// free of I/O. An External blob stored without a size is sized during fetch:
+/// embedded tables query the object size, while remote tables may issue a
+/// byte-range size probe. Access and response errors can therefore fail the
+/// fetch before any handle is returned.
+///
+/// Each handle keeps its own cursor and buffers and does not depend on the table
+/// handle; it stays usable after the table is freed. An embedded handle captures
+/// the SDK's selected storage and offset, and a remote handle captures the
+/// selected version and branch. No `BlobFile` retention lease is acquired for a
+/// handle, so dataset cleanup can remove old data and external storage controls
+/// its content. A remote row-ID handle also carries no descriptor source-commit
+/// identity, so it does not detect same-name recreation; reads can fail after
+/// any of these changes.
 ///
 /// # Safety
 /// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
@@ -245,7 +261,8 @@ pub unsafe extern "C" fn lancedb_blob_file_size(
 ///
 /// Embedded handles report `has_position`. Remote handles do not expose their
 /// storage layout and report `has_position` as zero with `position` zeroed.
-/// This is not the read cursor.
+/// This is not the read cursor: seek and read move the cursor, while
+/// `read_range` leaves it unchanged.
 ///
 /// # Safety
 /// - `file` must be a valid pointer returned by `lancedb_table_fetch_blob_files`

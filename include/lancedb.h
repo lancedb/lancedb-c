@@ -1880,7 +1880,8 @@ typedef struct {
  *
  * `has_position` is non-zero for embedded handles. Remote handles do not expose
  * their storage layout and report it as zero with `position` zeroed. This is not
- * the read cursor, which is moved by seek, read and read_range.
+ * the read cursor: seek and read move the cursor, while read_range leaves it
+ * unchanged.
  */
 typedef struct {
     bool has_position;  /* Non-zero when the handle exposes a physical byte offset */
@@ -1970,12 +1971,24 @@ LanceDBError lancedb_table_fetch_blob_ranges(
  *
  * The array follows row_ids in length, order and duplicates. A NULL blob leaves
  * the matching entry NULL; a valid empty blob yields a non-NULL handle whose
- * size is zero. Bytes are not read until a handle is read. With a valid blob
- * column, an empty input returns *files_out NULL and *count_out zero without
- * opening handles. One missing or deleted row id rejects the whole request
- * without partial handles. Handles keep their own cursor, buffers and snapshot;
- * they do not depend on the table handle and remain usable after
- * lancedb_table_free().
+ * size is zero. With a valid blob column, an empty input returns *files_out
+ * NULL and *count_out zero without opening handles. One missing or deleted row
+ * id rejects the whole request without partial handles.
+ *
+ * Fetching opens handles without materializing a blob, but it is not always
+ * free of I/O. An embedded External blob stored without a size queries its
+ * object size during fetch. A remote External blob in that state may issue a
+ * byte-range size probe (HTTP 206 for bytes=0-0). Access and response errors
+ * can therefore fail the fetch before any handle is returned.
+ *
+ * Each handle keeps its own cursor and buffers and does not depend on the C
+ * table handle; it stays usable after lancedb_table_free(). An embedded handle
+ * captures the SDK's selected storage and offset, and a remote handle captures
+ * the selected version and branch. No BlobFile retention lease is acquired for
+ * a handle, so dataset cleanup can remove old data and external storage controls
+ * its content. A remote row-ID handle also carries no descriptor
+ * source-commit identity, so it does not detect same-name recreation; reads
+ * can fail after any of these changes.
  * On entry, both outputs and the error message are cleared. On success the
  * caller frees the handles and array with lancedb_free_blob_files(). On failure
  * both outputs stay clear. Blob availability and errors on remote tables are
@@ -2041,8 +2054,9 @@ LanceDBError lancedb_blob_file_size(
  * @return Error code indicating success or failure
  *
  * Embedded handles set has_position; remote handles do not expose their storage
- * layout and report zero with position zeroed. This is not the read cursor, which
- * is moved by seek, read and read_range. On entry, the error message is cleared.
+ * layout and report it as zero with position zeroed. This is not the read
+ * cursor: seek and read move the cursor, while read_range leaves it unchanged.
+ * On entry, the error message is cleared.
  * On failure position_out is left unchanged. If error_message is provided and an
  * error occurs, the caller must free the error message with
  * lancedb_free_string().

@@ -5024,30 +5024,33 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob File Reading", "[table][blo
     lancedb_free_blob_files(files, count);
   }
 
-  SECTION("handles keep the fetched snapshot") {
+  SECTION("handles keep reading a deleted row from the fetched version") {
     LanceDBTable* table = create_blob_table(db, "blob_files_snapshot", ids, payloads);
-    auto pairs = query_id_row_ids(table);
+    const auto pairs = query_id_row_ids(table);
     const auto row_1 = row_id_for(pairs, 1);
 
     auto [files, count] = fetch(table, "image", {row_1});
 
-    auto batch = create_blob_input_batch({5}, {std::string("newer")});
-    auto reader = create_reader_from_batch(batch);
-    REQUIRE(reader != nullptr);
     char* error_message = nullptr;
-    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(lancedb_table_delete(table, "id = 1", &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == ids.size() - 1);
 
-    // The open handle reads the value it was fetched from, not a later version.
+    // The handle still reads the old bytes while the deleted data file remains.
     REQUIRE(read_blob_file(files[0]) == "alpha");
 
-    pairs = query_id_row_ids(table);
-    const auto row_5 = row_id_for(pairs, 5);
-    auto [new_files, new_count] = fetch(table, "image", {row_5});
-    REQUIRE(new_count == 1);
-    REQUIRE(read_blob_file(new_files[0]) == "newer");
+    // A fetch from the latest version no longer resolves the deleted row.
+    LanceDBBlobFile** stale_files = reinterpret_cast<LanceDBBlobFile**>(uintptr_t{1});
+    size_t stale_count = 99;
+    REQUIRE(lancedb_table_fetch_blob_files(
+        table, "image", &row_1, 1, &stale_files, &stale_count, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(stale_files == nullptr);
+    REQUIRE(stale_count == 0);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("do not exist") != std::string::npos);
+    lancedb_free_string(error_message);
 
-    lancedb_free_blob_files(new_files, new_count);
     lancedb_free_blob_files(files, count);
     lancedb_table_free(table);
   }
