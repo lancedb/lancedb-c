@@ -13,6 +13,11 @@ categories = ["database", "api-bindings"]
 publish = false
 rust-version = "1.95.0"
 
+[workspace]
+members = ["examples/external_provider"]
+default-members = ["."]
+resolver = "2"
+
 [lib]
 name = "lancedb"
 crate-type = ["cdylib", "staticlib", "rlib"]
@@ -37,3 +42,8 @@ datafusion-physical-expr = "55"
 futures = "0"
 stacker = "0.1"
 chrono = "0"
+
+[profile.release]
+opt-level = 3
+strip = "debuginfo"
+panic = "unwind"

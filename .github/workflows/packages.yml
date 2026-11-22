@@ -122,7 +122,9 @@ jobs:
           echo 'CARGO_HOME=C:\c' >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -172,12 +174,12 @@ jobs:
       - name: Build shared library (macOS)
         if: runner.os == 'macOS'
         run: >
-          cargo rustc --release --locked --target ${{ matrix.target }} --lib --
+          cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib --
           -C link-arg=-Wl,-install_name,@rpath/liblancedb.dylib
 
       - name: Build shared library
         if: runner.os != 'macOS'
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --package lancedb-c --target ${{ matrix.target }}
 
       - name: Create package
         id: package

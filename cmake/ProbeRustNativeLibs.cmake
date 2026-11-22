@@ -12,6 +12,8 @@ if(NOT BUILD_SHARED_LIBS)
   execute_process(
     COMMAND rustc --print native-static-libs --crate-type staticlib
             "${_probe_src}" -o "${_probe_out}" ${RUST_TARGET_OPT}
+    # Match Cargo's working directory so rustup selects the repository toolchain.
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     ERROR_VARIABLE _rustc_stderr
     RESULT_VARIABLE _rustc_result
     OUTPUT_QUIET
