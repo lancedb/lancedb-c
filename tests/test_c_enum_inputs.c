@@ -21,6 +21,10 @@ _Static_assert(sizeof(LanceDBNormalizeMethod) == sizeof(int), "LanceDBNormalizeM
 _Static_assert(sizeof(LanceDBIndexType) == sizeof(int), "LanceDBIndexType must have the C int ABI");
 _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType must have the C int ABI");
 _Static_assert(sizeof(LanceDBBinaryOp) == sizeof(int), "LanceDBBinaryOp must have the C int ABI");
+_Static_assert(sizeof(LanceDBCreateTableMode) == sizeof(int),
+               "LanceDBCreateTableMode must have the C int ABI");
+_Static_assert(sizeof(LanceDBWriteOptionsField) == sizeof(int),
+               "LanceDBWriteOptionsField must have the C int ABI");
 _Static_assert(sizeof(float) == sizeof(int), "LanceDBVectorIndexConfig assumes int-sized fields");
 _Static_assert(offsetof(LanceDBVectorIndexConfig, distance_type) == 4 * sizeof(int),
                "LanceDBVectorIndexConfig layout changed");
