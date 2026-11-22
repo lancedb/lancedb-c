@@ -84,6 +84,9 @@ jobs:
       - name: Run packaging fixture checks
         run: python3 .github/scripts/test_package.py
 
+      - name: Run release fixture checks
+        run: python3 .github/scripts/test_release.py
+
   build_windows_native:
     name: Build shared on windows-2025
     runs-on: windows-2025

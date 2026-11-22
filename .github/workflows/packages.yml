@@ -8,6 +8,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a GitHub Release for this exact preview tag after all supported packages pass
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -30,6 +36,9 @@ jobs:
 
       - name: Run packaging fixture checks
         run: python3 .github/scripts/test_package.py
+
+      - name: Run release fixture checks
+        run: python3 .github/scripts/test_release.py
 
   package:
     name: Package ${{ matrix.target }} on ${{ matrix.runner }}
@@ -187,9 +196,92 @@ jobs:
           --checksum ${{ steps.package.outputs.checksum }}
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lancedb-c-${{ steps.release-tag.outputs.commit || github.sha }}-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [package-script, package]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref_type == 'tag' &&
+      inputs.publish_release == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Resolve the dispatched tag independently of the package jobs. Both
+      # refs are recorded; an annotated tag has a tag object distinct from its
+      # commit, while a lightweight tag has the same object id for both. The
+      # peeled commit must still be the checked-out commit.
+      - name: Verify the release tag and peeled commit
+        id: release-tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          HEAD_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          release_version="$(python3 .github/scripts/version.py validate-tag "${RELEASE_TAG}")"
+          git fetch --force --no-tags origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          tag_object="$(git rev-parse "refs/tags/${RELEASE_TAG}")"
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{}")"
+          head_commit="$(git rev-parse HEAD)"
+          echo "release tag: ${RELEASE_TAG}"
+          echo "release version: ${release_version}"
+          echo "tag ref object: ${tag_object}"
+          echo "peeled commit: ${tag_commit}"
+          echo "checked out: ${head_commit}"
+          if [ "${tag_commit}" != "${head_commit}" ] || [ "${tag_commit}" != "${HEAD_COMMIT}" ]; then
+            echo "::error::tag ${RELEASE_TAG} peels to ${tag_commit}, not ${HEAD_COMMIT}"
+            exit 1
+          fi
+          echo "object=${tag_object}" >> "$GITHUB_OUTPUT"
+          echo "commit=${tag_commit}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all verified packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lancedb-c-*
+          path: release-artifacts
+          merge-multiple: true
+
+      # The matrix jobs already ran the real consumer checks. This step
+      # re-verifies every archive, manifest and checksum against the exact tag
+      # before a draft release is created.
+      - name: Prepare verified release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TAG_OBJECT: ${{ steps.release-tag.outputs.object }}
+          TAG_COMMIT: ${{ steps.release-tag.outputs.commit }}
+        run: >
+          python3 .github/scripts/release.py prepare
+          --tag "$RELEASE_TAG"
+          --tag-object "$TAG_OBJECT"
+          --tag-commit "$TAG_COMMIT"
+          --head-commit "$TAG_COMMIT"
+          --repo-root .
+          --artifacts release-artifacts
+          --output release
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Create draft and publish after all assets attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: >
+          python3 .github/scripts/release.py publish
+          --metadata release/release-metadata.json
+          --repository "$RELEASE_REPOSITORY"
