@@ -159,6 +159,11 @@ typedef struct LanceDBVectorQuery LanceDBVectorQuery;
 typedef struct LanceDBQueryResult LanceDBQueryResult;
 
 /**
+ * Opaque handle to a LanceDB TakeQuery
+ */
+typedef struct LanceDBTakeQuery LanceDBTakeQuery;
+
+/**
  * Opaque handle to a LanceDB TableDelta
  */
 typedef struct LanceDBTableDelta LanceDBTableDelta;
@@ -807,6 +812,35 @@ typedef struct {
 } LanceDBDeltaRef;
 
 /**
+ * Read consistency mode reported by a connection
+ *
+ * LANCEDB_READ_CONSISTENCY_MANUAL means reads add no freshness constraint.
+ * LANCEDB_READ_CONSISTENCY_STRONG means reads request the latest data.
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL means reads accept data within the
+ * configured freshness bound. Native tables may refresh in the background
+ * before the interval expires and refresh synchronously after it. Remote
+ * latest-timeline requests use the interval as a per-request minimum
+ * freshness bound; pinned snapshots omit that freshness routing header.
+ */
+typedef enum {
+    LANCEDB_READ_CONSISTENCY_MANUAL = 0,
+    LANCEDB_READ_CONSISTENCY_EVENTUAL = 1,
+    LANCEDB_READ_CONSISTENCY_STRONG = 2
+} LanceDBReadConsistencyType;
+
+/**
+ * Read consistency of a connection
+ *
+ * interval_ms is the configured interval in whole milliseconds for
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL, and 0 for the other modes. A positive
+ * interval set through the connection builder is returned unchanged.
+ */
+typedef struct {
+    LanceDBReadConsistencyType kind;  // Read consistency mode
+    uint64_t interval_ms;             // Eventual consistency interval in milliseconds
+} LanceDBReadConsistency;
+
+/**
  * Create a ConnectBuilder for the given URI
  *
  * @param uri - null-terminated C string containing the database URI
@@ -851,6 +885,130 @@ LanceDBError lancedb_connect_builder_execute( LanceDBConnectBuilder* builder,
 LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuilder* builder, const char* key, const char* value);
 
 /**
+ * Set the API key for a LanceDB Enterprise or LanceDB Cloud connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param api_key - NUL-terminated API key
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. The setter does not add
+ * it to native storage options. Without the remote feature, the setter
+ * validates and returns the builder without applying the value. A NULL or
+ * non-UTF-8 api_key returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_api_key(LanceDBConnectBuilder* builder, const char* api_key);
+
+/**
+ * Set the region for a db:// connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param region - NUL-terminated region name
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The SDK requires a region for both LanceDB Cloud and LanceDB Enterprise
+ * connections, including when a host override is used. This setter is only
+ * applied when the connection dispatches to the SDK remote path, which is
+ * selected by a URI beginning with db. Without the remote feature, the setter
+ * validates and returns the builder without applying the value. A NULL or
+ * non-UTF-8 region returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_region(LanceDBConnectBuilder* builder, const char* region);
+
+/**
+ * Set the host override for a LanceDB Enterprise connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param host_override - NUL-terminated host override
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. Use the URI db:// together
+ * with a host override to connect to LanceDB Enterprise tables stored directly
+ * in the storage root. Without the remote feature, the setter validates and
+ * returns the builder without applying the value. A NULL or non-UTF-8
+ * host_override returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_host_override(LanceDBConnectBuilder* builder, const char* host_override);
+
+/**
+ * Set the SQL service host override for a LanceDB Enterprise connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param sql_host_override - NUL-terminated SQL host override
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. The SQL endpoint is
+ * contacted only when the connection executes SQL; setting this option does
+ * not contact it. Without the remote feature, the setter validates and returns
+ * the builder without applying the value. A NULL or non-UTF-8
+ * sql_host_override returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_sql_host_override(LanceDBConnectBuilder* builder, const char* sql_host_override);
+
+/**
+ * Set an additional property for the connection's namespace client
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param key - NUL-terminated property name
+ * @param value - NUL-terminated property value
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL. LanceDB Enterprise connections
+ * reject a non-empty set of namespace client properties when the builder is
+ * executed: lancedb_connect_builder_execute() returns LANCEDB_NOT_SUPPORTED.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_namespace_client_property(LanceDBConnectBuilder* builder, const char* key, const char* value);
+
+/**
+ * Enable or disable manifest-backed directory namespace mode
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param enabled - true to enable manifest-backed directory namespace mode
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * This option applies to local native connections. When enabled, the connection
+ * uses the directory namespace directly for all table operations and forces
+ * dir_listing_to_manifest_migration_enabled=true. LanceDB Enterprise
+ * connections reject enabling this option when the builder is executed:
+ * lancedb_connect_builder_execute() returns LANCEDB_NOT_SUPPORTED. Passing
+ * false keeps the default behavior.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_manifest_enabled(LanceDBConnectBuilder* builder, bool enabled);
+
+/**
+ * Set the read consistency interval
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param interval_ms - read consistency interval in milliseconds
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Leaving this setter unused keeps the SDK default: no freshness constraint is
+ * added to reads. An explicit 0 requests strong consistency. A positive value
+ * requests eventual consistency. The interval only affects reads; writes are
+ * always consistent.
+ *
+ * Native connections use the interval as a refresh target: the SDK may refresh
+ * in the background before it expires and refreshes synchronously on the next
+ * read after it. Remote latest-timeline requests send the interval as a
+ * per-request minimum freshness bound; pinned snapshots omit that freshness
+ * routing header. Reading the configured mode back through
+ * lancedb_connection_read_consistency() is supported for native connections;
+ * the SDK reports LANCEDB_NOT_SUPPORTED for remote connections.
+ *
+ * A NULL builder returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_read_consistency_interval_ms(LanceDBConnectBuilder* builder, uint64_t interval_ms);
+
+/**
  * Set session for the connection builder
  *
  * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
@@ -886,6 +1044,36 @@ void lancedb_connect_builder_free(LanceDBConnectBuilder* builder);
  * The caller must not free the returned string.
  */
 const char* lancedb_connection_uri(const LanceDBConnection* connection);
+
+/**
+ * Get the read consistency of the connection
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param consistency_out - pointer to receive the read consistency
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, consistency_out describes the configured mode. A connection
+ * created without lancedb_connect_builder_read_consistency_interval_ms()
+ * reports LANCEDB_READ_CONSISTENCY_MANUAL. An explicit zero interval reports
+ * LANCEDB_READ_CONSISTENCY_STRONG. A positive interval reports
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL with interval_ms set to that value.
+ *
+ * On failure, consistency_out is left unchanged so a caller can keep its own
+ * sentinel there. LanceDB Enterprise and LanceDB Cloud connections return
+ * LANCEDB_NOT_SUPPORTED because the SDK does not expose their read
+ * consistency, even though the interval still controls their per-request
+ * freshness bound. A non-NULL error_message is cleared on entry and must be
+ * freed with lancedb_free_string() after an error.
+ *
+ * This function does not fall back to a predicted mode when the SDK query
+ * fails.
+ */
+LanceDBError lancedb_connection_read_consistency(
+    const LanceDBConnection* connection,
+    LanceDBReadConsistency* consistency_out,
+    char** error_message
+);
 
 /**
  * Get table names from the connection
@@ -3257,6 +3445,151 @@ LanceDBError lancedb_vector_query_execute_with_status(
     LanceDBQueryResult** result_out,
     char** error_message
 );
+
+/**
+ * Create a take query that selects rows by dataset offset
+ *
+ * Offsets are 0-indexed and relative to the current table version; they can
+ * change when rows are added or deleted. The requested offsets are copied,
+ * including duplicates. Without lancedb_take_query_preserve_order() the result
+ * order is unspecified. Missing offsets are omitted.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param offsets - borrowed array of dataset offsets, or NULL when count is zero
+ * @param count - number of offsets in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of offsets and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_offsets(
+    const LanceDBTable* table,
+    const uint64_t* offsets,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Create a take query that selects rows by row ID
+ *
+ * Row IDs are relative to the current table version and can change after
+ * compaction or updates. The SDK follows the requested order, including
+ * repeated IDs, and omits missing or deleted IDs.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param row_ids - borrowed array of row IDs, or NULL when count is zero
+ * @param count - number of row IDs in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of row_ids and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_row_ids(
+    const LanceDBTable* table,
+    const uint64_t* row_ids,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Set the column projection of a take query
+ *
+ * Columns are returned in the requested order. A zero num_columns selects no
+ * columns and keeps an empty result schema; columns may then be NULL. The names
+ * are copied and are not borrowed after this call.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param columns - borrowed array of column names, or NULL when num_columns is zero
+ * @param num_columns - number of column names in the array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_select(
+    LanceDBTakeQuery* query,
+    const char* const* columns,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Ask a take query to return the `_rowid` metadata column
+ *
+ * The metadata column is appended to the projection. For an offset take it
+ * carries the row ID, which is not the same as the requested dataset offset.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_with_row_id(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Restore offset-take occurrences in the exact requested order
+ *
+ * Row-ID takes already follow the requested order and ignore this flag. For an
+ * offset take, the result follows the input order, including repeated offsets,
+ * and missing offsets are omitted.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_preserve_order(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Execute a take query and report why it could not start
+ *
+ * @param query - pointer to LanceDBTakeQuery (consumed by this function on every
+ *                path with a non-NULL pointer, including a rejected result pointer)
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The returned result uses the same Arrow C Data and Arrow IPC conversions as
+ * every other query result. On entry, *result_out and the error message are
+ * cleared. Caller must free a returned result with lancedb_query_result_free().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_execute(
+    LanceDBTakeQuery* query,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a TakeQuery
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ */
+void lancedb_take_query_free(LanceDBTakeQuery* query);
 
 /**
  * Convert query result to Arrow RecordBatch arrays

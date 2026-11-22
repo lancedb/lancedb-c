@@ -19,6 +19,7 @@ pub mod json;
 pub mod optimize;
 pub mod query;
 pub mod table;
+pub mod take;
 pub mod types;
 pub mod version;
 
@@ -35,5 +36,6 @@ pub use json::*;
 pub use optimize::*;
 pub use query::*;
 pub use table::*;
+pub use take::*;
 pub use types::*;
 pub use version::*;
