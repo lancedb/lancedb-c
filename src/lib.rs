@@ -9,6 +9,7 @@
 
 pub mod arrow_stream;
 pub mod blob;
+pub mod branch_diff;
 pub mod connection;
 pub mod delta;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod version;
 // Re-export all public FFI functions
 pub use arrow_stream::*;
 pub use blob::*;
+pub use branch_diff::*;
 pub use connection::*;
 pub use delta::*;
 pub use error::*;

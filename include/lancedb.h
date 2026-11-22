@@ -658,6 +658,143 @@ typedef struct {
 } LanceDBBranch;
 
 /**
+ * One column description in a branch diff
+ *
+ * The strings are read-only and owned by the result that contains them.
+ */
+typedef struct {
+    const char* name;       // Column name
+    const char* data_type;  // SDK data type description
+    int nullable;           // Non-zero when the column accepts nulls
+} LanceDBColumnSummary;
+
+/**
+ * A column that exists in both branches with different definitions
+ */
+typedef struct {
+    const char* name;              // Column name
+    LanceDBColumnSummary main;     // Definition on main
+    LanceDBColumnSummary branch;   // Definition on the compared branch
+} LanceDBColumnChange;
+
+/**
+ * One index description in a branch diff
+ *
+ * index_type is NULL when the SDK response omitted it. columns is NULL when
+ * column_count is zero.
+ */
+typedef struct {
+    const char* index_name;          // Index name
+    const char* const* columns;      // Read-only column names, NULL when column_count is 0
+    size_t column_count;             // Number of entries in columns
+    const char* index_type;          // Optional index type (NULL when omitted)
+    const char* status;              // Index status reported by the server
+} LanceDBIndexSummary;
+
+/**
+ * Row-count classification from the SDK
+ */
+typedef struct {
+    uint64_t unchanged;        // Rows unchanged on both sides
+    uint64_t new_on_base;      // Rows new on main
+    uint64_t new_on_branch;    // Rows new on the branch
+    uint64_t stale_recompute;  // Rows requiring recomputation
+    uint64_t inputs_changed;   // Rows whose inputs changed
+    int delta_available;       // Non-zero when a delta is available
+} LanceDBRowCountSummary;
+
+/**
+ * Reason the server gave for a blocked cherry-pick
+ *
+ * LANCEDB_CHERRY_PICK_ERROR_UNKNOWN is the SDK's mapping for a code the
+ * pinned SDK does not recognize; the SDK does not expose the raw code.
+ */
+typedef enum {
+    LANCEDB_CHERRY_PICK_ERROR_BASE_MOVED = 0,
+    LANCEDB_CHERRY_PICK_ERROR_ROW_COUNT_MISMATCH = 1,
+    LANCEDB_CHERRY_PICK_ERROR_ROWS_CHANGED = 2,
+    LANCEDB_CHERRY_PICK_ERROR_COLUMN_REMOVED = 3,
+    LANCEDB_CHERRY_PICK_ERROR_COLUMN_CHANGED = 4,
+    LANCEDB_CHERRY_PICK_ERROR_NOTHING_TO_APPLY = 5,
+    LANCEDB_CHERRY_PICK_ERROR_NO_COLUMN_CHANGES = 6,
+    LANCEDB_CHERRY_PICK_ERROR_INPUT_COLUMN_DEPENDENCY = 7,
+    LANCEDB_CHERRY_PICK_ERROR_PARENT_NOT_MAIN = 8,
+    LANCEDB_CHERRY_PICK_ERROR_UNKNOWN = 9
+} LanceDBCherryPickErrorCode;
+
+/**
+ * One error from a branch diff or cherry-pick result
+ */
+typedef struct {
+    LanceDBCherryPickErrorCode code;  // SDK error code, or UNKNOWN for an unrecognized value
+    const char* message;              // Read-only error message
+} LanceDBCherryPickError;
+
+/**
+ * Full branch diff returned by lancedb_table_diff_branch()
+ *
+ * Every array is in the SDK response order and NULL when its count is zero.
+ * The result owns all strings and arrays. The result remains valid until
+ * lancedb_free_branch_diff() is called with the same pointer. Callers must
+ * not modify or free nested strings or arrays individually.
+ */
+typedef struct {
+    const char* from_branch;                  // Branch compared against main
+    uint64_t parent_version;                  // Version the branch started from
+    uint64_t main_version;                    // Version of main in the diff
+    uint64_t branch_version;                  // Version of the compared branch
+    int base_moved;                           // Non-zero when main advanced since the branch started
+    uint64_t row_count_main;                  // Row count on main
+    uint64_t row_count_branch;                // Row count on the branch
+    LanceDBRowCountSummary row_summary;       // Row-count classification
+    const LanceDBColumnSummary* added_columns;      // Added columns, NULL when added_column_count is 0
+    size_t added_column_count;                      // Number of added columns
+    const LanceDBColumnSummary* removed_columns;    // Removed columns, NULL when removed_column_count is 0
+    size_t removed_column_count;                    // Number of removed columns
+    const LanceDBColumnChange* changed_columns;     // Changed columns, NULL when changed_column_count is 0
+    size_t changed_column_count;                    // Number of changed columns
+    const LanceDBIndexSummary* added_indexes;       // Added indexes, NULL when added_index_count is 0
+    size_t added_index_count;                       // Number of added indexes
+    const LanceDBIndexSummary* removed_indexes;     // Removed indexes, NULL when removed_index_count is 0
+    size_t removed_index_count;                     // Number of removed indexes
+    const LanceDBCherryPickError* errors;           // Errors, NULL when error_count is 0
+    size_t error_count;                             // Number of errors
+} LanceDBBranchDiff;
+
+/**
+ * Outcome reported by lancedb_table_cherry_pick()
+ *
+ * LANCEDB_CHERRY_PICK_STATUS_UNKNOWN is the SDK's mapping for a status the
+ * pinned SDK does not recognize; the SDK does not expose the raw status.
+ */
+typedef enum {
+    LANCEDB_CHERRY_PICK_STATUS_READY = 0,
+    LANCEDB_CHERRY_PICK_STATUS_FAILED = 1,
+    LANCEDB_CHERRY_PICK_STATUS_NOT_IMPLEMENTED = 2,
+    LANCEDB_CHERRY_PICK_STATUS_CHERRY_PICKED = 3,
+    LANCEDB_CHERRY_PICK_STATUS_UNKNOWN = 4
+} LanceDBCherryPickStatus;
+
+/**
+ * Result of lancedb_table_cherry_pick()
+ *
+ * diff is an embedded copy of the branch diff; do not pass its address to
+ * lancedb_free_branch_diff(). promoted_columns is NULL when
+ * promoted_column_count is zero. main_version_after is read only when
+ * has_main_version_after is non-zero, because the SDK field is optional.
+ * The result owns all strings and arrays and remains valid until
+ * lancedb_free_cherry_pick_result() is called with the same pointer.
+ */
+typedef struct {
+    LanceDBCherryPickStatus status;            // Outcome reported by the server
+    LanceDBBranchDiff diff;                    // Embedded branch diff
+    const char* const* promoted_columns;       // Promoted column names, NULL when promoted_column_count is 0
+    size_t promoted_column_count;              // Number of promoted columns
+    int has_main_version_after;                // Non-zero when main_version_after is present
+    uint64_t main_version_after;               // Main version after a successful cherry-pick
+} LanceDBCherryPickResult;
+
+/**
  * Kind of endpoint a table delta compares
  */
 typedef enum {
@@ -4940,6 +5077,91 @@ LanceDBError lancedb_table_delete_branch(
     const char* name,
     char** error_message
 );
+
+/**
+ * Diff a branch against main on a remote table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param from_branch - null-terminated C string containing the branch to compare
+ * @param diff_out - pointer to receive the branch diff
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The SDK decides whether the table supports branch diffs. Native (embedded)
+ * tables return LANCEDB_NOT_SUPPORTED with the SDK's message unchanged.
+ *
+ * On entry, *diff_out and the error message are cleared. The result is
+ * published only on success, so a failure leaves *diff_out NULL. The result
+ * owns every string and nested array in SDK response order; free the whole
+ * result once with lancedb_free_branch_diff(). Do not free nested pointers
+ * individually. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_diff_branch(
+    const LanceDBTable* table,
+    const char* from_branch,
+    LanceDBBranchDiff** diff_out,
+    char** error_message
+);
+
+/**
+ * Cherry-pick a branch onto main, or preview it with a dry run
+ *
+ * @param table - pointer to LanceDBTable
+ * @param from_branch - null-terminated C string containing the branch to cherry-pick
+ * @param dry_run - non-zero to request a preview without applying the cherry-pick
+ * @param result_out - pointer to receive the cherry-pick result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The SDK decides whether the table supports cherry-picking. Native (embedded)
+ * tables return LANCEDB_NOT_SUPPORTED with the SDK's message unchanged.
+ *
+ * An HTTP 409 that the SDK decodes as a failed cherry-pick result returns
+ * LANCEDB_SUCCESS with LANCEDB_CHERRY_PICK_STATUS_FAILED in the result.
+ * Converting a response to C can also fail, for example if an SDK string
+ * contains an embedded NUL. For a non-dry run, the server may already have
+ * applied the change when an error is returned. Check the table state before
+ * retrying.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * published only on success, so a failure leaves *result_out NULL. The result owns every string and nested array; free the
+ * whole result once with lancedb_free_cherry_pick_result(). Do not free nested
+ * pointers individually or pass its embedded diff to
+ * lancedb_free_branch_diff(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_cherry_pick(
+    const LanceDBTable* table,
+    const char* from_branch,
+    int dry_run,
+    LanceDBCherryPickResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a branch diff returned by lancedb_table_diff_branch
+ *
+ * @param diff - pointer returned by lancedb_table_diff_branch (NULL is a no-op)
+ *
+ * The call frees every string and nested array owned by the result. The
+ * pointer and all data reachable from it must not be used afterwards. Do not
+ * free nested pointers individually or pass an embedded
+ * LanceDBCherryPickResult.diff address to this function.
+ */
+void lancedb_free_branch_diff(LanceDBBranchDiff* diff);
+
+/**
+ * Free a cherry-pick result returned by lancedb_table_cherry_pick
+ *
+ * @param result - pointer returned by lancedb_table_cherry_pick (NULL is a no-op)
+ *
+ * The call frees every string and nested array owned by the result. The
+ * pointer and all data reachable from it must not be used afterwards. Do not
+ * free nested pointers individually or pass the embedded diff to
+ * lancedb_free_branch_diff().
+ */
+void lancedb_free_cherry_pick_result(LanceDBCherryPickResult* result);
 
 /**
  * Create a delta between two endpoints on the table's current branch

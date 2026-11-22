@@ -60,8 +60,37 @@ int main(int argc, char** argv) {
 
   char* error_message = NULL;
   LanceDBConnection* connection = NULL;
-  LanceDBError status =
-      lancedb_connect_builder_execute(builder, &connection, &error_message);
+  LanceDBError status = LANCEDB_SUCCESS;
+
+  /* The branch diff and cherry-pick entry points clear their outputs before
+   * validating arguments, and the free functions accept NULL. */
+  LanceDBBranchDiff branch_diff_storage;
+  LanceDBBranchDiff* branch_diff = &branch_diff_storage;
+  status = lancedb_table_diff_branch(NULL, "branch", &branch_diff,
+                                     &error_message);
+  if (status != LANCEDB_INVALID_ARGUMENT || branch_diff != NULL ||
+      error_message == NULL) {
+    lancedb_free_string(error_message);
+    return fail("diff_branch must clear its output on invalid arguments");
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  lancedb_free_branch_diff(NULL);
+
+  LanceDBCherryPickResult cherry_pick_storage;
+  LanceDBCherryPickResult* cherry_pick = &cherry_pick_storage;
+  status = lancedb_table_cherry_pick(NULL, "branch", 1, &cherry_pick,
+                                     &error_message);
+  if (status != LANCEDB_INVALID_ARGUMENT || cherry_pick != NULL ||
+      error_message == NULL) {
+    lancedb_free_string(error_message);
+    return fail("cherry_pick must clear its output on invalid arguments");
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  lancedb_free_cherry_pick_result(NULL);
+
+  status = lancedb_connect_builder_execute(builder, &connection, &error_message);
   if (status != LANCEDB_SUCCESS || connection == NULL) {
     fprintf(stderr, "connecting to %s failed: %s\n", uri,
             error_message != NULL ? error_message : "no error message");
