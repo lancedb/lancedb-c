@@ -325,14 +325,6 @@ cleanup:
   return result;
 }
 
-static void order_by_release_schema(struct ArrowSchema* schema) {
-  schema->release = NULL;
-}
-
-static void order_by_release_array(struct ArrowArray* array) {
-  array->release = NULL;
-}
-
 /* Build a four-row int32 table. The rows are deliberately not in sorted order
  * so an ordering check cannot pass by accident. */
 static int create_order_by_table(
@@ -346,7 +338,7 @@ static int create_order_by_table(
       .n_children = 0,
       .children = NULL,
       .dictionary = NULL,
-      .release = order_by_release_schema,
+      .release = release_arrow_schema,
       .private_data = NULL,
   };
   struct ArrowSchema* fields[] = {&id_schema};
@@ -358,7 +350,7 @@ static int create_order_by_table(
       .n_children = 1,
       .children = fields,
       .dictionary = NULL,
-      .release = order_by_release_schema,
+      .release = release_arrow_schema,
       .private_data = NULL,
   };
 
@@ -372,7 +364,7 @@ static int create_order_by_table(
       .buffers = id_buffers,
       .children = NULL,
       .dictionary = NULL,
-      .release = order_by_release_array,
+      .release = release_arrow_array,
       .private_data = NULL,
   };
   struct ArrowArray* children[] = {&id_array};
@@ -386,7 +378,7 @@ static int create_order_by_table(
       .buffers = struct_buffers,
       .children = children,
       .dictionary = NULL,
-      .release = order_by_release_array,
+      .release = release_arrow_array,
       .private_data = NULL,
   };
 
