@@ -1540,7 +1540,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Update", "[table]") {
 
     REQUIRE(lancedb_table_update(
         table, columns, expressions, 1, "key = 'key_1'", &update_result, &error_message)
-        != LANCEDB_SUCCESS);
+        == LANCEDB_COLUMN_NOT_FOUND);
     REQUIRE(error_message != nullptr);
     REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
     lancedb_free_string(error_message);
@@ -1761,9 +1761,9 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delete", "[table]") {
     LanceDBError result = lancedb_table_delete(
         table, "unknown = 'key_0'", &error_message);
 
-    REQUIRE(result != LANCEDB_SUCCESS);
-    REQUIRE(result != LANCEDB_SUCCESS);
+    REQUIRE(result == LANCEDB_COLUMN_NOT_FOUND);
     REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("unknown") != std::string::npos);
     lancedb_free_string(error_message);
   }
 
@@ -2788,7 +2788,8 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
 
     const char* bad_expressions[] = {"no_such_column + 1"};
     REQUIRE(lancedb_table_add_columns(
-        table, names, bad_expressions, 1, &version, &error_message) != LANCEDB_SUCCESS);
+        table, names, bad_expressions, 1, &version, &error_message)
+        == LANCEDB_COLUMN_NOT_FOUND);
     REQUIRE(error_message != nullptr);
     REQUIRE(std::string(error_message).find("no_such_column") != std::string::npos);
     lancedb_free_string(error_message);
@@ -2796,8 +2797,9 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
 
     REQUIRE(lancedb_table_add_columns(
         table, duplicate_names, duplicate_expressions, 1, &version, &error_message)
-        != LANCEDB_SUCCESS);
+        == LANCEDB_INVALID_INPUT);
     REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("already exists") != std::string::npos);
     lancedb_free_string(error_message);
     error_message = nullptr;
 

@@ -35,6 +35,19 @@ pub enum LanceDBError {
     Namespace = 21,
     PermissionDenied = 22,
     NotFound = 23,
+    TableCorrupted = 24,
+    ColumnNotFound = 25,
+    FieldNotFound = 26,
+    ColumnAlreadyExists = 27,
+    NotAComputedColumn = 28,
+    NotAMaterializedView = 29,
+    InvalidExpression = 30,
+    Sql = 31,
+    JobFailed = 32,
+    JobCancelled = 33,
+    JobNotFound = 34,
+    ResponseInterrupted = 35,
+    External = 36,
     // keep last, so that new error codes can be added without renumbering
     Unknown = 99,
 }
@@ -99,6 +112,9 @@ fn storage_failure_from_message(message: &str) -> Option<LanceDBError> {
 const NAMESPACE_CONNECT_FAILED: &str = "Failed to connect to namespace:";
 
 /// Convert Rust Error to C error code
+///
+/// Keep the match exhaustive. lancedb does not mark `Error` as non-exhaustive, so a
+/// new SDK variant must be assigned a C code here and fails the build until it is.
 pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError {
     match error {
         lancedb::error::Error::InvalidTableName { .. } => LanceDBError::InvalidTableName,
@@ -111,15 +127,23 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
         }
         lancedb::error::Error::InvalidInput { .. } => LanceDBError::InvalidInput,
         lancedb::error::Error::TableNotFound { .. } => LanceDBError::TableNotFound,
+        lancedb::error::Error::TableCorrupted { .. } => LanceDBError::TableCorrupted,
         lancedb::error::Error::DatabaseNotFound { .. } => LanceDBError::DatabaseNotFound,
         lancedb::error::Error::DatabaseAlreadyExists { .. } => LanceDBError::DatabaseAlreadyExists,
         lancedb::error::Error::IndexNotFound { .. } => LanceDBError::IndexNotFound,
         lancedb::error::Error::EmbeddingFunctionNotFound { .. } => {
             LanceDBError::EmbeddingFunctionNotFound
         }
+        lancedb::error::Error::ColumnNotFound { .. } => LanceDBError::ColumnNotFound,
+        lancedb::error::Error::FieldNotFound { .. } => LanceDBError::FieldNotFound,
+        lancedb::error::Error::ColumnAlreadyExists { .. } => LanceDBError::ColumnAlreadyExists,
+        lancedb::error::Error::NotAComputedColumn { .. } => LanceDBError::NotAComputedColumn,
+        lancedb::error::Error::NotAMaterializedView { .. } => LanceDBError::NotAMaterializedView,
+        lancedb::error::Error::InvalidExpression { .. } => LanceDBError::InvalidExpression,
         lancedb::error::Error::TableAlreadyExists { .. } => LanceDBError::TableAlreadyExists,
         lancedb::error::Error::CreateDir { .. } => LanceDBError::CreateDir,
         lancedb::error::Error::Schema { .. } => LanceDBError::Schema,
+        lancedb::error::Error::Sql { .. } => LanceDBError::Sql,
         // the namespace backend wraps all of its failures into a generic runtime error
         // (lancedb: database/namespace.rs), so a missing table or namespace is recovered
         // from the message
@@ -127,6 +151,9 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
             not_found_from_message(message).unwrap_or(LanceDBError::Runtime)
         }
         lancedb::error::Error::Timeout { .. } => LanceDBError::Timeout,
+        lancedb::error::Error::JobFailed { .. } => LanceDBError::JobFailed,
+        lancedb::error::Error::JobCancelled { .. } => LanceDBError::JobCancelled,
+        lancedb::error::Error::JobNotFound { .. } => LanceDBError::JobNotFound,
         lancedb::error::Error::ObjectStore { source } => {
             storage_failure_from_message(&source.to_string()).unwrap_or(LanceDBError::ObjectStore)
         }
@@ -146,12 +173,14 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
         }
         lancedb::error::Error::Http { .. } => LanceDBError::Http,
         lancedb::error::Error::Retry { .. } => LanceDBError::Retry,
+        lancedb::error::Error::ResponseInterrupted { .. } => LanceDBError::ResponseInterrupted,
         lancedb::error::Error::Arrow { .. } => LanceDBError::Arrow,
         lancedb::error::Error::NotSupported { .. } => LanceDBError::NotSupported,
-        // SDK variants added after 0.33 that have no dedicated C code (schema,
-        // job, SQL and interrupted-stream errors, including missing columns)
-        // keep the historical LANCEDB_OTHER mapping used for External errors.
-        _ => LanceDBError::Other,
+        // An External error is a transparent pass-through of an error created outside
+        // lancedb. It stays distinct from Other, whose message and optional source are
+        // owned by lancedb, so a C caller can tell the two apart.
+        lancedb::error::Error::External { .. } => LanceDBError::External,
+        lancedb::error::Error::Other { .. } => LanceDBError::Other,
     }
 }
 
