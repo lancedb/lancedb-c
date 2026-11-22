@@ -1175,6 +1175,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB TakeQuery - offsets and row IDs", "[qu
     REQUIRE(schema == nullptr);
 
     empty_take = take_offsets_checked(table, nullptr, 0);
+    const char* projected_columns[] = {"key"};
+    REQUIRE(lancedb_take_query_select(empty_take, projected_columns, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
     result = nullptr;
     REQUIRE(lancedb_take_query_execute(empty_take, &result, &error_message)
         == LANCEDB_SUCCESS);
@@ -1186,12 +1191,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB TakeQuery - offsets and row IDs", "[qu
     REQUIRE(error_message == nullptr);
 
     auto contents = read_ipc_file(buffer.data, buffer.len);
-    REQUIRE(contents.schema->num_fields() == 2);
-    REQUIRE(contents.schema->field(0)->name() == "key");
-    REQUIRE(contents.schema->field(1)->name() == "data");
-    REQUIRE(contents.batches.empty());
-
     lancedb_ipc_buffer_free(&buffer);
+
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.batches.empty());
   }
 
   SECTION("An empty column selection keeps an empty schema") {
