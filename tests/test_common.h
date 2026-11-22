@@ -8,10 +8,18 @@
 #include <catch2/catch.hpp>
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
+#include <arrow/io/api.h>
+#include <arrow/ipc/api.h>
 #include "lancedb.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <chrono>
+#include <string>
+#include <vector>
 
 // Helpers compiled as C. The C++ tests cannot create an out-of-range C enum
 // value without undefined behavior, but a C caller can pass one through the
@@ -156,4 +164,54 @@ std::shared_ptr<arrow::RecordBatch> create_test_record_batch(int num_rows, int s
 
 // Helper function to create RecordBatchReader from RecordBatch
 LanceDBRecordBatchReader* create_reader_from_batch(const std::shared_ptr<arrow::RecordBatch>& batch);
+
+// Contents of an Arrow IPC file read back with the Arrow C++ reader
+struct IpcFileContents {
+  std::shared_ptr<arrow::Schema> schema;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+};
+
+// Helper function to write an Arrow IPC file with the given batches
+std::vector<uint8_t> write_ipc_file(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+
+// Helper function to write an Arrow IPC stream, which is not an IPC file
+std::vector<uint8_t> write_ipc_stream(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+
+// Helper function to write a two-batch IPC file whose second batch metadata is
+// corrupt: the footer and the first batch stay readable, the second batch does not
+std::vector<uint8_t> write_ipc_file_with_corrupt_second_batch(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<arrow::RecordBatch>& first,
+    const std::shared_ptr<arrow::RecordBatch>& second);
+
+// Helper function to write an Arrow IPC file whose field name cannot be carried
+// by the Arrow C data interface, because it contains a NUL byte
+std::vector<uint8_t> write_ipc_file_with_unrepresentable_field_name();
+
+// Helper function to write an Arrow IPC file with a dictionary-encoded column,
+// so the file carries dictionary blocks beside its record batches
+std::vector<uint8_t> write_ipc_file_with_dictionary_column();
+
+// Helper function to write an Arrow IPC file whose announced footer length is
+// valid for the input but whose footer bytes are not a footer
+std::vector<uint8_t> write_ipc_file_with_unreadable_footer();
+
+// Helper function to write an Arrow IPC file whose footer parses but whose
+// declared record blocks no longer fit the shortened input
+std::vector<uint8_t> write_ipc_file_with_blocks_outside_the_file();
+
+// Helper function to read an Arrow IPC file with the Arrow C++ reader
+IpcFileContents read_ipc_file(const uint8_t* data, size_t len);
+
+// Helper function to read every value of a string column, sorted, so that a
+// check does not depend on the order the query returned the batches in
+std::vector<std::string> read_ipc_file_strings(const IpcFileContents& file, int column_index);
+
+// Helper function to join strings with a comma, so that a test can compare them
+// in a single assertion
+std::string join_strings(const std::vector<std::string>& values);
 

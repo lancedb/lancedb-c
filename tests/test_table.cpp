@@ -1934,6 +1934,353 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - error reporting", "[table]") {
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - Arrow IPC input", "[table][ipc]") {
+  SECTION("A schema-only file creates an empty table of the same shape") {
+    const std::string source_name = "ipc_schema_only_source";
+    create_empty_table(source_name);
+    LanceDBTable* table = open_table(source_name);
+
+    LanceDBIpcBuffer buffer = {};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_schema_ipc_file(table, &buffer, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(buffer.data != nullptr);
+    REQUIRE(buffer.len > 0);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    REQUIRE(contents.schema->num_fields() == 2);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.schema->field(1)->name() == "data");
+    REQUIRE(contents.batches.empty());
+
+    // The schema alone is enough to create a table of the same shape
+    FFI_ArrowSchema* c_schema = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        buffer.data, buffer.len, nullptr, &c_schema, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(c_schema != nullptr);
+
+    // The bytes are only borrowed, so they can be released before the schema is used
+    lancedb_ipc_buffer_free(&buffer);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(buffer.len == 0);
+    // Freeing an already freed buffer is a no-op
+    lancedb_ipc_buffer_free(&buffer);
+    // Freeing no buffer at all is a no-op too
+    lancedb_ipc_buffer_free(nullptr);
+
+    LanceDBTable* created = nullptr;
+    REQUIRE(lancedb_table_create(
+        db, "ipc_schema_only_created", c_schema, nullptr, &created, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(created != nullptr);
+    lancedb_free_arrow_schema(c_schema);
+
+    REQUIRE(lancedb_table_count_rows(created) == 0);
+    REQUIRE(lancedb_table_version(created) == 1);
+
+    FFI_ArrowSchema* exported = nullptr;
+    REQUIRE(lancedb_table_arrow_schema(created, &exported, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(exported != nullptr);
+    lancedb_free_arrow_schema(exported);
+
+    lancedb_table_free(created);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Two uneven batches in one file are written by a single add") {
+    const std::string table_name = "ipc_multi_batch";
+    create_empty_table(table_name);
+    LanceDBTable* table = open_table(table_name);
+    REQUIRE(lancedb_table_version(table) == 1);
+
+    auto schema = create_test_schema();
+    auto bytes = write_ipc_file(
+        schema, {create_test_record_batch(2, 0), create_test_record_batch(3, 2)});
+
+    LanceDBRecordBatchReader* reader = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        bytes.data(), bytes.size(), &reader, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+
+    // The reader owns every batch before the call returns, so the input bytes
+    // may go away while the table is still being written
+    std::fill(bytes.begin(), bytes.end(), 0);
+
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    // One commit for the whole file, not one per batch
+    REQUIRE(lancedb_table_version(table) == 2);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(result != nullptr);
+
+    LanceDBIpcBuffer output = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &output, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The file does not depend on the table handle that produced it
+    lancedb_table_free(table);
+    table = nullptr;
+
+    auto contents = read_ipc_file(output.data, output.len);
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.batches.size() >= 1);
+    REQUIRE(join_strings(read_ipc_file_strings(contents, 0)) ==
+            "key_0,key_1,key_2,key_3,key_4");
+
+    lancedb_ipc_buffer_free(&output);
+    REQUIRE(output.data == nullptr);
+    REQUIRE(output.len == 0);
+  }
+
+  SECTION("A zero-row batch among data batches keeps every row") {
+    const std::string table_name = "ipc_zero_row_batch";
+    create_empty_table(table_name);
+    LanceDBTable* table = open_table(table_name);
+
+    auto schema = create_test_schema();
+    auto bytes = write_ipc_file(schema,
+        {create_test_record_batch(2, 0), create_test_record_batch(0, 2),
+         create_test_record_batch(3, 2)});
+
+    LanceDBRecordBatchReader* reader = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        bytes.data(), bytes.size(), &reader, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+
+    REQUIRE(lancedb_table_add(table, reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    REQUIRE(lancedb_table_version(table) == 2);
+
+    lancedb_table_free(table);
+  }
+
+  SECTION("Bad input fails before the table changes") {
+    const std::string table_name = "ipc_invalid_input";
+    create_empty_table(table_name);
+    LanceDBTable* table = open_table(table_name);
+    const auto version = lancedb_table_version(table);
+    const auto rows = lancedb_table_count_rows(table);
+
+    auto schema = create_test_schema();
+    auto first = create_test_record_batch(2, 0);
+    auto second = create_test_record_batch(3, 2);
+    const auto valid = write_ipc_file(schema, {first, second});
+    const auto stream = write_ipc_stream(schema, {first, second});
+    const auto corrupt = write_ipc_file_with_corrupt_second_batch(schema, first, second);
+
+    // The crafted file is what the test claims: the footer and the first batch
+    // are readable, the second batch is not
+    {
+      auto buffer = arrow::Buffer::FromString(
+          std::string(reinterpret_cast<const char*>(corrupt.data()), corrupt.size()));
+      auto input = std::make_shared<arrow::io::BufferReader>(buffer);
+      auto reader = arrow::ipc::RecordBatchFileReader::Open(input).ValueOrDie();
+      REQUIRE(reader->num_record_batches() == 2);
+      REQUIRE(reader->ReadRecordBatch(0).ok());
+      REQUIRE(!reader->ReadRecordBatch(1).ok());
+    }
+
+    char* error_message = nullptr;
+    LanceDBRecordBatchReader* reader = nullptr;
+    FFI_ArrowSchema* c_schema = nullptr;
+
+    // A missing pointer is a programming error, not bad input
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        nullptr, valid.size(), &reader, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        valid.data(), valid.size(), nullptr, nullptr, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // Bytes that cannot hold the footer their own last ten bytes announce are
+    // rejected before the decoder reads or allocates from them
+    auto oversized_footer = valid;
+    const uint32_t announced_footer = static_cast<uint32_t>(oversized_footer.size()) + 1;
+    std::memcpy(oversized_footer.data() + oversized_footer.size() - 10, &announced_footer,
+                sizeof(announced_footer));
+
+    // Bytes without an IPC file are input errors, reported with a decoding message
+    const std::vector<std::vector<uint8_t>> rejected = {
+        std::vector<uint8_t>{'A', 'R', 'R', 'O', 'W', '1', 0, 0},  // too short for a footer
+        std::vector<uint8_t>(valid.begin(), valid.end() - 40),      // truncated
+        stream,                                                    // stream, not a file
+        corrupt,                                                   // second batch corrupt
+        oversized_footer,                                          // footer does not fit
+    };
+    for (const auto& bytes : rejected) {
+      reader = nullptr;
+      c_schema = nullptr;
+      error_message = nullptr;
+      REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+          bytes.data(), bytes.size(), &reader, &c_schema, &error_message)
+          == LANCEDB_INVALID_INPUT);
+      REQUIRE(reader == nullptr);
+      REQUIRE(c_schema == nullptr);
+      REQUIRE(error_message != nullptr);
+      // The decoding failure keeps its diagnostic instead of a generic message
+      REQUIRE(std::string(error_message).find("Invalid input") != std::string::npos);
+      lancedb_free_string(error_message);
+    }
+
+    // The announced footer is checked against the input before decoding
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        oversized_footer.data(), oversized_footer.size(), &reader, nullptr, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("does not fit") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // An empty input is rejected without reading any byte
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        valid.data(), 0, &reader, nullptr, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // A size that cannot describe a buffer is rejected before any pointer is read
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        valid.data(), SIZE_MAX, &reader, nullptr, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("too large") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // A footer that fits the input but cannot be parsed is an input error
+    const auto unreadable_footer = write_ipc_file_with_unreadable_footer();
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        unreadable_footer.data(), unreadable_footer.size(), &reader, nullptr, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("Invalid input") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // A footer that parses but declares blocks past the end of the input is
+    // rejected before the decoder reads any of them
+    const auto blocks_outside = write_ipc_file_with_blocks_outside_the_file();
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        blocks_outside.data(), blocks_outside.size(), &reader, nullptr, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("ends outside the file") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // A file with dictionary blocks decodes with its dictionary encoding intact
+    const auto dictionary_file = write_ipc_file_with_dictionary_column();
+    reader = nullptr;
+    c_schema = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        dictionary_file.data(), dictionary_file.size(), &reader, &c_schema, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+    REQUIRE(c_schema != nullptr);
+    {
+      auto* schema = reinterpret_cast<ArrowSchema*>(c_schema);
+      REQUIRE(schema->n_children == 1);
+      REQUIRE(schema->children[0]->dictionary != nullptr);
+      REQUIRE(std::string(schema->children[0]->dictionary->format) == "u");
+    }
+    lancedb_free_arrow_schema(c_schema);
+    lancedb_record_batch_reader_free(reader);
+
+    // The same file works when only one of the two outputs is requested
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        dictionary_file.data(), dictionary_file.size(), &reader, nullptr, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+    lancedb_record_batch_reader_free(reader);
+
+    c_schema = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        dictionary_file.data(), dictionary_file.size(), nullptr, &c_schema, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(c_schema != nullptr);
+    lancedb_free_arrow_schema(c_schema);
+
+    // A schema the Arrow C ABI cannot carry is a normal invalid-input error, and
+    // neither requested output is handed over
+    const auto unrepresentable = write_ipc_file_with_unrepresentable_field_name();
+    reader = nullptr;
+    c_schema = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        unrepresentable.data(), unrepresentable.size(), &reader, &c_schema, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(reader == nullptr);
+    REQUIRE(c_schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("Invalid input") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // A valid file still decodes
+    reader = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_record_batch_reader_from_ipc_file(
+        valid.data(), valid.size(), &reader, nullptr, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(reader != nullptr);
+    lancedb_record_batch_reader_free(reader);
+
+    // Nothing reached the table
+    REQUIRE(lancedb_table_version(table) == version);
+    REQUIRE(lancedb_table_count_rows(table) == rows);
+
+    // The buffer entry points reject a missing handle the same way
+    LanceDBIpcBuffer buffer = {};
+    error_message = nullptr;
+    REQUIRE(lancedb_table_schema_ipc_file(nullptr, &buffer, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(buffer.data == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_table_free(table);
+  }
+}
+
 // Schema used by the schema-evolution tests. The key and score fields are
 // initially non-nullable so that nullability changes have an observable effect.
 static std::shared_ptr<arrow::Schema> create_schema_evolution_schema() {
