@@ -222,9 +222,18 @@ def _pe_exports(library: Path) -> set[str]:
 
 def _load_library(library: Path, target_os: str) -> ctypes.CDLL:
     if target_os == "windows":
-        os.add_dll_directory(str(library.parent))
-        return ctypes.WinDLL(str(library))
+        with os.add_dll_directory(str(library.parent)):
+            return ctypes.WinDLL(str(library))
     return ctypes.CDLL(str(library), mode=ctypes.RTLD_LOCAL)
+
+
+def _unload_library(loaded: ctypes.CDLL, target_os: str) -> None:
+    if target_os != "windows":
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.FreeLibrary.argtypes = [ctypes.c_void_p]
+    kernel32.FreeLibrary.restype = ctypes.c_int
+    kernel32.FreeLibrary(ctypes.c_void_p(loaded._handle))
 
 
 def verify_library(
@@ -259,18 +268,23 @@ def verify_library(
         )
 
     loaded = _load_library(library, target_os)
-    for name in sorted(expected):
-        getattr(loaded, name)
-    version_function = loaded.lancedb_version
-    version_function.restype = ctypes.c_char_p
-    runtime_version = version_function()
-    if runtime_version is None:
-        raise SystemExit(f"{library} returned a NULL version")
-    runtime_version = runtime_version.decode("utf-8")
-    if runtime_version != expected_version:
-        raise SystemExit(
-            f"{library} reports version {runtime_version!r}, expected {expected_version!r}"
-        )
+    try:
+        for name in sorted(expected):
+            getattr(loaded, name)
+        version_function = loaded.lancedb_version
+        version_function.restype = ctypes.c_char_p
+        runtime_version = version_function()
+        if runtime_version is None:
+            raise SystemExit(f"{library} returned a NULL version")
+        runtime_version = runtime_version.decode("utf-8")
+        if runtime_version != expected_version:
+            raise SystemExit(
+                f"{library} reports version {runtime_version!r}, expected {expected_version!r}"
+            )
+    finally:
+        # Windows keeps loaded DLLs locked until the process releases them,
+        # which would prevent the package verifier from removing its temp tree.
+        _unload_library(loaded, target_os)
     print(
         f"export surface OK: {library.name} has {len(expected)} public functions "
         f"and version {runtime_version}"
