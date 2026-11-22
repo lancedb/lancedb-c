@@ -603,6 +603,24 @@ LanceDBTableNamesBuilder* lancedb_table_names_builder_start_after(
 );
 
 /**
+ * Set the namespace path on TableNamesBuilder
+ *
+ * @param builder - pointer to LanceDBTableNamesBuilder
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @return Non-null pointer to LanceDBTableNamesBuilder on success, NULL on invalid input
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A zero length selects the root namespace. A positive length requires a non-NULL
+ * array whose entries are non-NULL, NUL-terminated UTF-8 strings.
+ */
+LanceDBTableNamesBuilder* lancedb_table_names_builder_namespace(
+    LanceDBTableNamesBuilder* builder,
+    const char* const* namespace_path,
+    size_t namespace_path_len
+);
+
+/**
  * Execute TableNamesBuilder and return table names
  *
  * @param builder - pointer to LanceDBTableNamesBuilder (consumed by this function)
@@ -672,6 +690,27 @@ LanceDBError lancedb_connection_drop_table(
 );
 
 /**
+ * Drop a table from a multi-level namespace path
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param table_name - null-terminated C string containing the table name
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_drop_table_path(
+    const LanceDBConnection* connection,
+    const char* table_name,
+    const char* const* namespace_path,
+    size_t namespace_path_len,
+    char** error_message
+);
+
+/**
  * Rename a table in the database
  *
  * @param connection - pointer to LanceDBConnection
@@ -696,6 +735,34 @@ LanceDBError lancedb_connection_rename_table(
 );
 
 /**
+ * Rename a table between multi-level namespace paths
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param old_name - null-terminated C string containing the current table name
+ * @param new_name - null-terminated C string containing the new table name
+ * @param cur_namespace_path - array of current namespace components (NULL when cur_namespace_path_len is 0)
+ * @param cur_namespace_path_len - number of current namespace components (0 for the root namespace)
+ * @param new_namespace_path - array of new namespace components (NULL when new_namespace_path_len is 0)
+ * @param new_namespace_path_len - number of new namespace components (0 for the root namespace)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This operation is only supported in LanceDB Cloud.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_rename_table_path(
+    const LanceDBConnection* connection,
+    const char* old_name,
+    const char* new_name,
+    const char* const* cur_namespace_path,
+    size_t cur_namespace_path_len,
+    const char* const* new_namespace_path,
+    size_t new_namespace_path_len,
+    char** error_message
+);
+
+/**
  * Drop all tables in the database
  *
  * @param connection - pointer to LanceDBConnection
@@ -709,6 +776,25 @@ LanceDBError lancedb_connection_rename_table(
 LanceDBError lancedb_connection_drop_all_tables(
     const LanceDBConnection* connection,
     const char* _namespace,
+    char** error_message
+);
+
+/**
+ * Drop all tables in a multi-level namespace path
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_drop_all_tables_path(
+    const LanceDBConnection* connection,
+    const char* const* namespace_path,
+    size_t namespace_path_len,
     char** error_message
 );
 
@@ -730,6 +816,25 @@ LanceDBError lancedb_connection_create_namespace(
 );
 
 /**
+ * Create a namespace at a multi-level namespace path
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_create_namespace_path(
+    const LanceDBConnection* connection,
+    const char* const* namespace_path,
+    size_t namespace_path_len,
+    char** error_message
+);
+
+/**
  * Drop a namespace
  *
  * @param connection - pointer to LanceDBConnection
@@ -743,6 +848,25 @@ LanceDBError lancedb_connection_create_namespace(
 LanceDBError lancedb_connection_drop_namespace(
     const LanceDBConnection* connection,
     const char* namespace_name,
+    char** error_message
+);
+
+/**
+ * Drop a namespace at a multi-level namespace path
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_drop_namespace_path(
+    const LanceDBConnection* connection,
+    const char* const* namespace_path,
+    size_t namespace_path_len,
     char** error_message
 );
 
@@ -769,6 +893,71 @@ LanceDBError lancedb_connection_list_namespaces(
 );
 
 /**
+ * List all namespaces under a multi-level namespace path
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @param namespaces_out - pointer to receive array of string pointers
+ * @param count_out - pointer to receive count of namespace names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The caller is responsible for freeing the returned strings and array
+ * using lancedb_free_namespace_list(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_list_namespaces_path(
+    const LanceDBConnection* connection,
+    const char* const* namespace_path,
+    size_t namespace_path_len,
+    char*** namespaces_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Description of a namespace returned by lancedb_connection_describe_namespace_path
+ *
+ * property_keys and property_values are parallel arrays of property_count entries,
+ * and likewise for context_keys and context_values. has_properties and has_context
+ * distinguish a map the SDK omitted (false) from an empty map (true, with NULL
+ * arrays and a zero count).
+ */
+typedef struct {
+    bool has_properties;         // Whether the SDK returned namespace properties
+    char** property_keys;        // Namespace property names
+    char** property_values;      // Namespace property values
+    size_t property_count;       // Number of namespace properties
+    bool has_context;            // Whether the SDK returned response context
+    char** context_keys;         // Response context names
+    char** context_values;       // Response context values
+    size_t context_count;        // Number of response context entries
+} LanceDBNamespaceDescription;
+
+/**
+ * Describe a namespace at a multi-level namespace path
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param namespace_path - array of namespace component strings (NULL when namespace_path_len is 0)
+ * @param namespace_path_len - number of namespace components (0 for the root namespace)
+ * @param description_out - pointer to receive the namespace description
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, free the description with lancedb_free_namespace_description().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_describe_namespace_path(
+    const LanceDBConnection* connection,
+    const char* const* namespace_path,
+    size_t namespace_path_len,
+    LanceDBNamespaceDescription* description_out,
+    char** error_message
+);
+
+/**
  * Free namespace list array returned by lancedb_connection_list_namespaces
  *
  * @param namespaces - pointer to array returned by lancedb_connection_list_namespaces()
@@ -777,6 +966,17 @@ LanceDBError lancedb_connection_list_namespaces(
  * After calling this function, the namespaces pointer must not be used.
  */
 void lancedb_free_namespace_list(char** namespaces, size_t count);
+
+/**
+ * Free a namespace description returned by lancedb_connection_describe_namespace_path
+ *
+ * @param description - pointer to a description returned by
+ *   lancedb_connection_describe_namespace_path(), or NULL
+ *
+ * The arrays and their strings are freed and the fields are zeroed. The struct
+ * itself stays owned by the caller.
+ */
+void lancedb_free_namespace_description(LanceDBNamespaceDescription* description);
 
 /**
  * Free a Connection

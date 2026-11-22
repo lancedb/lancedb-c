@@ -3,6 +3,7 @@
 
 //! Connection-related FFI functions for LanceDB C bindings
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::ptr;
@@ -12,7 +13,9 @@ use std::sync::OnceLock;
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::Schema;
 use futures::TryStreamExt;
-use lance_namespace::models::{CreateNamespaceRequest, DropNamespaceRequest};
+use lance_namespace::models::{
+    CreateNamespaceRequest, DescribeNamespaceRequest, DropNamespaceRequest,
+};
 use lancedb::connection::{connect, ConnectBuilder, Connection, TableNamesBuilder};
 use lancedb::utils::validate_table_name;
 use lancedb::Table;
@@ -91,6 +94,171 @@ static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"))
+}
+
+/// Convert a borrowed C namespace path into the SDK's owned path representation.
+///
+/// A zero length is the root namespace and accepts a NULL array pointer. A positive
+/// length requires a non-NULL array of non-NULL, NUL-terminated UTF-8 strings.
+/// Component validation is left to the SDK so that the binding follows the
+/// backend's namespace rules.
+///
+/// This is the single conversion for every namespace path entry point, including
+/// the table creation and opening paths, so validation and ownership stay in one
+/// place.
+///
+/// # Safety
+/// - `namespace_path` must point to `namespace_path_len` readable pointers, or be
+///   NULL when `namespace_path_len` is zero.
+/// - Every element must be a valid NUL-terminated C string.
+pub(crate) unsafe fn namespace_path_from_c(
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    error_message: *mut *mut c_char,
+) -> Option<Vec<String>> {
+    if namespace_path_len == 0 {
+        return Some(Vec::new());
+    }
+
+    if namespace_path.is_null() {
+        set_invalid_argument_message(error_message);
+        return None;
+    }
+
+    let mut path = Vec::with_capacity(namespace_path_len);
+    for index in 0..namespace_path_len {
+        let component = *namespace_path.add(index);
+        if component.is_null() {
+            set_invalid_argument_message(error_message);
+            return None;
+        }
+
+        let Ok(component) = CStr::from_ptr(component).to_str() else {
+            set_invalid_argument_message(error_message);
+            return None;
+        };
+        path.push(component.to_string());
+    }
+
+    Some(path)
+}
+
+/// Convert one optional namespace name, where NULL is the root namespace.
+unsafe fn single_namespace_from_c(
+    namespace_name: *const c_char,
+    error_message: *mut *mut c_char,
+) -> Option<Vec<String>> {
+    if namespace_name.is_null() {
+        return Some(Vec::new());
+    }
+    namespace_path_from_c(&namespace_name, 1, error_message)
+}
+
+/// Copy owned strings into a malloc'd array of owned C strings.
+///
+/// An empty input returns a NULL array, matching the empty list contract of the
+/// public API. Returns NULL on allocation or interior-NUL failure.
+unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
+    let count = values.len();
+    if count == 0 {
+        return Some(ptr::null_mut());
+    }
+
+    let array = libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+    if array.is_null() {
+        return None;
+    }
+
+    for (index, value) in values.into_iter().enumerate() {
+        let Ok(value) = CString::new(value) else {
+            free_c_string_array(array, index);
+            return None;
+        };
+        *array.add(index) = value.into_raw();
+    }
+
+    Some(array)
+}
+
+/// Free an array returned by `c_string_array`.
+unsafe fn free_c_string_array(values: *mut *mut c_char, count: usize) {
+    if values.is_null() {
+        return;
+    }
+
+    for index in 0..count {
+        let value = *values.add(index);
+        if !value.is_null() {
+            let _ = CString::from_raw(value);
+        }
+    }
+    libc::free(values as *mut c_void);
+}
+
+/// Convert an optional SDK string map into parallel owned C string arrays.
+///
+/// The boolean distinguishes a map the SDK omitted from an empty map. A present
+/// empty map has no arrays and a zero count.
+unsafe fn c_string_map(
+    map: Option<HashMap<String, String>>,
+) -> Result<(bool, *mut *mut c_char, *mut *mut c_char, usize), ()> {
+    let Some(map) = map else {
+        return Ok((false, ptr::null_mut(), ptr::null_mut(), 0));
+    };
+
+    let count = map.len();
+    if count == 0 {
+        return Ok((true, ptr::null_mut(), ptr::null_mut(), 0));
+    }
+
+    let keys = libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+    let values = libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+    if keys.is_null() || values.is_null() {
+        if !keys.is_null() {
+            libc::free(keys as *mut c_void);
+        }
+        if !values.is_null() {
+            libc::free(values as *mut c_void);
+        }
+        return Err(());
+    }
+
+    for (index, (key, value)) in map.into_iter().enumerate() {
+        let (Ok(key), Ok(value)) = (CString::new(key), CString::new(value)) else {
+            free_c_string_array(keys, index);
+            free_c_string_array(values, index);
+            return Err(());
+        };
+        *keys.add(index) = key.into_raw();
+        *values.add(index) = value.into_raw();
+    }
+
+    Ok((true, keys, values, count))
+}
+
+/// Write a string listing result into the C output parameters.
+unsafe fn write_string_list(
+    result: Result<Vec<String>, lancedb::error::Error>,
+    values_out: *mut *mut *mut c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    match result {
+        Ok(values) => {
+            *count_out = values.len();
+            match c_string_array(values) {
+                Some(array) => {
+                    *values_out = array;
+                    LanceDBError::Success
+                }
+                None => {
+                    set_unknown_error_message(error_message);
+                    LanceDBError::Unknown
+                }
+            }
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
 }
 
 /// Create a ConnectBuilder for the given URI
@@ -647,39 +815,16 @@ pub unsafe extern "C" fn lancedb_connection_table_names(
             let count = names.len();
             *count_out = count;
 
-            if count == 0 {
-                *names_out = ptr::null_mut();
-                return LanceDBError::Success;
-            }
-
-            // Allocate array of string pointers
-            let names_array =
-                libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
-            if names_array.is_null() {
-                set_unknown_error_message(error_message);
-                return LanceDBError::Unknown;
-            }
-
-            // Convert each string and store pointer
-            for (i, name) in names.into_iter().enumerate() {
-                match CString::new(name) {
-                    Ok(c_str) => {
-                        *names_array.add(i) = c_str.into_raw();
-                    }
-                    Err(_) => {
-                        // Clean up already allocated strings
-                        for j in 0..i {
-                            let _ = CString::from_raw(*names_array.add(j));
-                        }
-                        libc::free(names_array as *mut libc::c_void);
-                        set_unknown_error_message(error_message);
-                        return LanceDBError::Unknown;
-                    }
+            match c_string_array(names) {
+                Some(names_array) => {
+                    *names_out = names_array;
+                    LanceDBError::Success
+                }
+                None => {
+                    set_unknown_error_message(error_message);
+                    LanceDBError::Unknown
                 }
             }
-
-            *names_out = names_array;
-            LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
     }
@@ -692,15 +837,7 @@ pub unsafe extern "C" fn lancedb_connection_table_names(
 /// - `count` must match the count returned by `lancedb_connection_table_names`
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_free_table_names(names: *mut *mut c_char, count: usize) {
-    if !names.is_null() {
-        for i in 0..count {
-            let name_ptr = *names.add(i);
-            if !name_ptr.is_null() {
-                let _ = CString::from_raw(name_ptr);
-            }
-        }
-        libc::free(names as *mut libc::c_void);
-    }
+    free_c_string_array(names, count);
 }
 
 /// Create a TableNamesBuilder for paginated table listing
@@ -797,6 +934,44 @@ pub unsafe extern "C" fn lancedb_table_names_builder_start_after(
     Box::into_raw(boxed_builder)
 }
 
+/// Set the namespace path on TableNamesBuilder
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connection_table_names_builder`
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - Non-null pointer to LanceDBTableNamesBuilder on success
+/// - Null pointer when the builder, the path, or a path component is invalid
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_names_builder_namespace(
+    builder: *mut LanceDBTableNamesBuilder,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+) -> *mut LanceDBTableNamesBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, ptr::null_mut())
+    else {
+        return ptr::null_mut();
+    };
+
+    let table_names_builder = *builder_box.inner;
+    let updated_builder = table_names_builder.namespace(namespace_path);
+
+    let boxed_builder = Box::new(LanceDBTableNamesBuilder {
+        inner: Box::new(updated_builder),
+    });
+
+    Box::into_raw(boxed_builder)
+}
+
 /// Execute TableNamesBuilder and return table names
 ///
 /// # Safety
@@ -837,39 +1012,16 @@ pub unsafe extern "C" fn lancedb_table_names_builder_execute(
             let count = names.len();
             *count_out = count;
 
-            if count == 0 {
-                *names_out = ptr::null_mut();
-                return LanceDBError::Success;
-            }
-
-            // Allocate array of string pointers
-            let names_array =
-                libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
-            if names_array.is_null() {
-                set_unknown_error_message(error_message);
-                return LanceDBError::Unknown;
-            }
-
-            // Convert each string and store pointer
-            for (i, name) in names.into_iter().enumerate() {
-                match CString::new(name) {
-                    Ok(c_str) => {
-                        *names_array.add(i) = c_str.into_raw();
-                    }
-                    Err(_) => {
-                        // Clean up already allocated strings
-                        for j in 0..i {
-                            let _ = CString::from_raw(*names_array.add(j));
-                        }
-                        libc::free(names_array as *mut libc::c_void);
-                        set_unknown_error_message(error_message);
-                        return LanceDBError::Unknown;
-                    }
+            match c_string_array(names) {
+                Some(names_array) => {
+                    *names_out = names_array;
+                    LanceDBError::Success
+                }
+                None => {
+                    set_unknown_error_message(error_message);
+                    LanceDBError::Unknown
                 }
             }
-
-            *names_out = names_array;
-            LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
     }
@@ -894,15 +1046,68 @@ pub unsafe extern "C" fn lancedb_table_names_builder_free(builder: *mut LanceDBT
 /// - `count` must match the count returned by `lancedb_connection_list_namespaces`
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_free_namespace_list(namespaces: *mut *mut c_char, count: usize) {
-    if !namespaces.is_null() {
-        for i in 0..count {
-            let namespace_ptr = *namespaces.add(i);
-            if !namespace_ptr.is_null() {
-                let _ = CString::from_raw(namespace_ptr);
-            }
-        }
-        libc::free(namespaces as *mut libc::c_void);
+    free_c_string_array(namespaces, count);
+}
+
+/// A namespace description returned by `lancedb_connection_describe_namespace_path`
+///
+/// `property_keys` and `property_values` are parallel arrays of `property_count`
+/// entries, and likewise for the context arrays. `has_properties` and
+/// `has_context` distinguish a map the SDK omitted (false) from an empty map
+/// (true, with NULL arrays and a zero count).
+#[repr(C)]
+pub struct LanceDBNamespaceDescription {
+    /// Whether the SDK returned namespace properties
+    pub has_properties: bool,
+    /// Namespace property names
+    pub property_keys: *mut *mut c_char,
+    /// Namespace property values
+    pub property_values: *mut *mut c_char,
+    /// Number of namespace properties
+    pub property_count: usize,
+    /// Whether the SDK returned response context
+    pub has_context: bool,
+    /// Response context names
+    pub context_keys: *mut *mut c_char,
+    /// Response context values
+    pub context_values: *mut *mut c_char,
+    /// Number of response context entries
+    pub context_count: usize,
+}
+
+/// Free a namespace description returned by
+/// `lancedb_connection_describe_namespace_path`
+///
+/// The arrays and their strings are freed and the fields are zeroed. The struct
+/// itself stays owned by the caller.
+///
+/// # Safety
+/// - `description` must be a pointer to a description returned by
+///   `lancedb_connection_describe_namespace_path`, or NULL
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_namespace_description(
+    description: *mut LanceDBNamespaceDescription,
+) {
+    if description.is_null() {
+        return;
     }
+
+    let description = &mut *description;
+    free_c_string_array(description.property_keys, description.property_count);
+    free_c_string_array(description.property_values, description.property_count);
+    free_c_string_array(description.context_keys, description.context_count);
+    free_c_string_array(description.context_values, description.context_count);
+
+    *description = LanceDBNamespaceDescription {
+        has_properties: false,
+        property_keys: ptr::null_mut(),
+        property_values: ptr::null_mut(),
+        property_count: 0,
+        has_context: false,
+        context_keys: ptr::null_mut(),
+        context_values: ptr::null_mut(),
+        context_count: 0,
+    };
 }
 
 /// Open an existing table
@@ -981,17 +1186,53 @@ pub unsafe extern "C" fn lancedb_connection_drop_table(
     let conn = &(*connection).inner;
     let runtime = get_runtime();
 
-    let result = if namespace.is_null() {
-        runtime.block_on(conn.drop_table(table_name_str, &[]))
-    } else {
-        let Ok(namespace_str) = CStr::from_ptr(namespace).to_str() else {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        };
-        runtime.block_on(conn.drop_table(table_name_str, &[String::from(namespace_str)]))
+    let Some(namespace_path) = single_namespace_from_c(namespace, error_message) else {
+        return LanceDBError::InvalidArgument;
     };
 
-    match result {
+    match runtime.block_on(conn.drop_table(table_name_str, &namespace_path)) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Drop a table from a multi-level namespace path
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `table_name` must be a valid null-terminated C string
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero for the root namespace
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_drop_table_path(
+    connection: *const LanceDBConnection,
+    table_name: *const c_char,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() || table_name.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(table_name_str) = CStr::from_ptr(table_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    let conn = &(*connection).inner;
+    match get_runtime().block_on(conn.drop_table(table_name_str, &namespace_path)) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1034,31 +1275,77 @@ pub unsafe extern "C" fn lancedb_connection_rename_table(
     let conn = &(*connection).inner;
     let runtime = get_runtime();
 
-    let cur_namespace_vec = if cur_namespace.is_null() {
-        Vec::new()
-    } else {
-        let Ok(cur_namespace_str) = CStr::from_ptr(cur_namespace).to_str() else {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        };
-        vec![String::from(cur_namespace_str)]
+    let Some(cur_namespace_path) = single_namespace_from_c(cur_namespace, error_message) else {
+        return LanceDBError::InvalidArgument;
     };
-
-    let new_namespace_vec = if new_namespace.is_null() {
-        Vec::new()
-    } else {
-        let Ok(new_namespace_str) = CStr::from_ptr(new_namespace).to_str() else {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        };
-        vec![String::from(new_namespace_str)]
+    let Some(new_namespace_path) = single_namespace_from_c(new_namespace, error_message) else {
+        return LanceDBError::InvalidArgument;
     };
 
     match runtime.block_on(conn.rename_table(
         old_name_str,
         new_name_str,
-        &cur_namespace_vec,
-        &new_namespace_vec,
+        &cur_namespace_path,
+        &new_namespace_path,
+    )) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Rename a table between multi-level namespace paths
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `old_name` and `new_name` must be valid null-terminated C strings
+/// - `cur_namespace_path` and `new_namespace_path` must each point to their
+///   corresponding length of valid C strings, or be NULL when the length is zero
+///   for the root namespace
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_rename_table_path(
+    connection: *const LanceDBConnection,
+    old_name: *const c_char,
+    new_name: *const c_char,
+    cur_namespace_path: *const *const c_char,
+    cur_namespace_path_len: usize,
+    new_namespace_path: *const *const c_char,
+    new_namespace_path_len: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() || old_name.is_null() || new_name.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(old_name_str) = CStr::from_ptr(old_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let Ok(new_name_str) = CStr::from_ptr(new_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let Some(cur_namespace_path) =
+        namespace_path_from_c(cur_namespace_path, cur_namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
+    let Some(new_namespace_path) =
+        namespace_path_from_c(new_namespace_path, new_namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    match get_runtime().block_on((*connection).inner.rename_table(
+        old_name_str,
+        new_name_str,
+        &cur_namespace_path,
+        &new_namespace_path,
     )) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
@@ -1088,17 +1375,45 @@ pub unsafe extern "C" fn lancedb_connection_drop_all_tables(
     let conn = &(*connection).inner;
     let runtime = get_runtime();
 
-    let result = if namespace.is_null() {
-        runtime.block_on(conn.drop_all_tables(&[]))
-    } else {
-        let Ok(namespace_str) = CStr::from_ptr(namespace).to_str() else {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        };
-        runtime.block_on(conn.drop_all_tables(&[String::from(namespace_str)]))
+    let Some(namespace_path) = single_namespace_from_c(namespace, error_message) else {
+        return LanceDBError::InvalidArgument;
     };
 
-    match result {
+    match runtime.block_on(conn.drop_all_tables(&namespace_path)) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Drop all tables in a multi-level namespace path
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero for the root namespace
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_drop_all_tables_path(
+    connection: *const LanceDBConnection,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    match get_runtime().block_on((*connection).inner.drop_all_tables(&namespace_path)) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1124,17 +1439,49 @@ pub unsafe extern "C" fn lancedb_connection_create_namespace(
         return LanceDBError::InvalidArgument;
     }
 
-    let Ok(namespace_str) = CStr::from_ptr(namespace_name).to_str() else {
-        set_invalid_argument_message(error_message);
+    let Some(namespace_path) = single_namespace_from_c(namespace_name, error_message) else {
         return LanceDBError::InvalidArgument;
     };
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let mut request = CreateNamespaceRequest::new();
+    request.id = Some(namespace_path);
+    match get_runtime().block_on((*connection).inner.create_namespace(request)) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Create a namespace at a multi-level namespace path
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero for the root namespace
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_create_namespace_path(
+    connection: *const LanceDBConnection,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
 
     let mut request = CreateNamespaceRequest::new();
-    request.id = Some(vec![namespace_str.to_string()]);
-    match runtime.block_on(conn.create_namespace(request)) {
+    request.id = Some(namespace_path);
+    match get_runtime().block_on((*connection).inner.create_namespace(request)) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1160,17 +1507,49 @@ pub unsafe extern "C" fn lancedb_connection_drop_namespace(
         return LanceDBError::InvalidArgument;
     }
 
-    let Ok(namespace_str) = CStr::from_ptr(namespace_name).to_str() else {
-        set_invalid_argument_message(error_message);
+    let Some(namespace_path) = single_namespace_from_c(namespace_name, error_message) else {
         return LanceDBError::InvalidArgument;
     };
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
+    let mut request = DropNamespaceRequest::new();
+    request.id = Some(namespace_path);
+    match get_runtime().block_on((*connection).inner.drop_namespace(request)) {
+        Ok(_) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Drop a namespace at a multi-level namespace path
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero for the root namespace
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_drop_namespace_path(
+    connection: *const LanceDBConnection,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
 
     let mut request = DropNamespaceRequest::new();
-    request.id = Some(vec![namespace_str.to_string()]);
-    match runtime.block_on(conn.drop_namespace(request)) {
+    request.id = Some(namespace_path);
+    match get_runtime().block_on((*connection).inner.drop_namespace(request)) {
         Ok(_) => LanceDBError::Success,
         Err(e) => handle_error(&e, error_message),
     }
@@ -1201,63 +1580,130 @@ pub unsafe extern "C" fn lancedb_connection_list_namespaces(
         return LanceDBError::InvalidArgument;
     }
 
-    let parent_namespace = if namespace_parent.is_null() {
-        Vec::new() // Root namespace
-    } else {
-        let Ok(parent_str) = CStr::from_ptr(namespace_parent).to_str() else {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        };
-        vec![parent_str.to_string()]
+    let Some(parent_namespace) = single_namespace_from_c(namespace_parent, error_message) else {
+        return LanceDBError::InvalidArgument;
     };
 
-    let conn = &(*connection).inner;
-    let runtime = get_runtime();
-
-    match runtime.block_on(
-        conn.list_namespaces(&parent_namespace, Default::default())
+    let result = get_runtime().block_on(
+        (*connection)
+            .inner
+            .list_namespaces(&parent_namespace, Default::default())
             .try_collect::<Vec<String>>(),
-    ) {
-        Ok(namespaces) => {
-            let count = namespaces.len();
-            *count_out = count;
+    );
+    write_string_list(result, namespaces_out, count_out, error_message)
+}
 
-            if count == 0 {
-                *namespaces_out = ptr::null_mut();
-                return LanceDBError::Success;
-            }
+/// List all namespaces under a multi-level namespace path
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero for the root namespace
+/// - `namespaces_out` must be a valid pointer to receive the array of string pointers
+/// - `count_out` must be a valid pointer to receive the count
+/// - `error_message` can be NULL to ignore detailed error messages
+/// - The caller is responsible for freeing the returned strings and array
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_list_namespaces_path(
+    connection: *const LanceDBConnection,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    namespaces_out: *mut *mut *mut c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() || namespaces_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
 
-            // Allocate array of string pointers
-            let namespaces_array =
-                libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
-            if namespaces_array.is_null() {
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    let result = get_runtime().block_on(
+        (*connection)
+            .inner
+            .list_namespaces(&namespace_path, Default::default())
+            .try_collect::<Vec<String>>(),
+    );
+    write_string_list(result, namespaces_out, count_out, error_message)
+}
+
+/// Describe a namespace at a multi-level namespace path
+///
+/// # Safety
+/// - `connection` must be a valid pointer
+/// - `namespace_path` must point to `namespace_path_len` valid C strings, or be NULL
+///   when `namespace_path_len` is zero for the root namespace
+/// - `description_out` must be a valid pointer to receive the description
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On success, free the description with `lancedb_free_namespace_description`.
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_describe_namespace_path(
+    connection: *const LanceDBConnection,
+    namespace_path: *const *const c_char,
+    namespace_path_len: usize,
+    description_out: *mut LanceDBNamespaceDescription,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if connection.is_null() || description_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(namespace_path) =
+        namespace_path_from_c(namespace_path, namespace_path_len, error_message)
+    else {
+        return LanceDBError::InvalidArgument;
+    };
+
+    let mut request = DescribeNamespaceRequest::new();
+    request.id = Some(namespace_path);
+    let response = match get_runtime().block_on((*connection).inner.describe_namespace(request)) {
+        Ok(response) => response,
+        Err(e) => return handle_error(&e, error_message),
+    };
+
+    let (has_properties, property_keys, property_values, property_count) =
+        match c_string_map(response.properties) {
+            Ok(properties) => properties,
+            Err(()) => {
                 set_unknown_error_message(error_message);
                 return LanceDBError::Unknown;
             }
-
-            // Convert each string and store pointer
-            for (i, namespace) in namespaces.into_iter().enumerate() {
-                match CString::new(namespace) {
-                    Ok(c_str) => {
-                        *namespaces_array.add(i) = c_str.into_raw();
-                    }
-                    Err(_) => {
-                        // Clean up already allocated strings
-                        for j in 0..i {
-                            let _ = CString::from_raw(*namespaces_array.add(j));
-                        }
-                        libc::free(namespaces_array as *mut libc::c_void);
-                        set_unknown_error_message(error_message);
-                        return LanceDBError::Unknown;
-                    }
-                }
+        };
+    let (has_context, context_keys, context_values, context_count) =
+        match c_string_map(response.context) {
+            Ok(context) => context,
+            Err(()) => {
+                free_c_string_array(property_keys, property_count);
+                free_c_string_array(property_values, property_count);
+                set_unknown_error_message(error_message);
+                return LanceDBError::Unknown;
             }
+        };
 
-            *namespaces_out = namespaces_array;
-            LanceDBError::Success
-        }
-        Err(e) => handle_error(&e, error_message),
-    }
+    *description_out = LanceDBNamespaceDescription {
+        has_properties,
+        property_keys,
+        property_values,
+        property_count,
+        has_context,
+        context_keys,
+        context_values,
+        context_count,
+    };
+    LanceDBError::Success
 }
 
 /// Free a Connection
