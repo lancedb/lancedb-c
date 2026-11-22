@@ -317,6 +317,7 @@ ENUM_PREFIXES = {
     "LanceDBCherryPickStatus": "LANCEDB_CHERRY_PICK_STATUS_",
     "LanceDBCherryPickErrorCode": "LANCEDB_CHERRY_PICK_ERROR_",
     "LanceDBReadConsistencyType": "LANCEDB_READ_CONSISTENCY_",
+    "LanceDBNamespacePushdownOperation": "LANCEDB_NAMESPACE_PUSHDOWN_",
 }
 ENUM_MEMBER_RENAMES = {
     ("LanceDBIndexType", "BTree"): "BTREE",
@@ -356,6 +357,10 @@ FUNCTION_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     ("lancedb_table_optimize", "optimize_type"): Allow(enum_int="LanceDBOptimizeType"),
     ("lancedb_vector_query_distance_type", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
     ("lancedb_vector_query_norm", "normalize_method"): Allow(enum_int="LanceDBNormalizeMethod"),
+    (
+        "lancedb_connect_namespace_builder_pushdown_operation",
+        "operation",
+    ): Allow(enum_int="LanceDBNamespacePushdownOperation"),
     # Rust reads the Arrow C structures without mutating them; the public
     # header leaves the caller's pointers mutable.
     ("lancedb_json_matches", "arrays"): Allow(allow_const=True),

@@ -124,6 +124,11 @@ const char* lancedb_version(void);
 typedef struct LanceDBConnectBuilder LanceDBConnectBuilder;
 
 /**
+ * Opaque handle to a LanceDB ConnectNamespaceBuilder
+ */
+typedef struct LanceDBConnectNamespaceBuilder LanceDBConnectNamespaceBuilder;
+
+/**
  * Opaque handle to a LanceDB Connection
  */
 typedef struct LanceDBConnection LanceDBConnection;
@@ -1157,6 +1162,208 @@ LanceDBConnectBuilder* lancedb_connect_builder_client_config(LanceDBConnectBuild
  * After calling this function, the builder pointer must not be used.
  */
 void lancedb_connect_builder_free(LanceDBConnectBuilder* builder);
+
+/**
+ * Namespace operations that can be pushed down to the namespace backend
+ *
+ * These values are the SDK's complete set of pushdown operations. They are
+ * explicit so a C caller can pass and be rejected for any other value.
+ */
+typedef enum {
+    LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE = 0,  // Execute queries through the namespace server
+    LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE = 1  // Request the SDK's CreateTable pushdown
+} LanceDBNamespacePushdownOperation;
+
+/**
+ * Create a ConnectNamespaceBuilder for a Lance namespace implementation
+ *
+ * @param ns_impl - NUL-terminated namespace implementation name
+ * @param property_keys - array of property names (NULL when property_count is 0)
+ * @param property_values - array of property values matching property_keys
+ * @param property_count - number of namespace implementation properties
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * "dir" is always available and requires a "root" property. "rest" is
+ * available only when the library is built with the remote feature. The pinned
+ * SDK rejects any other implementation when the builder is executed. Other
+ * properties, their defaults, and required values are defined by the selected
+ * namespace implementation.
+ *
+ * The implementation name, property arrays, and every string they point to are
+ * borrowed only for the duration of this call and copied into the returned
+ * builder. A zero property_count accepts NULL arrays. A positive count requires
+ * both arrays and every entry to be non-NULL, NUL-terminated UTF-8 strings.
+ *
+ * For the "dir" implementation, properties whose names start with "storage."
+ * apply to its own root object store. This is separate from the connection
+ * storage-options map set by
+ * lancedb_connect_namespace_builder_storage_option().
+ *
+ * The returned builder must be freed with
+ * lancedb_connect_namespace_builder_free() if it is not executed.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace(
+    const char* ns_impl,
+    const char* const* property_keys,
+    const char* const* property_values,
+    size_t property_count
+);
+
+/**
+ * Execute the namespace connection and return a Connection handle
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param connection - pointer to receive the LanceDBConnection pointer
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The builder is consumed on every path and must not be used after calling.
+ * connection is written only on success, when it receives a handle that must be
+ * freed with lancedb_connection_free(); on failure it is left unchanged. An
+ * existing *error_message value is preserved on success, consistent with
+ * lancedb_connect_builder_execute(). On error, a non-NULL error_message
+ * receives a message that the caller frees with lancedb_free_string().
+ *
+ * The SDK decides whether the implementation exists in this build, validates
+ * the implementation properties, and performs the connection. The URI of the
+ * returned connection is "namespace://<implementation>".
+ */
+LanceDBError lancedb_connect_namespace_builder_execute(
+    LanceDBConnectNamespaceBuilder* builder,
+    LanceDBConnection** connection,
+    char** error_message
+);
+
+/**
+ * Set an option for the storage layer of a namespace connection
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param key - NUL-terminated option name
+ * @param value - NUL-terminated option value
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL. These options apply to table
+ * access through the namespace connection. They are not the "storage.*"
+ * implementation properties that the "dir" namespace uses for its own root
+ * object store.
+ *
+ * At the pinned SDK, the table creation path falls back to this map only when
+ * the namespace response omits storage_options. An explicit empty
+ * storage_options map prevents that fallback. The selected map overrides
+ * per-write keys with the same name.
+ *
+ * Opening a table uses the describe_table storage options plus the options
+ * supplied on that open request, with namespace values winning on overlaps; it
+ * does not use this connection-level map there.
+ *
+ * The SDK does not validate every option during the namespace connection
+ * itself.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_storage_option(
+    LanceDBConnectNamespaceBuilder* builder,
+    const char* key,
+    const char* value
+);
+
+/**
+ * Set an additional property for the namespace client
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param key - NUL-terminated property name
+ * @param value - NUL-terminated property value
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL.
+ *
+ * Namespace client properties are merged into the implementation properties
+ * when the builder is executed. The SDK decides which value wins when the same
+ * key is supplied as an implementation property and as a namespace client
+ * property. For the "dir" implementation, a property whose name starts with
+ * "storage." configures its own root object store even when it is supplied
+ * through this setter; this differs from
+ * lancedb_connect_namespace_builder_storage_option(), which configures table
+ * access for the connection.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_namespace_client_property(
+    LanceDBConnectNamespaceBuilder* builder,
+    const char* key,
+    const char* value
+);
+
+/**
+ * Set the read consistency interval for a namespace connection
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param interval_ms - read consistency interval in milliseconds
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Leaving this setter unused keeps the SDK default: no freshness constraint is
+ * added to reads. An explicit 0 requests strong consistency. A positive value
+ * requests eventual consistency. A NULL builder returns NULL.
+ *
+ * This has the same meaning and defaults as
+ * lancedb_connect_builder_read_consistency_interval_ms() for a URI connection.
+ * The configured mode can be read back with
+ * lancedb_connection_read_consistency().
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_read_consistency_interval_ms(
+    LanceDBConnectNamespaceBuilder* builder,
+    uint64_t interval_ms
+);
+
+/**
+ * Set a session for the namespace connection builder
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param session - pointer to LanceDBSession, or NULL to keep the default session
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Passing NULL session is a no-op. A non-NULL session is borrowed for the call;
+ * the builder keeps it alive through a cloned reference, and the caller still
+ * owns its handle and must free it with lancedb_session_free().
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_session(
+    LanceDBConnectNamespaceBuilder* builder,
+    const LanceDBSession* session
+);
+
+/**
+ * Add an operation to push down to the namespace backend
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param operation - raw integer value of a LanceDBNamespacePushdownOperation enumerator
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Operations are opt-in; unset means the SDK executes them locally. Call this
+ * setter more than once to add multiple operations. A value outside the
+ * LanceDBNamespacePushdownOperation enumerators returns NULL.
+ *
+ * With LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE, queries execute through the
+ * namespace server; a query with a nonempty order_by still executes locally and
+ * needs client access to table storage. LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE
+ * is the SDK's other pushdown value; at the pinned SDK version the namespace
+ * create path still declares the table and writes locally, so this option is
+ * forwarded without changing that path. The SDK owns whether and how an
+ * implementation applies either operation.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_pushdown_operation(
+    LanceDBConnectNamespaceBuilder* builder,
+    int operation
+);
+
+/**
+ * Free a ConnectNamespaceBuilder
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ *
+ * After calling this function, the builder pointer must not be used.
+ */
+void lancedb_connect_namespace_builder_free(LanceDBConnectNamespaceBuilder* builder);
 
 /**
  * Get the URI of the connection
@@ -2274,9 +2481,73 @@ LanceDBError lancedb_table_fetch_blob_files(
 void lancedb_free_blob_files(LanceDBBlobFile** files, size_t count);
 
 /**
+ * Open one lazy blob file from a borrowed Arrow descriptor row
+ *
+ * @param table - table whose source opened the descriptor
+ * @param descriptors - one Arrow C Data struct array of descriptor rows, borrowed for the call
+ * @param descriptor_schema - Arrow C Data schema for `descriptors`, borrowed for the call
+ * @param row_index - zero-based logical row to open
+ * @param file_out - pointer to receive the optional handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The input is the struct column produced by the SDK SQL `blob_descriptor`
+ * function. Fields are identified by name and must have these exact Arrow
+ * types: kind UInt8, position UInt64, size UInt64, blob_id UInt32, blob_uri
+ * Utf8, and source Struct{uri Utf8, version UInt64, committed_at_micros UInt64,
+ * branch Utf8, column Utf8, row_reference UInt64, row_is_address Boolean}.
+ * Field order does not matter and extra fields are ignored. A consumer may pass
+ * a column produced by another SDK or received through Arrow Flight.
+ *
+ * `descriptors` and `descriptor_schema` are borrowed only for this call and
+ * remain owned by the caller. This function does not consume them and does not
+ * call their Arrow C Data release callbacks; the caller releases them normally
+ * after the call returns. `row_index` addresses the logical array, so it
+ * accounts for Arrow slices and offsets. A top-level NULL descriptor succeeds
+ * with *file_out NULL. A valid empty blob succeeds with a non-NULL handle whose
+ * size is zero. For a non-NULL row, `source` and all required fields except
+ * `branch` must be non-NULL; `branch` NULL identifies the main branch.
+ *
+ * The SDK verifies the descriptor's pinned source identity and opens the exact
+ * source version and row; the binding does not reinterpret or repair the
+ * source. On native tables the check happens during open: the branch URI,
+ * source version, commit microseconds, column and row reference are validated,
+ * and the caller's table checkout is not changed. Remote tables require a
+ * server with blob-file support (0.5.0 or newer) and send the source URI,
+ * branch, version, commit microseconds and row reference to the authenticated
+ * byte-range endpoint; the server performs the source check, so a mismatch can
+ * surface at open or on a later read. An External descriptor with a zero stored
+ * size can issue an object metadata/HEAD request during open, so access or
+ * response errors can fail before a handle is returned. As with
+ * lancedb_table_fetch_blob_files(), no BlobFile retention lease is acquired:
+ * dataset cleanup or external object changes can make later reads fail. On
+ * success the returned handle owns its SDK BlobFile and stays usable after this
+ * table and the Arrow input are released; free it with
+ * lancedb_blob_file_free().
+ *
+ * On entry, *file_out and the error message are cleared. On failure *file_out
+ * stays NULL. NULL required pointers, a negative or out-of-range row_index,
+ * missing fields, wrong struct field types and NULL required values return
+ * LANCEDB_INVALID_ARGUMENT. A valid non-struct top-level Arrow type, or any
+ * Arrow C Data import failure, returns LANCEDB_ARROW. Non-NULL Arrow inputs
+ * must conform to the Arrow C Data Interface. SDK failures keep the existing
+ * error mapping. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_open_blob_file(
+    const LanceDBTable* table,
+    const FFI_ArrowArray* descriptors,
+    const FFI_ArrowSchema* descriptor_schema,
+    int64_t row_index,
+    LanceDBBlobFile** file_out,
+    char** error_message
+);
+
+/**
  * Free one blob file handle
  *
- * @param file - handle returned by lancedb_table_fetch_blob_files, or NULL
+ * @param file - handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file, or NULL
  *
  * The handle must not be used after this call. Freeing NULL is a no-op.
  */
@@ -2285,7 +2556,8 @@ void lancedb_blob_file_free(LanceDBBlobFile* file);
 /**
  * Return the blob length in bytes
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param size_out - pointer to receive the length in bytes
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2304,7 +2576,8 @@ LanceDBError lancedb_blob_file_size(
 /**
  * Return the physical byte offset of the blob inside its data file
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param position_out - pointer to receive the position
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2326,7 +2599,8 @@ LanceDBError lancedb_blob_file_position(
 /**
  * Move the read cursor to a byte offset inside the blob
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param position - new byte offset from the beginning of the blob
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2345,7 +2619,8 @@ LanceDBError lancedb_blob_file_seek(
 /**
  * Read from the current cursor to the end of the blob
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param buffer_out - pointer to receive the owned bytes
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
@@ -2368,7 +2643,8 @@ LanceDBError lancedb_blob_file_read(
 /**
  * Read a blob-local byte range without moving the cursor
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param offset - byte offset from the beginning of the blob value
  * @param length - number of bytes to read
  * @param buffer_out - pointer to receive the owned bytes
@@ -2406,7 +2682,8 @@ void lancedb_blob_buffer_free(LanceDBBlobBuffer* buffer);
 /**
  * Close the blob file and release its resources
  *
- * @param file - blob file handle
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *

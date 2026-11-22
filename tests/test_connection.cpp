@@ -689,6 +689,217 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Settings", "[connection]") {
   }
 }
 
+TEST_CASE_METHOD(BaseFixture, "LanceDB Namespace Connection", "[connection]") {
+  SECTION("A dir namespace applies builder settings") {
+    const std::string namespace_root = data_dir + "/namespace";
+    std::vector<std::string> property_keys = {"root"};
+    std::vector<std::string> property_values = {namespace_root};
+    std::vector<const char*> key_ptrs = {property_keys[0].c_str()};
+    std::vector<const char*> value_ptrs = {property_values[0].c_str()};
+
+    LanceDBConnectNamespaceBuilder* builder = lancedb_connect_namespace(
+        "dir", key_ptrs.data(), value_ptrs.data(), key_ptrs.size());
+    REQUIRE(builder != nullptr);
+
+    // The constructor copies the borrowed properties, so changing the source
+    // strings after the call must not change the connection.
+    property_keys[0] = "discarded-key";
+    property_values[0] = "discarded-value";
+
+    builder = lancedb_connect_namespace_builder_storage_option(
+        builder, "client_retry_timeout", "10");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_namespace_builder_namespace_client_property(
+        builder, "manifest_enabled", "true");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_namespace_builder_read_consistency_interval_ms(builder, 250);
+    REQUIRE(builder != nullptr);
+
+    LanceDBSession* session = lancedb_session_new(nullptr);
+    REQUIRE(session != nullptr);
+    builder = lancedb_connect_namespace_builder_session(builder, session);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_namespace_builder_pushdown_operation(
+        builder, LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_namespace_builder_pushdown_operation(
+        builder, LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_namespace_builder_execute(builder, &connection, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(connection != nullptr);
+
+    const char* connected_uri = lancedb_connection_uri(connection);
+    REQUIRE(connected_uri != nullptr);
+    REQUIRE(std::string(connected_uri) == "namespace://dir");
+
+    LanceDBReadConsistency consistency{};
+    REQUIRE(lancedb_connection_read_consistency(connection, &consistency, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(consistency.kind == LANCEDB_READ_CONSISTENCY_EVENTUAL);
+    REQUIRE(consistency.interval_ms == 250);
+
+    char** names = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_connection_table_names(connection, &names, &count, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(names == nullptr);
+    lancedb_free_table_names(names, count);
+
+    lancedb_connection_free(connection);
+    lancedb_session_free(session);
+  }
+
+  SECTION("A dir namespace serves tables through the public API") {
+    const std::string namespace_root = data_dir + "/namespace";
+    const char* property_keys[] = {"root"};
+    const char* property_values[] = {namespace_root.c_str()};
+    LanceDBConnectNamespaceBuilder* builder =
+        lancedb_connect_namespace("dir", property_keys, property_values, 1);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_namespace_builder_execute(builder, &connection, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(connection != nullptr);
+
+    create_empty_table_on(connection, "namespace_table");
+    LanceDBTable* table = open_table_on(connection, "namespace_table");
+    lancedb_table_free(table);
+
+    char** names = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_connection_table_names(connection, &names, &count, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(names != nullptr);
+    REQUIRE(std::string(names[0]) == "namespace_table");
+    lancedb_free_table_names(names, count);
+
+    REQUIRE(lancedb_connection_drop_table(connection, "namespace_table", nullptr, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_table_not_found_on(connection, "namespace_table");
+
+    lancedb_connection_free(connection);
+  }
+
+  SECTION("Invalid namespace properties and builder inputs are rejected") {
+    REQUIRE(lancedb_connect_namespace(nullptr, nullptr, nullptr, 0) == nullptr);
+    REQUIRE(lancedb_connect_namespace(NON_UTF8, nullptr, nullptr, 0) == nullptr);
+
+    const char* key = "root";
+    const char* value = "/tmp/lancedb-c-namespace";
+    REQUIRE(lancedb_connect_namespace("dir", nullptr, &value, 1) == nullptr);
+    REQUIRE(lancedb_connect_namespace("dir", &key, nullptr, 1) == nullptr);
+
+    const char* null_key = nullptr;
+    const char* null_value = nullptr;
+    REQUIRE(lancedb_connect_namespace("dir", &null_key, &value, 1) == nullptr);
+    REQUIRE(lancedb_connect_namespace("dir", &key, &null_value, 1) == nullptr);
+    LanceDBConnectNamespaceBuilder* zero_properties =
+        lancedb_connect_namespace("dir", &key, &value, 0);
+    REQUIRE(zero_properties != nullptr);
+    lancedb_connect_namespace_builder_free(zero_properties);
+    lancedb_connect_namespace_builder_free(nullptr);
+
+    const char* invalid_keys[] = {NON_UTF8};
+    const char* invalid_values[] = {NON_UTF8};
+    REQUIRE(lancedb_connect_namespace("dir", invalid_keys, &value, 1) == nullptr);
+    REQUIRE(lancedb_connect_namespace("dir", &key, invalid_values, 1) == nullptr);
+
+    using BuilderKeyValueSetter = LanceDBConnectNamespaceBuilder* (*)(
+        LanceDBConnectNamespaceBuilder*, const char*, const char*);
+    const BuilderKeyValueSetter key_value_setters[] = {
+        lancedb_connect_namespace_builder_storage_option,
+        lancedb_connect_namespace_builder_namespace_client_property,
+    };
+    for (const auto setter : key_value_setters) {
+      REQUIRE(setter(nullptr, "key", "value") == nullptr);
+
+      LanceDBConnectNamespaceBuilder* builder =
+          lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, nullptr, "value") == nullptr);
+
+      builder = lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, "key", nullptr) == nullptr);
+
+      builder = lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, NON_UTF8, "value") == nullptr);
+
+      builder = lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+      REQUIRE(builder != nullptr);
+      REQUIRE(setter(builder, "key", NON_UTF8) == nullptr);
+    }
+
+    REQUIRE(lancedb_connect_namespace_builder_read_consistency_interval_ms(nullptr, 1) == nullptr);
+    REQUIRE(lancedb_connect_namespace_builder_session(nullptr, nullptr) == nullptr);
+    REQUIRE(lancedb_connect_namespace_builder_pushdown_operation(nullptr, 0) == nullptr);
+
+    LanceDBConnectNamespaceBuilder* builder =
+        lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+    REQUIRE(builder != nullptr);
+    REQUIRE(lancedb_connect_namespace_builder_pushdown_operation(builder, -1) == nullptr);
+
+    builder = lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+    REQUIRE(builder != nullptr);
+    REQUIRE(lancedb_connect_namespace_builder_pushdown_operation(builder, 2) == nullptr);
+
+    builder = lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_namespace_builder_session(builder, nullptr);
+    REQUIRE(builder != nullptr);
+    lancedb_connect_namespace_builder_free(builder);
+  }
+
+  SECTION("A namespace connection reports SDK validation errors") {
+    LanceDBConnectNamespaceBuilder* builder =
+        lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+    REQUIRE(builder != nullptr);
+
+    LanceDBConnection* connection = reinterpret_cast<LanceDBConnection*>(0x1);
+    char* error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connect_namespace_builder_execute(builder, &connection, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(connection == reinterpret_cast<LanceDBConnection*>(0x1));
+    REQUIRE(std::string(error_message).find("Failed to connect to namespace")
+        != std::string::npos);
+    REQUIRE(std::string(error_message).find("root") != std::string::npos);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Namespace execute rejects missing required pointers") {
+    LanceDBConnection* connection = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connect_namespace_builder_execute(nullptr, &connection, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    LanceDBConnectNamespaceBuilder* builder =
+        lancedb_connect_namespace("dir", nullptr, nullptr, 0);
+    REQUIRE(builder != nullptr);
+    REQUIRE(lancedb_connect_namespace_builder_execute(builder, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+}
+
 TEST_CASE_METHOD(BaseFixture, "LanceDB Session", "[connection]") {
   SECTION("Create and free default session") {
     LanceDBSession* session = lancedb_session_new(nullptr);
