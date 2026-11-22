@@ -27,6 +27,88 @@
 extern "C" {
 #endif
 
+/*
+ * Standard Arrow C Data and Stream interface structures.
+ *
+ * These definitions match arrow/c/abi.h. The include guards are shared with
+ * Arrow, so either this header or Arrow's header may be included first. A C
+ * consumer can therefore use the stream entry points without depending on
+ * Arrow headers.
+ */
+#ifndef ARROW_C_DATA_INTERFACE
+#define ARROW_C_DATA_INTERFACE
+
+#define ARROW_FLAG_DICTIONARY_ORDERED 1
+#define ARROW_FLAG_NULLABLE 2
+#define ARROW_FLAG_MAP_KEYS_SORTED 4
+
+struct ArrowSchema {
+    const char* format;
+    const char* name;
+    const char* metadata;
+    int64_t flags;
+    int64_t n_children;
+    struct ArrowSchema** children;
+    struct ArrowSchema* dictionary;
+    void (*release)(struct ArrowSchema*);
+    void* private_data;
+};
+
+/** @cond */
+typedef struct ArrowSchema ArrowSchema;
+/** @endcond */
+
+struct ArrowArray {
+    int64_t length;
+    int64_t null_count;
+    int64_t offset;
+    int64_t n_buffers;
+    int64_t n_children;
+    const void** buffers;
+    struct ArrowArray** children;
+    struct ArrowArray* dictionary;
+    void (*release)(struct ArrowArray*);
+    void* private_data;
+};
+
+/** @cond */
+typedef struct ArrowArray ArrowArray;
+/** @endcond */
+
+#define ARROW_STATISTICS_KEY_AVERAGE_BYTE_WIDTH_EXACT "ARROW:average_byte_width:exact"
+#define ARROW_STATISTICS_KEY_AVERAGE_BYTE_WIDTH_APPROXIMATE "ARROW:average_byte_width:approximate"
+#define ARROW_STATISTICS_KEY_DISTINCT_COUNT_EXACT "ARROW:distinct_count:exact"
+#define ARROW_STATISTICS_KEY_DISTINCT_COUNT_APPROXIMATE "ARROW:distinct_count:approximate"
+#define ARROW_STATISTICS_KEY_MAX_BYTE_WIDTH_EXACT "ARROW:max_byte_width:exact"
+#define ARROW_STATISTICS_KEY_MAX_BYTE_WIDTH_APPROXIMATE "ARROW:max_byte_width:approximate"
+#define ARROW_STATISTICS_KEY_MAX_VALUE_EXACT "ARROW:max_value:exact"
+#define ARROW_STATISTICS_KEY_MAX_VALUE_APPROXIMATE "ARROW:max_value:approximate"
+#define ARROW_STATISTICS_KEY_MIN_VALUE_EXACT "ARROW:min_value:exact"
+#define ARROW_STATISTICS_KEY_MIN_VALUE_APPROXIMATE "ARROW:min_value:approximate"
+#define ARROW_STATISTICS_KEY_NULL_COUNT_EXACT "ARROW:null_count:exact"
+#define ARROW_STATISTICS_KEY_NULL_COUNT_APPROXIMATE "ARROW:null_count:approximate"
+#define ARROW_STATISTICS_KEY_ROW_COUNT_EXACT "ARROW:row_count:exact"
+#define ARROW_STATISTICS_KEY_ROW_COUNT_APPROXIMATE "ARROW:row_count:approximate"
+
+#endif /* ARROW_C_DATA_INTERFACE */
+
+#ifndef ARROW_C_STREAM_INTERFACE
+#define ARROW_C_STREAM_INTERFACE
+
+struct ArrowArrayStream {
+    int (*get_schema)(struct ArrowArrayStream*, struct ArrowSchema*);
+    int (*get_next)(struct ArrowArrayStream*, struct ArrowArray*);
+    const char* (*get_last_error)(struct ArrowArrayStream*);
+    void (*release)(struct ArrowArrayStream*);
+    void* private_data;
+};
+
+/** @cond */
+typedef struct ArrowArrayStream ArrowArrayStream;
+/** @endcond */
+
+#endif /* ARROW_C_STREAM_INTERFACE */
+
 /**
  * Return the binding version embedded in this library.
  *
@@ -467,6 +549,72 @@ typedef struct {
     uint64_t manifest_size;      // Manifest size in bytes at the referenced version
     const char* branch;          // Read-only optional branch name (NULL when the tag has no branch)
 } LanceDBTag;
+
+/**
+ * Source kind for lancedb_table_create_branch()
+ *
+ * The kind selects which fields of LanceDBBranchSource are read. A version is
+ * resolved on the table handle's current branch, a tag is global, and a branch
+ * may be used at its head or at a pinned version.
+ */
+typedef enum {
+    LANCEDB_BRANCH_SOURCE_VERSION = 0, // Version on the current branch
+    LANCEDB_BRANCH_SOURCE_TAG = 1,     // Global tag name
+    LANCEDB_BRANCH_SOURCE_BRANCH = 2   // Branch name with an optional version
+} LanceDBBranchSourceKind;
+
+/**
+ * Source reference for lancedb_table_create_branch()
+ *
+ * Only the fields selected by kind are read; the caller may leave the other
+ * fields uninitialized.
+ * - LANCEDB_BRANCH_SOURCE_VERSION: has_version and version are read; has_version
+ *   must be nonzero. name is not read.
+ * - LANCEDB_BRANCH_SOURCE_TAG: only name is read; it is the tag name.
+ * - LANCEDB_BRANCH_SOURCE_BRANCH: name and has_version are read. version is
+ *   read only when has_version is nonzero; otherwise the branch head is used.
+ *
+ * The pointed-to name is only read during the call.
+ */
+typedef struct {
+    LanceDBBranchSourceKind kind; // Source kind; out-of-range values are rejected
+    const char* name;             // Tag or branch name; ignored for VERSION
+    int has_version;              // 1 to use version, 0 to omit it
+    uint64_t version;             // Version number when has_version is 1
+} LanceDBBranchSource;
+
+/**
+ * Optional version for lancedb_table_checkout_branch()
+ *
+ * has_version set to 0 checks out the branch head and keeps the handle
+ * writable. Any other value pins the handle to version, which makes it a
+ * read-only detached view. version is read only when has_version is nonzero;
+ * otherwise it may be left uninitialized.
+ */
+typedef struct {
+    int has_version;   // 1 to pin the checkout to version, 0 for the branch head
+    uint64_t version;  // Version number when has_version is 1
+} LanceDBBranchCheckoutOptions;
+
+/**
+ * Branch metadata returned by lancedb_table_list_branches()
+ *
+ * The array, every string and every metadata array are owned by the result.
+ * Callers must not modify or free them individually. The strings remain valid
+ * until lancedb_free_branches() is called with the same array and count.
+ * parent_version is the parent branch version the branch diverged from, and
+ * manifest_size is the parent version's manifest size in bytes at divergence.
+ */
+typedef struct {
+    const char* name;                 // Read-only branch name
+    const char* parent_branch;        // Read-only parent branch name (NULL when forked from main)
+    uint64_t parent_version;          // Version on the parent branch the branch started from
+    uint64_t created_at;              // Creation time in seconds since the Unix epoch
+    uint64_t manifest_size;           // Parent version manifest size in bytes at divergence
+    const char* const* metadata_keys;   // Read-only metadata keys, NULL when metadata_count is 0
+    const char* const* metadata_values; // Read-only metadata values, parallel to metadata_keys
+    size_t metadata_count;            // Number of metadata key-value pairs
+} LanceDBBranch;
 
 /**
  * Kind of endpoint a table delta compares
@@ -2853,6 +3001,65 @@ LanceDBError lancedb_record_batch_reader_from_arrow(
 );
 
 /**
+ * Create a RecordBatchReader from an Arrow C Stream
+ *
+ * @param stream - pointer to an initialized struct ArrowArrayStream
+ * @param reader_out - pointer to receive the created reader
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The stream must provide the get_schema, get_next and release callbacks.
+ * get_last_error is optional and may return NULL; its text must stay valid
+ * until the next operation on the stream or release. Those callbacks are
+ * checked before the stream is moved. If a required pointer or callback is
+ * missing, the stream still belongs to the caller. After a successful move,
+ * the binding owns the producer and releases it exactly once, including when
+ * the schema cannot be acquired. The caller keeps ownership of the outer
+ * struct storage, and the source struct's release callback is cleared, so it
+ * must not be released again.
+ *
+ * Returns LANCEDB_INVALID_ARGUMENT for a NULL pointer or a missing required
+ * callback, LANCEDB_INVALID_INPUT when get_schema reports an error, and
+ * LANCEDB_ARROW when the returned schema cannot be imported.
+ *
+ * The imported batches must be representable as Arrow RecordBatches: the root
+ * struct cannot have null rows. Nullable child fields, zero-row batches, and a
+ * root validity bitmap with no nulls are accepted. A root with actual nulls is
+ * reported as an Arrow error when that batch is consumed, before its child
+ * columns are written.
+ *
+ * The stream, its schema and each returned ArrowArray are independently owned.
+ * The producer must keep the schema alive until its schema release callback
+ * runs and keep each array alive until that array's own release callback runs.
+ * Arrays may be released after the stream or on a different thread; the schema
+ * is likewise independent of the stream.
+ *
+ * The schema is acquired synchronously on the calling thread before this
+ * function returns. No record batch is pulled at import time; batches are read
+ * lazily when the reader is consumed by lancedb_table_create(),
+ * lancedb_table_add() or lancedb_table_merge_insert(). Calls on one stream are
+ * serialized, but callbacks may run on SDK worker threads, and release may run
+ * on a worker or on the thread that frees the reader. A producer must therefore
+ * allow its callbacks to be invoked from different threads over time, and keep
+ * its private state alive until release.
+ *
+ * This binding does not collect all batches before writing. The pinned SDK may
+ * still buffer depending on the backend: embedded create/add stream batches,
+ * remote create encodes an IPC file before sending it, and remote merge may
+ * collect the reader for retries.
+ *
+ * On entry, *reader_out and *error_message are cleared. Free the reader with
+ * lancedb_record_batch_reader_free(); this also releases a reader that was
+ * never consumed. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_record_batch_reader_from_arrow_stream(
+    struct ArrowArrayStream* stream,
+    LanceDBRecordBatchReader** reader_out,
+    char** error_message
+);
+
+/**
  * Create a RecordBatchReader and/or an Arrow schema from an Arrow IPC file
  *
  * @param data - borrowed bytes of an Arrow IPC file (NULL only when len is 0)
@@ -3682,6 +3889,110 @@ LanceDBError lancedb_table_update_tag(
 );
 
 /**
+ * Create a new branch and return a table handle scoped to it
+ *
+ * @param table - pointer to LanceDBTable; the handle keeps its own branch
+ * @param name - null-terminated C string containing the new branch name
+ * @param source - source reference for the branch
+ * @param table_out - pointer to receive the new branch table handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The returned handle is independent of the source handle: writes through it
+ * do not change the source branch, and the source handle stays usable. The
+ * caller must free the returned handle with lancedb_table_free().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_create_branch(
+    const LanceDBTable* table,
+    const char* name,
+    const LanceDBBranchSource* source,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
+ * Check out an existing branch and return a table handle scoped to it
+ *
+ * @param table - pointer to LanceDBTable; the handle keeps its own branch
+ * @param name - null-terminated C string containing the branch name
+ * @param options - optional version selection for the checkout
+ * @param table_out - pointer to receive the new branch table handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Without a version the returned handle tracks the branch head and stays
+ * writable. With a version the returned handle is pinned to that branch
+ * version and is read-only. The original handle is not modified and stays
+ * usable. The caller must free the returned handle with lancedb_table_free().
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_checkout_branch(
+    const LanceDBTable* table,
+    const char* name,
+    const LanceDBBranchCheckoutOptions* options,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
+ * List the branches of the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param branches_out - pointer to receive the read-only array of LanceDBBranch structs
+ * @param count_out - pointer to receive the number of branches
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, branches_out points to a read-only array of LanceDBBranch structs
+ * sorted by name and count_out receives its length. An empty result sets
+ * branches_out to NULL and count_out to zero. The array, its strings, and its
+ * metadata arrays are owned by the library and must not be modified or freed
+ * individually. Free the whole result with lancedb_free_branches() using the
+ * returned count.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_list_branches(
+    const LanceDBTable* table,
+    const LanceDBBranch** branches_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free branch metadata returned by lancedb_table_list_branches
+ *
+ * @param branches - array of LanceDBBranch structs returned by lancedb_table_list_branches
+ * @param count - number of entries, exactly as returned by lancedb_table_list_branches
+ *
+ * The library owns the array, every string and every metadata array. Callers
+ * must not modify entries or free them individually, and must pass the count
+ * returned with the array. Safe to call with a NULL pointer.
+ */
+void lancedb_free_branches(const LanceDBBranch* branches, size_t count);
+
+/**
+ * Delete a branch from the table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param name - null-terminated C string containing the branch name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Existing handles are not modified by the deletion. If error_message is
+ * provided and an error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_table_delete_branch(
+    const LanceDBTable* table,
+    const char* name,
+    char** error_message
+);
+
+/**
  * Create a delta between two endpoints on the table's current branch
  *
  * @param table - pointer to LanceDBTable
@@ -3709,6 +4020,26 @@ LanceDBError lancedb_table_delta(
     const LanceDBDeltaRef* begin,
     const LanceDBDeltaRef* end,
     LanceDBTableDelta** delta_out,
+    char** error_message
+);
+
+/**
+ * Get the branch a table handle is scoped to
+ *
+ * @param table - pointer to LanceDBTable
+ * @param branch_out - pointer to receive the branch name
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, branch_out is NULL when the handle is on main, or points to an
+ * allocated null-terminated branch name. The caller must free a non-NULL name
+ * with lancedb_free_string(). On failure, branch_out is set to NULL.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_current_branch(
+    const LanceDBTable* table,
+    char** branch_out,
     char** error_message
 );
 
@@ -3886,7 +4217,6 @@ LanceDBError lancedb_table_delta_deleted_row_ids(
  * Results already returned by a reader stay valid after the delta is freed.
  */
 void lancedb_table_delta_free(LanceDBTableDelta* delta);
-
 
 /**
  * Get table metadata as key-value pairs
