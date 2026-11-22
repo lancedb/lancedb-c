@@ -7,6 +7,7 @@
 //! with C and C++ applications. The API follows standard C conventions with
 //! opaque handles, explicit error codes, and manual memory management.
 
+mod arrow_ffi;
 pub mod arrow_stream;
 pub mod blob;
 pub mod branch_diff;
