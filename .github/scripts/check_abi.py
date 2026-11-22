@@ -302,6 +302,7 @@ ENUM_PREFIXES = {
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
     "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
+    "LanceDBBranchSourceKind": "LANCEDB_BRANCH_SOURCE_",
 }
 ENUM_MEMBER_RENAMES = {
     ("LanceDBIndexType", "BTree"): "BTREE",
@@ -350,6 +351,7 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     # Rust stores the raw integer and validates it before converting to an
     # enum, avoiding undefined behavior for an out-of-range C value.
     ("LanceDBVectorIndexConfig", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
+    ("LanceDBBranchSource", "kind"): Allow(enum_int="LanceDBBranchSourceKind"),
 }
 
 

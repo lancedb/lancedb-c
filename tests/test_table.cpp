@@ -2998,3 +2998,243 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
 
   lancedb_table_free(table);
 }
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - branch lifecycle", "[table][branch]") {
+  const std::string table_name = "test_branch_lifecycle";
+  constexpr int main_rows = 3;
+  LanceDBTable* main_table = create_table_with_data(table_name, main_rows, 0);
+  const uint64_t main_version = lancedb_table_version(main_table);
+
+  char* error_message = nullptr;
+  char* current_branch = nullptr;
+  REQUIRE(lancedb_table_current_branch(main_table, &current_branch, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(current_branch == nullptr);
+
+  const LanceDBBranchSource source = {
+      .kind = LANCEDB_BRANCH_SOURCE_VERSION,
+      .name = nullptr,
+      .has_version = 1,
+      .version = main_version};
+  LanceDBTable* branch = nullptr;
+  REQUIRE(lancedb_table_create_branch(main_table, "exp", &source, &branch, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch != nullptr);
+
+  REQUIRE(lancedb_table_current_branch(branch, &current_branch, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(current_branch != nullptr);
+  REQUIRE(std::string(current_branch) == "exp");
+  lancedb_free_string(current_branch);
+  current_branch = nullptr;
+
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows);
+  const uint64_t branch_fork_version = lancedb_table_version(branch);
+
+  // A write on the branch must not leak into main.
+  auto branch_batch = create_test_record_batch(2, main_rows);
+  auto branch_reader = create_reader_from_batch(branch_batch);
+  REQUIRE(lancedb_table_add(branch, branch_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows + 2);
+  REQUIRE(lancedb_table_count_rows(main_table) == main_rows);
+  REQUIRE(first_data_value(branch, "key_3") == 30.0F);
+  REQUIRE(count_matching_rows(main_table, "key = 'key_3'") == 0);
+
+  // The source handle keeps its own branch and stays writable.
+  auto main_batch = create_test_record_batch(1, 100);
+  auto main_reader = create_reader_from_batch(main_batch);
+  REQUIRE(lancedb_table_add(main_table, main_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_version(main_table) == main_version + 1);
+  REQUIRE(lancedb_table_count_rows(main_table) == main_rows + 1);
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows + 2);
+  REQUIRE(first_data_value(main_table, "key_100") == 1000.0F);
+  REQUIRE(count_matching_rows(branch, "key = 'key_100'") == 0);
+
+  // A pinned checkout sees the branch at the fork version and is read-only.
+  const LanceDBBranchCheckoutOptions pinned_options = {
+      .has_version = 1,
+      .version = branch_fork_version};
+  LanceDBTable* pinned = nullptr;
+  REQUIRE(lancedb_table_checkout_branch(main_table, "exp", &pinned_options, &pinned, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(pinned != nullptr);
+  REQUIRE(lancedb_table_count_rows(pinned) == main_rows);
+  REQUIRE(count_matching_rows(pinned, "key = 'key_3'") == 0);
+
+  REQUIRE(lancedb_table_current_branch(pinned, &current_branch, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(current_branch != nullptr);
+  REQUIRE(std::string(current_branch) == "exp");
+  lancedb_free_string(current_branch);
+  current_branch = nullptr;
+
+  auto pinned_batch = create_test_record_batch(1, 200);
+  auto pinned_reader = create_reader_from_batch(pinned_batch);
+  REQUIRE(lancedb_table_add(pinned, pinned_reader, &error_message) != LANCEDB_SUCCESS);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows + 2);
+
+  // Without a version the checkout follows the branch head.
+  const LanceDBBranchCheckoutOptions head_options = {.has_version = 0, .version = 0};
+  LanceDBTable* branch_head = nullptr;
+  REQUIRE(lancedb_table_checkout_branch(main_table, "exp", &head_options, &branch_head, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch_head != nullptr);
+  REQUIRE(lancedb_table_count_rows(branch_head) == main_rows + 2);
+  REQUIRE(first_data_value(branch_head, "key_3") == 30.0F);
+
+  const LanceDBBranch* branches = nullptr;
+  size_t branch_count = 0;
+  REQUIRE(lancedb_table_list_branches(main_table, &branches, &branch_count, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch_count == 1);
+  REQUIRE(branches != nullptr);
+  REQUIRE(std::string(branches[0].name) == "exp");
+  REQUIRE(branches[0].parent_branch == nullptr);
+  REQUIRE(branches[0].parent_version == main_version);
+  REQUIRE(branches[0].created_at > 0);
+  REQUIRE(branches[0].manifest_size > 0);
+  REQUIRE(branches[0].metadata_count == 0);
+  REQUIRE(branches[0].metadata_keys == nullptr);
+  REQUIRE(branches[0].metadata_values == nullptr);
+  lancedb_free_branches(branches, branch_count);
+
+  REQUIRE(lancedb_table_delete_branch(main_table, "exp", &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  branches = nullptr;
+  branch_count = 0;
+  REQUIRE(lancedb_table_list_branches(main_table, &branches, &branch_count, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch_count == 0);
+  REQUIRE(branches == nullptr);
+  lancedb_free_branches(branches, branch_count);
+
+  LanceDBTable* missing = nullptr;
+  REQUIRE(lancedb_table_checkout_branch(main_table, "exp", &head_options, &missing, &error_message)
+      != LANCEDB_SUCCESS);
+  REQUIRE(missing == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  lancedb_table_free(branch_head);
+  lancedb_table_free(pinned);
+  lancedb_table_free(branch);
+  lancedb_table_free(main_table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - branch sources", "[table][branch]") {
+  const std::string table_name = "test_branch_sources";
+  constexpr int tagged_rows = 2;
+  LanceDBTable* table = create_table_with_data(table_name, tagged_rows, 0);
+  const uint64_t tagged_version = lancedb_table_version(table);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_tag(table, "v1", tagged_version, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  // Advance main after the tag so a tag source is observably older than the head.
+  auto later_batch = create_test_record_batch(2, tagged_rows);
+  auto later_reader = create_reader_from_batch(later_batch);
+  REQUIRE(lancedb_table_add(table, later_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(table) == tagged_rows + 2);
+
+  const LanceDBBranchSource tag_source = {
+      .kind = LANCEDB_BRANCH_SOURCE_TAG,
+      .name = "v1",
+      .has_version = 0,
+      .version = 0};
+  LanceDBTable* tagged = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "tagged", &tag_source, &tagged, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(tagged != nullptr);
+  REQUIRE(lancedb_table_count_rows(tagged) == tagged_rows);
+  REQUIRE(count_matching_rows(tagged, "key = 'key_2'") == 0);
+
+  const uint64_t tagged_fork_version = lancedb_table_version(tagged);
+  auto tagged_batch = create_test_record_batch(1, 10);
+  auto tagged_reader = create_reader_from_batch(tagged_batch);
+  REQUIRE(lancedb_table_add(tagged, tagged_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(tagged) == tagged_rows + 1);
+  REQUIRE(first_data_value(tagged, "key_10") == 100.0F);
+
+  // A branch source without a version follows its head.
+  const LanceDBBranchSource head_source = {
+      .kind = LANCEDB_BRANCH_SOURCE_BRANCH,
+      .name = "tagged",
+      .has_version = 0,
+      .version = 0};
+  LanceDBTable* head_copy = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "head_copy", &head_source, &head_copy, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(head_copy != nullptr);
+  REQUIRE(lancedb_table_count_rows(head_copy) == tagged_rows + 1);
+  REQUIRE(first_data_value(head_copy, "key_10") == 100.0F);
+
+  // A branch source with a version pins the fork point.
+  const LanceDBBranchSource pinned_source = {
+      .kind = LANCEDB_BRANCH_SOURCE_BRANCH,
+      .name = "tagged",
+      .has_version = 1,
+      .version = tagged_fork_version};
+  LanceDBTable* pinned_copy = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "pinned_copy", &pinned_source, &pinned_copy, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(pinned_copy != nullptr);
+  REQUIRE(lancedb_table_count_rows(pinned_copy) == tagged_rows);
+  REQUIRE(count_matching_rows(pinned_copy, "key = 'key_10'") == 0);
+
+  // Raw values outside the public enum are rejected before reaching the SDK.
+  LanceDBTable* invalid = nullptr;
+  REQUIRE(lancedb_test_create_branch_with_source_kind(
+      table, "invalid", 999, nullptr, 0, 0, &invalid, &error_message) == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(invalid == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  const LanceDBBranchSource missing_tag_name = {
+      .kind = LANCEDB_BRANCH_SOURCE_TAG,
+      .name = nullptr,
+      .has_version = 0,
+      .version = 0};
+  invalid = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "invalid", &missing_tag_name, &invalid, &error_message)
+      == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(invalid == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  const LanceDBBranchSource missing_source_version = {
+      .kind = LANCEDB_BRANCH_SOURCE_VERSION,
+      .name = nullptr,
+      .has_version = 0,
+      .version = 0};
+  invalid = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "invalid", &missing_source_version, &invalid, &error_message)
+      == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(invalid == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  lancedb_table_free(pinned_copy);
+  lancedb_table_free(head_copy);
+  lancedb_table_free(tagged);
+  lancedb_table_free(table);
+}
