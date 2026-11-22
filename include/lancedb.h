@@ -338,6 +338,40 @@ typedef struct {
 } LanceDBMergeInsertConfig;
 
 /**
+ * Options for lancedb_table_merge_insert_with_result
+ *
+ * Every action is disabled unless its flag is non-zero. A NULL options pointer
+ * selects the same default upsert as lancedb_table_merge_insert(): update every
+ * matched row and insert every unmatched source row.
+ *
+ * The matched-update condition is an SQL predicate over the joined rows. Use the
+ * prefix "target." for rows in the table and "source." for rows in the merged
+ * data, for example "target.version < source.version". The by-source-delete
+ * filter is evaluated against unmatched target rows, so it names target columns
+ * directly, for example "version < 10". A NULL condition means no condition; a
+ * non-NULL string, including an empty one, is passed to the SDK. The condition
+ * for an action is only read when that action is enabled, and a condition set for
+ * a disabled action is ignored. The strings are borrowed for the call.
+ *
+ * use_index is -1 to keep the SDK default (use an index when one is available),
+ * 0 to force a full table scan even when the join key is indexed, or 1 to request
+ * the index. timeout_ms is -1 to keep the SDK default, or a non-negative number of
+ * milliseconds that bounds the whole operation, including 0.
+ *
+ * The options struct and its strings are borrowed for the duration of the call
+ * and are not consumed.
+ */
+typedef struct {
+    int when_matched_update_all;                     // Update matched rows (non-zero = true)
+    const char* when_matched_update_all_condition;   // SQL condition (NULL for no condition)
+    int when_not_matched_insert_all;                 // Insert unmatched source rows (non-zero = true)
+    int when_not_matched_by_source_delete;           // Delete unmatched target rows (non-zero = true)
+    const char* when_not_matched_by_source_delete_filter; // SQL filter on unmatched target rows (NULL for no filter)
+    int use_index;                                   // -1 = SDK default, 0 = false, 1 = true
+    int64_t timeout_ms;                              // -1 = SDK default, otherwise milliseconds
+} LanceDBMergeInsertOptions;
+
+/**
  * Session creation options
  */
 typedef struct {
@@ -1104,6 +1138,61 @@ LanceDBError lancedb_table_merge_insert(
     const char* const* on_columns,
     size_t num_columns,
     const LanceDBMergeInsertConfig* config,
+    char** error_message
+);
+
+/**
+ * Result of a merge insert operation
+ *
+ * Every field is present and comes from the SDK's MergeResult. A version of 0
+ * means the backend did not return a commit version (a legacy remote server),
+ * not necessarily that no commit happened. num_attempts includes the initial
+ * attempt and any retries for transaction conflicts; 1 means the first attempt
+ * succeeded.
+ */
+typedef struct {
+    uint64_t version;           // Committed table version; 0 may mean unknown on legacy remote responses
+    uint64_t num_inserted_rows; // Number of inserted rows
+    uint64_t num_updated_rows;  // Number of updated rows
+    uint64_t num_deleted_rows;  // Number of deleted rows
+    uint32_t num_attempts;      // Attempts performed, including conflict retries
+} LanceDBMergeInsertResult;
+
+/**
+ * Merge insert with explicit actions and an SDK result
+ *
+ * This entry point performs one SDK merge. The reader supplies both the source
+ * schema and every source batch, so several batches are merged in a single
+ * operation. A reader over a schema-only Arrow IPC file is an empty source;
+ * combined with when_not_matched_by_source_delete, it can delete unmatched
+ * target rows.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param data - pointer to LanceDBRecordBatchReader with the source schema and batches
+ * @param on_columns - array of column names to join on (typically key/id columns)
+ * @param num_columns - number of columns in the on_columns array (must be > 0)
+ * @param options - pointer to LanceDBMergeInsertOptions, or NULL for the default upsert
+ * @param result_out - pointer to receive the SDK commit version and counters
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The function takes ownership of the reader and frees it automatically on every
+ * path, including rejected arguments. Do NOT call
+ * lancedb_record_batch_reader_free() after calling this function. The options,
+ * their strings and on_columns are borrowed and remain owned by the caller.
+ *
+ * On entry, *result_out and the error message are cleared. The result is only
+ * meaningful when the function returns LANCEDB_SUCCESS; on failure it stays zero.
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_merge_insert_with_result(
+    const LanceDBTable* table,
+    LanceDBRecordBatchReader* data,
+    const char* const* on_columns,
+    size_t num_columns,
+    const LanceDBMergeInsertOptions* options,
+    LanceDBMergeInsertResult* result_out,
     char** error_message
 );
 

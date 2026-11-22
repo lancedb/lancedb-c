@@ -74,3 +74,39 @@ pub struct LanceDBMergeInsertConfig {
     /// Not consumed by `lancedb_table_merge_insert`, and mutually exclusive with the SQL condition
     pub when_matched_update_all_expr: *mut LanceDBExpr,
 }
+
+/// Options for `lancedb_table_merge_insert_with_result`
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBMergeInsertOptions {
+    /// Update every matched row, optionally limited by the condition below
+    pub when_matched_update_all: i32,
+    /// SQL condition limiting which matched records are updated (NULL for no condition)
+    pub when_matched_update_all_condition: *const c_char,
+    /// Insert every source row that has no match in the target
+    pub when_not_matched_insert_all: i32,
+    /// Delete every target row that has no match in the source, optionally filtered below
+    pub when_not_matched_by_source_delete: i32,
+    /// SQL filter on unmatched target rows, naming target columns directly (NULL for no filter)
+    pub when_not_matched_by_source_delete_filter: *const c_char,
+    /// -1 for the SDK default, 0 to skip the join-key index, 1 to use it
+    pub use_index: i32,
+    /// -1 for the SDK default, otherwise the operation timeout in milliseconds
+    pub timeout_ms: i64,
+}
+
+/// Result of `lancedb_table_merge_insert_with_result`
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LanceDBMergeInsertResult {
+    /// Table version committed by the merge; 0 may mean unknown on legacy remote responses
+    pub version: u64,
+    /// Number of inserted rows
+    pub num_inserted_rows: u64,
+    /// Number of updated rows
+    pub num_updated_rows: u64,
+    /// Number of deleted rows
+    pub num_deleted_rows: u64,
+    /// Number of attempts, including retries for transaction conflicts
+    pub num_attempts: u32,
+}

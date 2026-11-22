@@ -9,6 +9,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::time::Duration;
 
 use arrow_array::{Array, RecordBatch, RecordBatchReader, StructArray};
 use arrow_schema::{ArrowError, Schema};
@@ -19,12 +20,15 @@ use lancedb::table::{ColumnAlteration, NewColumnTransform};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
-    clear_error_message, handle_error, set_invalid_argument_message, set_not_supported_message,
-    set_unknown_error_message, LanceDBError,
+    clear_error_message, handle_error, set_custom_error_message, set_invalid_argument_message,
+    set_not_supported_message, set_unknown_error_message, LanceDBError,
 };
 use crate::expr::LanceDBExpr;
 use crate::ipc::{self, LanceDBIpcBuffer};
-use crate::types::{LanceDBMergeInsertConfig, LanceDBRecordBatchReader};
+use crate::types::{
+    LanceDBMergeInsertConfig, LanceDBMergeInsertOptions, LanceDBMergeInsertResult,
+    LanceDBRecordBatchReader,
+};
 
 /// Get table schema as Arrow C ABI
 ///
@@ -143,6 +147,91 @@ pub unsafe extern "C" fn lancedb_table_add(
     }
 }
 
+/// One way the SDK can restrict which matched rows a merge updates
+enum MergeUpdateCondition<'a> {
+    Sql(&'a str),
+    Expr(&'a LanceDBExpr),
+}
+
+/// The parts of a merge insert request that do not depend on C argument layout
+struct MergeInsertSettings<'a> {
+    when_matched_update_all: bool,
+    update_condition: Option<MergeUpdateCondition<'a>>,
+    when_not_matched_insert_all: bool,
+    when_not_matched_by_source_delete: bool,
+    when_not_matched_by_source_delete_filter: Option<&'a str>,
+    timeout: Option<Duration>,
+    use_index: Option<bool>,
+}
+
+/// Read the join columns, rejecting a missing array or an empty or non-UTF-8 name
+unsafe fn parse_on_columns(
+    on_columns: *const *const c_char,
+    num_columns: usize,
+) -> Option<Vec<String>> {
+    if on_columns.is_null() || num_columns == 0 {
+        return None;
+    }
+
+    let mut column_names = Vec::with_capacity(num_columns);
+    for index in 0..num_columns {
+        let column_pointer = *on_columns.add(index);
+        if column_pointer.is_null() {
+            return None;
+        }
+
+        let column = CStr::from_ptr(column_pointer).to_str().ok()?;
+        column_names.push(column.to_owned());
+    }
+
+    Some(column_names)
+}
+
+/// Run exactly one SDK merge insert over a schema-bearing reader
+fn execute_merge_insert(
+    table: &lancedb::Table,
+    reader: Box<dyn RecordBatchReader + Send>,
+    on_columns: &[&str],
+    settings: MergeInsertSettings<'_>,
+) -> lancedb::error::Result<lancedb::table::MergeResult> {
+    get_runtime().block_on(async {
+        let mut builder = table.merge_insert(on_columns);
+
+        if settings.when_matched_update_all {
+            match settings.update_condition {
+                // The expression is borrowed, ownership stays with the caller
+                Some(MergeUpdateCondition::Expr(expr)) => {
+                    builder.when_matched_update_all_expr(expr.inner.clone());
+                }
+                Some(MergeUpdateCondition::Sql(condition)) => {
+                    builder.when_matched_update_all(Some(condition.to_owned()));
+                }
+                None => {
+                    builder.when_matched_update_all(None);
+                }
+            }
+        }
+        if settings.when_not_matched_insert_all {
+            builder.when_not_matched_insert_all();
+        }
+        if settings.when_not_matched_by_source_delete {
+            builder.when_not_matched_by_source_delete(
+                settings
+                    .when_not_matched_by_source_delete_filter
+                    .map(|filter| filter.to_owned()),
+            );
+        }
+        if let Some(timeout) = settings.timeout {
+            builder.timeout(timeout);
+        }
+        if let Some(use_index) = settings.use_index {
+            builder.use_index(use_index);
+        }
+
+        builder.execute(reader).await
+    })
+}
+
 /// Merge data into table (upsert operation) using Arrow data
 ///
 /// # Safety
@@ -179,84 +268,212 @@ pub unsafe extern "C" fn lancedb_table_merge_insert(
     // on every path, including the ones rejecting the rest of the arguments
     let data_box = Box::from_raw(data);
 
-    if table.is_null() || on_columns.is_null() || num_columns == 0 {
+    if table.is_null() {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
 
-    // Extract column names
-    let mut column_names = Vec::with_capacity(num_columns);
-    for i in 0..num_columns {
-        let col_ptr = *on_columns.add(i);
-        if col_ptr.is_null() {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
+    let Some(column_names) = parse_on_columns(on_columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let on_columns: Vec<&str> = column_names.iter().map(String::as_str).collect();
 
-        let Ok(col_str) = CStr::from_ptr(col_ptr).to_str() else {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        };
-        column_names.push(col_str);
+    // A NULL config keeps the historical default upsert: update matching rows and
+    // insert the rest
+    let mut settings = MergeInsertSettings {
+        when_matched_update_all: true,
+        update_condition: None,
+        when_not_matched_insert_all: true,
+        when_not_matched_by_source_delete: false,
+        when_not_matched_by_source_delete_filter: None,
+        timeout: None,
+        use_index: None,
+    };
+
+    if !config.is_null() {
+        let config = &*config;
+        settings.when_matched_update_all = config.when_matched_update_all != 0;
+        settings.when_not_matched_insert_all = config.when_not_matched_insert_all != 0;
+
+        // The update condition is only used when matched records are updated
+        if settings.when_matched_update_all {
+            let has_expr = !config.when_matched_update_all_expr.is_null();
+            let has_sql = !config.when_matched_update_all_condition.is_null();
+
+            // the two flavors of the condition are mutually exclusive
+            if has_expr && has_sql {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            }
+
+            if has_expr {
+                settings.update_condition = Some(MergeUpdateCondition::Expr(
+                    &*config.when_matched_update_all_expr,
+                ));
+            } else if has_sql {
+                let Ok(condition) =
+                    CStr::from_ptr(config.when_matched_update_all_condition).to_str()
+                else {
+                    set_invalid_argument_message(error_message);
+                    return LanceDBError::InvalidArgument;
+                };
+                settings.update_condition = Some(MergeUpdateCondition::Sql(condition));
+            }
+        }
     }
 
-    // Extract the optional "when matched" condition, which is only used when matched
-    // records are updated
-    let mut update_condition_sql = None;
-    let mut update_condition_expr = None;
-    if !config.is_null() && (*config).when_matched_update_all != 0 {
-        let cfg = &*config;
-        let has_expr = !cfg.when_matched_update_all_expr.is_null();
-        let has_sql = !cfg.when_matched_update_all_condition.is_null();
+    match execute_merge_insert(
+        &(*table).inner,
+        data_box.into_inner(),
+        &on_columns,
+        settings,
+    ) {
+        Ok(_) => LanceDBError::Success,
+        Err(error) => handle_error(&error, error_message),
+    }
+}
 
-        // the two flavors of the condition are mutually exclusive
-        if has_expr && has_sql {
-            set_invalid_argument_message(error_message);
-            return LanceDBError::InvalidArgument;
-        }
+/// Merge data into table with explicit actions and a result
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `data` must be a valid pointer to a LanceDBRecordBatchReader. It carries both
+///   the source schema and every source batch, so one call performs one SDK merge.
+///   A reader over a schema-only Arrow IPC file is an empty source
+/// - `on_columns` must be an array of `num_columns` valid null-terminated C strings
+/// - `options`, when not NULL, must point to a readable `LanceDBMergeInsertOptions`.
+///   Its conditions and filters are borrowed for the call
+/// - `result_out` must be a valid pointer to receive the SDK result
+/// - `data` is always consumed, also when the other arguments are rejected
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*result_out` filled from the SDK result
+/// - `LANCEDB_INVALID_ARGUMENT` for a NULL pointer, an empty join-key list, a
+///   non-UTF-8 string, or an out-of-range `use_index`/`timeout_ms` sentinel
+/// - The SDK error code for a rejected merge
+///
+/// On entry, `*result_out` and the error message are cleared. The result is only
+/// meaningful when the call succeeds. Free a returned error message with
+/// `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_merge_insert_with_result(
+    table: *const LanceDBTable,
+    data: *mut LanceDBRecordBatchReader,
+    on_columns: *const *const c_char,
+    num_columns: usize,
+    options: *const LanceDBMergeInsertOptions,
+    result_out: *mut LanceDBMergeInsertResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !result_out.is_null() {
+        *result_out = LanceDBMergeInsertResult::default();
+    }
+    clear_error_message(error_message);
 
-        if has_expr {
-            // the expression is borrowed, ownership stays with the caller
-            update_condition_expr = Some((*cfg.when_matched_update_all_expr).inner.clone());
-        } else if has_sql {
-            let Ok(condition) = CStr::from_ptr(cfg.when_matched_update_all_condition).to_str()
+    if data.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    // Take ownership of the data reader before anything else, so that it is freed
+    // on every path, including the ones rejecting the rest of the arguments
+    let data_box = Box::from_raw(data);
+
+    if table.is_null() || result_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Some(column_names) = parse_on_columns(on_columns, num_columns) else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let on_columns: Vec<&str> = column_names.iter().map(String::as_str).collect();
+
+    // A NULL options pointer keeps the historical default upsert
+    let mut settings = MergeInsertSettings {
+        when_matched_update_all: true,
+        update_condition: None,
+        when_not_matched_insert_all: true,
+        when_not_matched_by_source_delete: false,
+        when_not_matched_by_source_delete_filter: None,
+        timeout: None,
+        use_index: None,
+    };
+
+    if !options.is_null() {
+        let options = &*options;
+        settings.when_matched_update_all = options.when_matched_update_all != 0;
+        settings.when_not_matched_insert_all = options.when_not_matched_insert_all != 0;
+        settings.when_not_matched_by_source_delete = options.when_not_matched_by_source_delete != 0;
+
+        if settings.when_matched_update_all && !options.when_matched_update_all_condition.is_null()
+        {
+            let Ok(condition) = CStr::from_ptr(options.when_matched_update_all_condition).to_str()
             else {
                 set_invalid_argument_message(error_message);
                 return LanceDBError::InvalidArgument;
             };
-            update_condition_sql = Some(condition.to_string());
+            settings.update_condition = Some(MergeUpdateCondition::Sql(condition));
         }
+
+        if settings.when_not_matched_by_source_delete
+            && !options.when_not_matched_by_source_delete_filter.is_null()
+        {
+            let Ok(filter) =
+                CStr::from_ptr(options.when_not_matched_by_source_delete_filter).to_str()
+            else {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            };
+            settings.when_not_matched_by_source_delete_filter = Some(filter);
+        }
+
+        settings.use_index = match options.use_index {
+            -1 => None,
+            0 => Some(false),
+            1 => Some(true),
+            _ => {
+                set_custom_error_message(
+                    error_message,
+                    "Invalid argument: use_index must be -1, 0, or 1",
+                );
+                return LanceDBError::InvalidArgument;
+            }
+        };
+
+        settings.timeout = match options.timeout_ms {
+            -1 => None,
+            timeout_ms if timeout_ms >= 0 => Some(Duration::from_millis(timeout_ms as u64)),
+            _ => {
+                set_custom_error_message(
+                    error_message,
+                    "Invalid argument: timeout_ms must be -1 or a non-negative number",
+                );
+                return LanceDBError::InvalidArgument;
+            }
+        };
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
-
-    match runtime.block_on(async {
-        let mut merge_builder = tbl.merge_insert(&column_names);
-
-        // Apply configuration if provided
-        if !config.is_null() {
-            let cfg = &*config;
-            if cfg.when_matched_update_all != 0 {
-                if let Some(expr) = update_condition_expr {
-                    merge_builder.when_matched_update_all_expr(expr);
-                } else {
-                    merge_builder.when_matched_update_all(update_condition_sql);
-                }
-            }
-            if cfg.when_not_matched_insert_all != 0 {
-                merge_builder.when_not_matched_insert_all();
-            }
-        } else {
-            // Default upsert behavior
-            merge_builder.when_matched_update_all(None);
-            merge_builder.when_not_matched_insert_all();
+    match execute_merge_insert(
+        &(*table).inner,
+        data_box.into_inner(),
+        &on_columns,
+        settings,
+    ) {
+        Ok(merge_result) => {
+            *result_out = LanceDBMergeInsertResult {
+                version: merge_result.version,
+                num_inserted_rows: merge_result.num_inserted_rows,
+                num_updated_rows: merge_result.num_updated_rows,
+                num_deleted_rows: merge_result.num_deleted_rows,
+                num_attempts: merge_result.num_attempts,
+            };
+            LanceDBError::Success
         }
-
-        merge_builder.execute(data_box.into_inner()).await
-    }) {
-        Ok(_) => LanceDBError::Success,
-        Err(e) => handle_error(&e, error_message),
+        Err(error) => handle_error(&error, error_message),
     }
 }
 
