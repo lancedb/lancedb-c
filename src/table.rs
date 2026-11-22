@@ -7,7 +7,7 @@
 //! combining both simple and full table functionality.
 
 use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use arrow_schema::{ArrowError, Schema};
 use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::table::{ColumnAlteration, NewColumnTransform};
+use lancedb::table::{ColumnAlteration, NewColumnTransform, Ref};
 
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
@@ -1601,6 +1601,76 @@ pub struct LanceDBTag {
     pub branch: *const c_char,
 }
 
+/// Source kind for `lancedb_table_create_branch`
+///
+/// The kind selects which fields of `LanceDBBranchSource` are read. The SDK
+/// distinguishes a version on the current branch, a global tag, and an explicit
+/// branch with an optional version.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBBranchSourceKind {
+    Version = 0,
+    Tag = 1,
+    Branch = 2,
+}
+
+impl LanceDBBranchSourceKind {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::Version),
+            1 => Some(Self::Tag),
+            2 => Some(Self::Branch),
+            _ => None,
+        }
+    }
+}
+
+/// Source reference for `lancedb_table_create_branch`
+///
+/// Only the fields selected by `kind` are read; the caller may leave the other
+/// fields uninitialized. For `LANCEDB_BRANCH_SOURCE_VERSION`, `has_version`
+/// must be nonzero and `version` is read. For `LANCEDB_BRANCH_SOURCE_TAG`, only
+/// `name` is read. For `LANCEDB_BRANCH_SOURCE_BRANCH`, `name` and `has_version`
+/// are read, and `version` is read only when `has_version` is nonzero.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBBranchSource {
+    pub kind: c_int,
+    pub name: *const c_char,
+    pub has_version: c_int,
+    pub version: u64,
+}
+
+/// Optional version for `lancedb_table_checkout_branch`
+///
+/// `has_version` set to 0 checks out the branch head. Any other value pins the
+/// returned handle to `version`, which makes it read-only. `version` is read
+/// only when `has_version` is nonzero.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBBranchCheckoutOptions {
+    pub has_version: c_int,
+    pub version: u64,
+}
+
+/// Branch metadata returned by `lancedb_table_list_branches`
+///
+/// The array, every string and every metadata array are owned by the result.
+/// Free them with `lancedb_free_branches`. `manifest_size` is the parent
+/// version's manifest size in bytes at divergence.
+#[repr(C)]
+pub struct LanceDBBranch {
+    pub name: *const c_char,
+    pub parent_branch: *const c_char,
+    pub parent_version: u64,
+    pub created_at: u64,
+    pub manifest_size: u64,
+    pub metadata_keys: *const *const c_char,
+    pub metadata_values: *const *const c_char,
+    pub metadata_count: usize,
+}
+
 /// Check out a specific version of the table
 ///
 /// # Safety
@@ -1990,6 +2060,444 @@ pub unsafe extern "C" fn lancedb_free_tags(tags: *const LanceDBTag, count: usize
         free_tag_string(tag.branch);
     }
     libc::free(tags as *mut libc::c_void);
+}
+
+/* ========== TABLE BRANCH OPERATIONS ========== */
+
+/// Owned strings for one branch while the list result is being prepared
+struct PreparedBranch {
+    name: CString,
+    parent_branch: Option<CString>,
+    parent_version: u64,
+    created_at: u64,
+    manifest_size: u64,
+    metadata: Vec<(CString, CString)>,
+}
+
+/// Convert a branch source from its C representation into the SDK reference
+///
+/// Only the fields selected by `kind` are read. The caller may leave the other
+/// fields uninitialized, so this function never forms a reference to the whole
+/// C struct.
+unsafe fn branch_ref_from_source(source: *const LanceDBBranchSource) -> Result<Ref, &'static str> {
+    let kind = ptr::addr_of!((*source).kind).read();
+    let Some(kind) = LanceDBBranchSourceKind::from_c_int(kind) else {
+        return Err("branch source kind is not a LanceDBBranchSourceKind value");
+    };
+
+    match kind {
+        LanceDBBranchSourceKind::Version => {
+            let has_version = ptr::addr_of!((*source).has_version).read();
+            if has_version == 0 {
+                return Err("branch source version is required");
+            }
+            let version = ptr::addr_of!((*source).version).read();
+            Ok(Ref::VersionNumber(version))
+        }
+        LanceDBBranchSourceKind::Tag => {
+            let name = ptr::addr_of!((*source).name).read();
+            if name.is_null() {
+                return Err("branch source tag name is required");
+            }
+            let name = CStr::from_ptr(name)
+                .to_str()
+                .map_err(|_| "branch source tag name is not valid UTF-8")?;
+            Ok(Ref::Tag(name.to_string()))
+        }
+        LanceDBBranchSourceKind::Branch => {
+            let name = ptr::addr_of!((*source).name).read();
+            if name.is_null() {
+                return Err("branch source branch name is required");
+            }
+            let name = CStr::from_ptr(name)
+                .to_str()
+                .map_err(|_| "branch source branch name is not valid UTF-8")?;
+            let has_version = ptr::addr_of!((*source).has_version).read();
+            let version = if has_version != 0 {
+                Some(ptr::addr_of!((*source).version).read())
+            } else {
+                None
+            };
+            Ok(Ref::Version(Some(name.to_string()), version))
+        }
+    }
+}
+
+/// Create a new branch and return a handle scoped to it
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `name` must be a valid null-terminated C string
+/// - `source` must point to a valid LanceDBBranchSource
+/// - `table_out` must be a valid pointer to receive the new table handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_create_branch(
+    table: *const LanceDBTable,
+    name: *const c_char,
+    source: *const LanceDBBranchSource,
+    table_out: *mut *mut LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || name.is_null() || source.is_null() || table_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let from = match branch_ref_from_source(source) {
+        Ok(from) => from,
+        Err(message) => {
+            set_custom_error_message(error_message, message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let name = name.to_string();
+    let tbl = (*table).inner.clone();
+
+    match get_runtime().block_on(async move { tbl.create_branch(&name, from).await }) {
+        Ok(branch) => {
+            *table_out = Box::into_raw(Box::new(LanceDBTable { inner: branch }));
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Check out a branch and return a handle scoped to it
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `name` must be a valid null-terminated C string
+/// - `options` must point to a valid LanceDBBranchCheckoutOptions
+/// - `table_out` must be a valid pointer to receive the new table handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_checkout_branch(
+    table: *const LanceDBTable,
+    name: *const c_char,
+    options: *const LanceDBBranchCheckoutOptions,
+    table_out: *mut *mut LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || name.is_null() || options.is_null() || table_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+    let has_version = ptr::addr_of!((*options).has_version).read();
+    let version = if has_version != 0 {
+        Some(ptr::addr_of!((*options).version).read())
+    } else {
+        None
+    };
+
+    let name = name.to_string();
+    let tbl = (*table).inner.clone();
+
+    match get_runtime().block_on(async move { tbl.checkout_branch(&name, version).await }) {
+        Ok(branch) => {
+            *table_out = Box::into_raw(Box::new(LanceDBTable { inner: branch }));
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// List the branches of the table
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `branches_out` must be a valid pointer to receive the read-only array
+/// - `count_out` must be a valid pointer to receive the number of branches
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_list_branches(
+    table: *const LanceDBTable,
+    branches_out: *mut *const LanceDBBranch,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || branches_out.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let tbl = (*table).inner.clone();
+    let mut branches: Vec<_> =
+        match get_runtime().block_on(async move { tbl.list_branches().await }) {
+            Ok(branches) => branches.into_iter().collect(),
+            Err(error) => return handle_error(&error, error_message),
+        };
+    branches.sort_by(|left, right| left.0.cmp(&right.0));
+
+    // Convert everything before allocating so that a string conversion failure
+    // cannot leave a partially initialized result behind.
+    let mut entries = Vec::with_capacity(branches.len());
+    for (name, contents) in branches {
+        let Ok(name) = CString::new(name) else {
+            set_unknown_error_message(error_message);
+            return LanceDBError::Unknown;
+        };
+        let parent_branch = match contents.parent_branch {
+            Some(parent) => match CString::new(parent) {
+                Ok(parent) => Some(parent),
+                Err(_) => {
+                    set_unknown_error_message(error_message);
+                    return LanceDBError::Unknown;
+                }
+            },
+            None => None,
+        };
+
+        let mut metadata: Vec<_> = contents.metadata.into_iter().collect();
+        metadata.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut metadata_entries = Vec::with_capacity(metadata.len());
+        for (key, value) in metadata {
+            let (Ok(key), Ok(value)) = (CString::new(key), CString::new(value)) else {
+                set_unknown_error_message(error_message);
+                return LanceDBError::Unknown;
+            };
+            metadata_entries.push((key, value));
+        }
+
+        entries.push(PreparedBranch {
+            name,
+            parent_branch,
+            parent_version: contents.parent_version,
+            created_at: contents.create_at,
+            manifest_size: contents.manifest_size as u64,
+            metadata: metadata_entries,
+        });
+    }
+
+    let count = entries.len();
+    if count == 0 {
+        *branches_out = ptr::null();
+        *count_out = 0;
+        return LanceDBError::Success;
+    }
+
+    let branches_array =
+        libc::malloc(count * std::mem::size_of::<LanceDBBranch>()) as *mut LanceDBBranch;
+    if branches_array.is_null() {
+        set_unknown_error_message(error_message);
+        return LanceDBError::Unknown;
+    }
+
+    // Allocate every metadata array before any ownership is transferred, so a
+    // partial allocation can still be cleaned up without touching records that
+    // have not been initialized yet.
+    let mut metadata_arrays: Vec<(*mut *const c_char, *mut *const c_char)> =
+        Vec::with_capacity(count);
+    for entry in &entries {
+        let metadata_count = entry.metadata.len();
+        if metadata_count == 0 {
+            metadata_arrays.push((ptr::null_mut(), ptr::null_mut()));
+            continue;
+        }
+
+        let keys = libc::calloc(metadata_count, std::mem::size_of::<*const c_char>())
+            as *mut *const c_char;
+        let values = libc::calloc(metadata_count, std::mem::size_of::<*const c_char>())
+            as *mut *const c_char;
+        if keys.is_null() || values.is_null() {
+            if !keys.is_null() {
+                libc::free(keys as *mut libc::c_void);
+            }
+            if !values.is_null() {
+                libc::free(values as *mut libc::c_void);
+            }
+            for (allocated_keys, allocated_values) in &metadata_arrays {
+                if !allocated_keys.is_null() {
+                    libc::free(*allocated_keys as *mut libc::c_void);
+                }
+                if !allocated_values.is_null() {
+                    libc::free(*allocated_values as *mut libc::c_void);
+                }
+            }
+            libc::free(branches_array as *mut libc::c_void);
+            set_unknown_error_message(error_message);
+            return LanceDBError::Unknown;
+        }
+        metadata_arrays.push((keys, values));
+    }
+
+    // All allocations and conversions succeeded. Transfer the strings and write
+    // fully initialized records into the uninitialized allocation.
+    for (branch_index, (entry, (metadata_keys, metadata_values))) in
+        entries.into_iter().zip(metadata_arrays).enumerate()
+    {
+        let PreparedBranch {
+            name,
+            parent_branch,
+            parent_version,
+            created_at,
+            manifest_size,
+            metadata,
+        } = entry;
+        let metadata_count = metadata.len();
+        let name = name.into_raw();
+        let parent_branch = parent_branch.map_or(ptr::null(), |parent| parent.into_raw());
+        for (index, (key, value)) in metadata.into_iter().enumerate() {
+            *metadata_keys.add(index) = key.into_raw();
+            *metadata_values.add(index) = value.into_raw();
+        }
+
+        ptr::write(
+            branches_array.add(branch_index),
+            LanceDBBranch {
+                name,
+                parent_branch,
+                parent_version,
+                created_at,
+                manifest_size,
+                metadata_keys,
+                metadata_values,
+                metadata_count,
+            },
+        );
+    }
+
+    *branches_out = branches_array as *const LanceDBBranch;
+    *count_out = count;
+    LanceDBError::Success
+}
+
+/// Reclaim a branch string allocated by `lancedb_table_list_branches`
+unsafe fn free_branch_string(value: *const c_char) {
+    if !value.is_null() {
+        let _ = CString::from_raw(value as *mut c_char);
+    }
+}
+
+/// Free the arrays owned by a branch list
+unsafe fn free_branch_arrays(branches: *mut LanceDBBranch, count: usize) {
+    for i in 0..count {
+        let branch = &*branches.add(i);
+        if !branch.metadata_keys.is_null() {
+            libc::free(branch.metadata_keys as *mut libc::c_void);
+        }
+        if !branch.metadata_values.is_null() {
+            libc::free(branch.metadata_values as *mut libc::c_void);
+        }
+    }
+    libc::free(branches as *mut libc::c_void);
+}
+
+/// Free branch metadata returned by `lancedb_table_list_branches`
+///
+/// # Safety
+/// - `branches` must be a pointer returned by `lancedb_table_list_branches`
+/// - `count` must match the count returned by `lancedb_table_list_branches`
+/// - Safe to call with NULL pointer
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_free_branches(branches: *const LanceDBBranch, count: usize) {
+    if branches.is_null() {
+        return;
+    }
+
+    for i in 0..count {
+        let branch = &*branches.add(i);
+        free_branch_string(branch.name);
+        free_branch_string(branch.parent_branch);
+        for index in 0..branch.metadata_count {
+            free_branch_string(*branch.metadata_keys.add(index));
+            free_branch_string(*branch.metadata_values.add(index));
+        }
+    }
+    free_branch_arrays(branches as *mut LanceDBBranch, count);
+}
+
+/// Delete a branch from the table
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `name` must be a valid null-terminated C string
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_delete_branch(
+    table: *const LanceDBTable,
+    name: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || name.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let name = name.to_string();
+    let tbl = (*table).inner.clone();
+
+    match get_runtime().block_on(async move { tbl.delete_branch(&name).await }) {
+        Ok(()) => LanceDBError::Success,
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
+/// Get the branch a table handle is scoped to
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `branch_out` must be a valid pointer to receive the branch name
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_current_branch(
+    table: *const LanceDBTable,
+    branch_out: *mut *mut c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if branch_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    *branch_out = ptr::null_mut();
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    match (*table).inner.current_branch() {
+        Some(branch) => match CString::new(branch) {
+            Ok(branch) => {
+                *branch_out = branch.into_raw();
+                LanceDBError::Success
+            }
+            Err(_) => {
+                set_unknown_error_message(error_message);
+                LanceDBError::Unknown
+            }
+        },
+        None => LanceDBError::Success,
+    }
 }
 
 /* ========== TABLE METADATA OPERATIONS ========== */

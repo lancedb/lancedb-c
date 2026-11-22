@@ -57,6 +57,15 @@ LanceDBError lancedb_test_set_distance_type(
     LanceDBVectorQuery* query,
     int distance_type,
     char** error_message);
+LanceDBError lancedb_test_create_branch_with_source_kind(
+    const LanceDBTable* table,
+    const char* name,
+    int source_kind,
+    const char* source_name,
+    int has_version,
+    uint64_t version,
+    LanceDBTable** table_out,
+    char** error_message);
 LanceDBError lancedb_test_set_normalize_method(
     LanceDBVectorQuery* query,
     int normalize_method,
