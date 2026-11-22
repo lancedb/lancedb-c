@@ -1253,12 +1253,12 @@ pub unsafe extern "C" fn lancedb_vector_query_explain_plan(
 
     let query_ref = &*query;
     let runtime = get_runtime();
+    let rust_query = match configured_vector_query(query_ref) {
+        Ok(rust_query) => rust_query,
+        Err(error) => return handle_error(&error, error_message),
+    };
 
-    match runtime.block_on(async {
-        configured_vector_query(query_ref)?
-            .explain_plan(verbose)
-            .await
-    }) {
+    match runtime.block_on(rust_query.explain_plan(verbose)) {
         Ok(plan) => publish_plan(plan, plan_out, error_message),
         Err(error) => handle_error(&error, error_message),
     }
@@ -1332,9 +1332,12 @@ pub unsafe extern "C" fn lancedb_vector_query_output_schema(
         return LanceDBError::InvalidArgument;
     }
 
-    let schema =
-        get_runtime().block_on(async { configured_vector_query(&*query)?.output_schema().await });
-    match schema {
+    let rust_query = match configured_vector_query(&*query) {
+        Ok(rust_query) => rust_query,
+        Err(error) => return handle_error(&error, error_message),
+    };
+
+    match get_runtime().block_on(rust_query.output_schema()) {
         Ok(schema) => publish_output_schema(schema.as_ref(), schema_out, error_message),
         Err(error) => handle_error(&error, error_message),
     }
@@ -1406,9 +1409,12 @@ pub unsafe extern "C" fn lancedb_vector_query_analyze_plan(
         return LanceDBError::InvalidArgument;
     }
 
-    let plan =
-        get_runtime().block_on(async { configured_vector_query(&*query)?.analyze_plan().await });
-    match plan {
+    let rust_query = match configured_vector_query(&*query) {
+        Ok(rust_query) => rust_query,
+        Err(error) => return handle_error(&error, error_message),
+    };
+
+    match get_runtime().block_on(rust_query.analyze_plan()) {
         Ok(plan) => publish_plan(plan, plan_out, error_message),
         Err(error) => handle_error(&error, error_message),
     }
