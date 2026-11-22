@@ -4,6 +4,10 @@
  */
 
 #include "test_common.h"
+#include <arrow/util/float16.h>
+#include <limits>
+#include <map>
+#include <optional>
 #include <random>
 
 // Helper function to generate random query vector
@@ -100,6 +104,214 @@ static std::vector<float> vector_for_row(int row) {
     vector[j] = static_cast<float>(row * 10 + static_cast<int>(j));
   }
   return vector;
+}
+
+static std::vector<uint16_t> f16_bits_for_row(int row) {
+  std::vector<uint16_t> bits(TEST_SCHEMA_DIMENSIONS);
+  for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
+    const float value = static_cast<float>(row * 10 + static_cast<int>(j));
+    bits[j] = arrow::util::Float16::FromFloat(value).bits();
+  }
+  return bits;
+}
+
+static std::vector<double> f64_vector_for_row(int row) {
+  std::vector<double> vector(TEST_SCHEMA_DIMENSIONS);
+  for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
+    vector[j] = static_cast<double>(row * 10 + static_cast<int>(j));
+  }
+  return vector;
+}
+
+struct CollectedQueryRow {
+  int32_t query_index;
+  std::string key;
+  float distance;
+};
+
+// Pair query_index, key and _distance for a batch vector query. The rows keep
+// the order the batches returned.
+static std::vector<CollectedQueryRow> query_rows_with_index(
+    const CollectedQueryRows& rows) {
+  std::vector<CollectedQueryRow> collected;
+  for (const auto& batch : rows.batches) {
+    auto query_index = std::static_pointer_cast<arrow::Int32Array>(
+        batch->GetColumnByName("query_index"));
+    auto key = std::static_pointer_cast<arrow::StringArray>(
+        batch->GetColumnByName("key"));
+    auto distance = std::static_pointer_cast<arrow::FloatArray>(
+        batch->GetColumnByName("_distance"));
+    REQUIRE(query_index != nullptr);
+    REQUIRE(key != nullptr);
+    REQUIRE(distance != nullptr);
+    for (int64_t i = 0; i < batch->num_rows(); i++) {
+      collected.push_back(
+          {query_index->Value(i), key->GetString(i), distance->Value(i)});
+    }
+  }
+  return collected;
+}
+
+static std::vector<float> distances_of(const CollectedQueryRows& rows) {
+  std::vector<float> distances;
+  for (const auto& batch : rows.batches) {
+    auto distance = std::static_pointer_cast<arrow::FloatArray>(
+        batch->GetColumnByName("_distance"));
+    REQUIRE(distance != nullptr);
+    for (int64_t i = 0; i < batch->num_rows(); i++) {
+      distances.push_back(distance->Value(i));
+    }
+  }
+  return distances;
+}
+
+static void configure_key_projection_and_limit(
+    LanceDBVectorQuery* query,
+    size_t limit,
+    std::optional<LanceDBDistanceType> distance_type = std::nullopt) {
+  char* error_message = nullptr;
+  REQUIRE(lancedb_vector_query_limit(query, limit, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  const char* columns[] = {"key"};
+  REQUIRE(lancedb_vector_query_select(query, columns, 1, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  if (distance_type.has_value()) {
+    REQUIRE(lancedb_vector_query_distance_type(
+        query, *distance_type, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+}
+
+static CollectedQueryRows execute_vector_query(LanceDBVectorQuery* query) {
+  LanceDBQueryResult* result = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_vector_query_execute_with_status(
+      query, &result, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  return collect_query_rows(result);
+}
+
+static CollectedQueryRows run_typed_query(
+    LanceDBTable* table,
+    const std::vector<LanceDBQueryVector>& vectors,
+    size_t limit,
+    std::optional<LanceDBDistanceType> distance_type = std::nullopt) {
+  REQUIRE(!vectors.empty());
+  LanceDBVectorQuery* query = lancedb_vector_query_new_typed(
+      table, vectors.data(), vectors.size());
+  REQUIRE(query != nullptr);
+  configure_key_projection_and_limit(query, limit, distance_type);
+  return execute_vector_query(query);
+}
+
+// Create a table whose vector column is FixedSizeList<UInt8>, the shape Lance
+// uses for binary vectors.
+static LanceDBTable* create_binary_vector_table(
+    LanceDBConnection* db, const std::string& table_name) {
+  constexpr int32_t kDimensions = 2;
+  auto schema = arrow::schema({
+      arrow::field("key", arrow::utf8()),
+      arrow::field("vector", arrow::fixed_size_list(arrow::uint8(), kDimensions)),
+  });
+
+  arrow::StringBuilder key_builder;
+  arrow::FixedSizeListBuilder vector_builder(
+      arrow::default_memory_pool(), std::make_shared<arrow::UInt8Builder>(),
+      kDimensions);
+  const std::vector<std::vector<uint8_t>> vectors = {
+      {0, 0}, {255, 255}, {1, 2}, {3, 4}};
+  for (size_t i = 0; i < vectors.size(); i++) {
+    REQUIRE(key_builder.Append("bin_" + std::to_string(i)).ok());
+    auto* values = static_cast<arrow::UInt8Builder*>(vector_builder.value_builder());
+    for (const uint8_t value : vectors[i]) {
+      REQUIRE(values->Append(value).ok());
+    }
+    REQUIRE(vector_builder.Append().ok());
+  }
+
+  std::shared_ptr<arrow::Array> key_array, vector_array;
+  REQUIRE(key_builder.Finish(&key_array).ok());
+  REQUIRE(vector_builder.Finish(&vector_array).ok());
+  auto batch = arrow::RecordBatch::Make(
+      schema, static_cast<int64_t>(vectors.size()), {key_array, vector_array});
+
+  LanceDBRecordBatchReader* reader = create_reader_from_batch(batch);
+  REQUIRE(reader != nullptr);
+  struct ArrowSchema c_schema;
+  REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+  LanceDBTable* table = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create(
+      db, table_name.c_str(), reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
+      reader, &table, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(table != nullptr);
+  if (c_schema.release) {
+    c_schema.release(&c_schema);
+  }
+  return table;
+}
+
+// Create a table whose vector column is List<FixedSizeList<Float32>>, the
+// shape Lance uses for multivector documents.
+static LanceDBTable* create_multivector_table(
+    LanceDBConnection* db, const std::string& table_name) {
+  constexpr int32_t kDimensions = 4;
+  auto schema = arrow::schema({
+      arrow::field("key", arrow::utf8()),
+      arrow::field(
+          "vectors",
+          arrow::list(arrow::fixed_size_list(arrow::float32(), kDimensions))),
+  });
+
+  arrow::StringBuilder key_builder;
+  arrow::ListBuilder vector_builder(
+      arrow::default_memory_pool(),
+      std::make_shared<arrow::FixedSizeListBuilder>(
+          arrow::default_memory_pool(), std::make_shared<arrow::FloatBuilder>(),
+          kDimensions));
+  const std::vector<std::vector<std::vector<float>>> rows = {
+      {{0, 0, 0, 0}, {50, 50, 50, 50}},
+      {{10, 10, 10, 10}, {60, 60, 60, 60}},
+      {{20, 20, 20, 20}, {70, 70, 70, 70}},
+  };
+  for (size_t i = 0; i < rows.size(); i++) {
+    REQUIRE(key_builder.Append("doc_" + std::to_string(i)).ok());
+    auto* fixed_builder =
+        static_cast<arrow::FixedSizeListBuilder*>(vector_builder.value_builder());
+    auto* values = static_cast<arrow::FloatBuilder*>(fixed_builder->value_builder());
+    for (const auto& vector : rows[i]) {
+      for (const float value : vector) {
+        REQUIRE(values->Append(value).ok());
+      }
+      REQUIRE(fixed_builder->Append().ok());
+    }
+    REQUIRE(vector_builder.Append().ok());
+  }
+
+  std::shared_ptr<arrow::Array> key_array, vector_array;
+  REQUIRE(key_builder.Finish(&key_array).ok());
+  REQUIRE(vector_builder.Finish(&vector_array).ok());
+  auto batch = arrow::RecordBatch::Make(
+      schema, static_cast<int64_t>(rows.size()), {key_array, vector_array});
+
+  LanceDBRecordBatchReader* reader = create_reader_from_batch(batch);
+  REQUIRE(reader != nullptr);
+  struct ArrowSchema c_schema;
+  REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+  LanceDBTable* table = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create(
+      db, table_name.c_str(), reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
+      reader, &table, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(table != nullptr);
+  if (c_schema.release) {
+    c_schema.release(&c_schema);
+  }
+  return table;
 }
 
 // Count the rows across all batches in a query result and free the result.
@@ -2177,6 +2389,285 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - Arrow IPC output", "[ve
     REQUIRE(query != nullptr);
     REQUIRE(lancedb_vector_query_column(query, "no_such_column", nullptr) == LANCEDB_SUCCESS);
     REQUIRE(lancedb_vector_query_execute(query) == nullptr);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(
+    LanceDBFixture,
+    "LanceDB Vector Query - typed and multiple query vectors",
+    "[vector_query]") {
+  const std::string table_name = "typed_vector_query_test";
+  LanceDBTable* table = create_table_with_data(table_name, 20, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("F16, F32 and F64 inputs use their declared element type") {
+    auto f16_vector = f16_bits_for_row(2);
+    LanceDBQueryVector f16_input{
+        LANCEDB_QUERY_VECTOR_F16, f16_vector.data(), f16_vector.size()};
+    auto f16_rows = run_typed_query(table, {f16_input}, 1);
+    REQUIRE(keys_of(f16_rows) == std::vector<std::string>{"key_2"});
+    REQUIRE(f16_rows.schema->GetFieldByName("query_index") == nullptr);
+    REQUIRE(distances_of(f16_rows).front() == 0.0F);
+
+    auto f32_vector = vector_for_row(4);
+    LanceDBQueryVector f32_input{
+        LANCEDB_QUERY_VECTOR_F32, f32_vector.data(), f32_vector.size()};
+    auto f32_rows = run_typed_query(table, {f32_input}, 1);
+    REQUIRE(keys_of(f32_rows) == std::vector<std::string>{"key_4"});
+    REQUIRE(f32_rows.schema->GetFieldByName("query_index") == nullptr);
+    REQUIRE(distances_of(f32_rows).front() == 0.0F);
+
+    auto f64_vector = f64_vector_for_row(6);
+    LanceDBQueryVector f64_input{
+        LANCEDB_QUERY_VECTOR_F64, f64_vector.data(), f64_vector.size()};
+    auto f64_rows = run_typed_query(table, {f64_input}, 1);
+    REQUIRE(keys_of(f64_rows) == std::vector<std::string>{"key_6"});
+    REQUIRE(f64_rows.schema->GetFieldByName("query_index") == nullptr);
+    REQUIRE(distances_of(f64_rows).front() == 0.0F);
+  }
+
+  SECTION("The constructor and add call copy every borrowed input") {
+    auto f16_vector = f16_bits_for_row(2);
+    LanceDBQueryVector first{
+        LANCEDB_QUERY_VECTOR_F16, f16_vector.data(), f16_vector.size()};
+    LanceDBVectorQuery* query =
+        lancedb_vector_query_new_typed(table, &first, 1);
+    REQUIRE(query != nullptr);
+
+    // The constructor has already copied the borrowed bits.
+    std::fill(f16_vector.begin(), f16_vector.end(), 0);
+
+    auto second_vector = vector_for_row(5);
+    LanceDBQueryVector second{
+        LANCEDB_QUERY_VECTOR_F32, second_vector.data(), second_vector.size()};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_add_query_vector(query, &second, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The add call has already copied the borrowed floats.
+    std::fill(second_vector.begin(), second_vector.end(), 0.0F);
+
+    configure_key_projection_and_limit(query, 1);
+    auto rows = execute_vector_query(query);
+    REQUIRE(rows.num_rows() == 2);
+
+    std::map<int32_t, std::string> first_key_by_query;
+    for (const auto& row : query_rows_with_index(rows)) {
+      first_key_by_query.emplace(row.query_index, row.key);
+    }
+    REQUIRE(first_key_by_query[0] == "key_2");
+    REQUIRE(first_key_by_query[1] == "key_5");
+  }
+
+  SECTION("Multiple vectors run one batch with query_index and ordered rows") {
+    auto first_vector = vector_for_row(1);
+    auto second_vector = vector_for_row(7);
+    LanceDBQueryVector vectors[] = {
+        {LANCEDB_QUERY_VECTOR_F32, first_vector.data(), first_vector.size()},
+        {LANCEDB_QUERY_VECTOR_F32, second_vector.data(), second_vector.size()},
+    };
+
+    auto rows = run_typed_query(table, {vectors[0], vectors[1]}, 2);
+    REQUIRE(rows.num_rows() == 4);
+    auto query_index = rows.schema->GetFieldByName("query_index");
+    REQUIRE(query_index != nullptr);
+    REQUIRE(query_index->type()->id() == arrow::Type::INT32);
+
+    const std::vector<std::string> expected_first = {"key_1", "key_7"};
+    for (int32_t index = 0; index < 2; index++) {
+      std::vector<CollectedQueryRow> group;
+      for (const auto& row : query_rows_with_index(rows)) {
+        if (row.query_index == index) {
+          group.push_back(row);
+        }
+      }
+      REQUIRE(group.size() == 2);
+      REQUIRE(group[0].key == expected_first[static_cast<size_t>(index)]);
+      REQUIRE(group[0].distance == 0.0F);
+      REQUIRE(group[0].distance <= group[1].distance);
+    }
+  }
+
+  SECTION("Binary vectors query a UInt8 column with Hamming distance") {
+    LanceDBTable* binary_table =
+        create_binary_vector_table(db, "typed_binary_vector_query_test");
+
+    const std::vector<uint8_t> nearest = {0, 0};
+    LanceDBQueryVector nearest_input{
+        LANCEDB_QUERY_VECTOR_BINARY, nearest.data(), nearest.size()};
+    auto single_rows = run_typed_query(
+        binary_table, {nearest_input}, 2, LANCEDB_DISTANCE_HAMMING);
+    REQUIRE(keys_of(single_rows) ==
+            std::vector<std::string>{"bin_0", "bin_2"});
+    const auto single_distances = distances_of(single_rows);
+    REQUIRE(single_distances[0] == 0.0F);
+    REQUIRE(single_distances[0] <= single_distances[1]);
+    REQUIRE(single_rows.schema->GetFieldByName("query_index") == nullptr);
+
+    const std::vector<uint8_t> farthest = {255, 255};
+    LanceDBQueryVector vectors[] = {
+        {LANCEDB_QUERY_VECTOR_BINARY, nearest.data(), nearest.size()},
+        {LANCEDB_QUERY_VECTOR_BINARY, farthest.data(), farthest.size()},
+    };
+    auto batch_rows = run_typed_query(
+        binary_table, {vectors[0], vectors[1]}, 1, LANCEDB_DISTANCE_HAMMING);
+    REQUIRE(batch_rows.num_rows() == 2);
+    REQUIRE(batch_rows.schema->GetFieldByName("query_index") != nullptr);
+    std::map<int32_t, std::string> first_key_by_query;
+    for (const auto& row : query_rows_with_index(batch_rows)) {
+      first_key_by_query.emplace(row.query_index, row.key);
+    }
+    REQUIRE(first_key_by_query[0] == "bin_0");
+    REQUIRE(first_key_by_query[1] == "bin_1");
+
+    // Lance accepts Hamming only for UInt8 vectors; the SDK reports the
+    // mismatch when the query is configured.
+    const std::vector<uint8_t> probe = {0, 0};
+    LanceDBQueryVector probe_input{
+        LANCEDB_QUERY_VECTOR_BINARY, probe.data(), probe.size()};
+    LanceDBVectorQuery* query =
+        lancedb_vector_query_new_typed(binary_table, &probe_input, 1);
+    REQUIRE(query != nullptr);
+    configure_key_projection_and_limit(query, 1, LANCEDB_DISTANCE_L2);
+    char* plan = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        query, false, &plan, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    lancedb_vector_query_free(query);
+
+    lancedb_table_free(binary_table);
+  }
+
+  SECTION("Multiple vectors form one multivector search on a List column") {
+    LanceDBTable* multivector_table =
+        create_multivector_table(db, "typed_multivector_query_test");
+
+    const std::vector<float> first = {1, 1, 1, 1};
+    const std::vector<float> second = {2, 2, 2, 2};
+    LanceDBQueryVector vectors[] = {
+        {LANCEDB_QUERY_VECTOR_F32, first.data(), first.size()},
+        {LANCEDB_QUERY_VECTOR_F32, second.data(), second.size()},
+    };
+
+    auto rows = run_typed_query(multivector_table, {vectors[0], vectors[1]}, 2);
+    REQUIRE(rows.num_rows() == 2);
+    REQUIRE(rows.schema->GetFieldByName("query_index") == nullptr);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"doc_0", "doc_1"});
+    const auto distances = distances_of(rows);
+    REQUIRE(distances[0] <= distances[1]);
+
+    lancedb_table_free(multivector_table);
+  }
+
+  SECTION("SDK validation runs when the query is configured") {
+    std::vector<float> nan_vector(
+        TEST_SCHEMA_DIMENSIONS, std::numeric_limits<float>::quiet_NaN());
+    LanceDBVectorQuery* legacy =
+        lancedb_vector_query_new(table, nan_vector.data(), nan_vector.size());
+    REQUIRE(legacy != nullptr);
+
+    char* plan = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        legacy, false, &plan, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("finite") != std::string::npos);
+    lancedb_free_string(error_message);
+    lancedb_vector_query_free(legacy);
+
+    // A valid finite double that becomes non-finite after the SDK converts it
+    // to Float32 is rejected at the same stage; the constructor still copies it.
+    std::vector<double> overflowing(TEST_SCHEMA_DIMENSIONS, 1e300);
+    LanceDBQueryVector input{
+        LANCEDB_QUERY_VECTOR_F64, overflowing.data(), overflowing.size()};
+    LanceDBVectorQuery* typed =
+        lancedb_vector_query_new_typed(table, &input, 1);
+    REQUIRE(typed != nullptr);
+
+    plan = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        typed, false, &plan, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("finite") != std::string::npos);
+    lancedb_free_string(error_message);
+    lancedb_vector_query_free(typed);
+
+    std::vector<uint16_t> nan_bits(TEST_SCHEMA_DIMENSIONS, 0x7e00);
+    LanceDBQueryVector nan_input{
+        LANCEDB_QUERY_VECTOR_F16, nan_bits.data(), nan_bits.size()};
+    typed = lancedb_vector_query_new_typed(table, &nan_input, 1);
+    REQUIRE(typed != nullptr);
+
+    plan = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(
+        typed, false, &plan, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("finite") != std::string::npos);
+    lancedb_free_string(error_message);
+    lancedb_vector_query_free(typed);
+  }
+
+  SECTION("A rejected add leaves the existing query vectors in place") {
+    auto first_vector = vector_for_row(3);
+    LanceDBQueryVector first{
+        LANCEDB_QUERY_VECTOR_F32, first_vector.data(), first_vector.size()};
+    LanceDBVectorQuery* query =
+        lancedb_vector_query_new_typed(table, &first, 1);
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    const LanceDBQueryVector missing_data{
+        LANCEDB_QUERY_VECTOR_F32, nullptr, TEST_SCHEMA_DIMENSIONS};
+    REQUIRE(lancedb_vector_query_add_query_vector(
+        query, &missing_data, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    auto empty_vector = f16_bits_for_row(3);
+    const LanceDBQueryVector empty_dimension{
+        LANCEDB_QUERY_VECTOR_F16, empty_vector.data(), 0};
+    REQUIRE(lancedb_vector_query_add_query_vector(
+        query, &empty_dimension, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    configure_key_projection_and_limit(query, 1);
+    auto rows = execute_vector_query(query);
+    REQUIRE(rows.num_rows() == 1);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_3"});
+    REQUIRE(rows.schema->GetFieldByName("query_index") == nullptr);
+  }
+
+  SECTION("Invalid typed inputs return no query") {
+    auto vector = vector_for_row(0);
+    LanceDBQueryVector valid{
+        LANCEDB_QUERY_VECTOR_F32, vector.data(), vector.size()};
+    REQUIRE(lancedb_vector_query_new_typed(nullptr, &valid, 1) == nullptr);
+    REQUIRE(lancedb_vector_query_new_typed(table, nullptr, 1) == nullptr);
+    REQUIRE(lancedb_vector_query_new_typed(table, &valid, 0) == nullptr);
+
+    LanceDBQueryVector missing_data{
+        LANCEDB_QUERY_VECTOR_F32, nullptr, vector.size()};
+    REQUIRE(lancedb_vector_query_new_typed(table, &missing_data, 1) == nullptr);
+    LanceDBQueryVector zero_dimension{
+        LANCEDB_QUERY_VECTOR_F32, vector.data(), 0};
+    REQUIRE(lancedb_vector_query_new_typed(table, &zero_dimension, 1) == nullptr);
+    REQUIRE(lancedb_vector_query_add_query_vector(nullptr, &valid, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_add_query_vector(nullptr, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
   }
 
   lancedb_table_free(table);
