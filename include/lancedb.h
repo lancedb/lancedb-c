@@ -963,6 +963,80 @@ LanceDBError lancedb_connection_open_table_with_options(
 );
 
 /**
+ * Options for lancedb_connection_clone_table()
+ *
+ * A NULL options pointer or a zero-initialized struct keeps the SDK defaults:
+ * clone the source's current version into the root namespace, fail when the
+ * target already exists, and perform a shallow clone.
+ *
+ * source_version is read only when has_source_version is non-zero. source_tag
+ * is read only when non-NULL. Both may be set; the SDK rejects that combination
+ * when it has to read the source. If the target already exists and exist_ok is
+ * non-zero, the SDK preserves it without reading the source, so that validation
+ * does not run.
+ *
+ * target_namespace is an array of namespace components; a zero length accepts
+ * NULL and selects the root namespace. A positive length requires a non-NULL
+ * array whose entries are non-NULL, NUL-terminated UTF-8 strings.
+ *
+ * is_shallow is read only when has_is_shallow is non-zero. Embedded directory
+ * connections support shallow clones only and reject a non-zero shallow flag
+ * value of 0 with LANCEDB_NOT_SUPPORTED. They also reject a non-empty target
+ * namespace with LANCEDB_NOT_SUPPORTED. Remote connections forward both
+ * settings to the server. A namespace connection rejects every clone.
+ *
+ * The strings and array are borrowed for the duration of the call. The struct
+ * is borrowed and is not consumed.
+ */
+typedef struct {
+    const char* source_tag;              // Optional source tag (NULL for none)
+    const char* const* target_namespace; // Target namespace components (NULL when length is 0)
+    size_t target_namespace_len;         // Number of target namespace components (0 for root)
+    uint64_t source_version;             // Source version when has_source_version is non-zero
+    int has_source_version;              // Non-zero to use source_version, 0 to omit it
+    int exist_ok;                        // Non-zero to keep an existing target unchanged
+    int has_is_shallow;                  // Non-zero to read is_shallow, 0 for the SDK default
+    int is_shallow;                      // Shallow clone flag when has_is_shallow is non-zero
+} LanceDBCloneTableOptions;
+
+/**
+ * Clone a table from an existing source table
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param target_table_name - null-terminated C string containing the target table name
+ * @param source_uri - null-terminated C string containing the source table URI
+ * @param options - optional clone options (NULL for the SDK defaults)
+ * @param table_out - pointer to receive the cloned table
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On entry, a non-NULL table_out is set to NULL and a non-NULL error_message is
+ * cleared. On success, table_out receives a handle that the caller must free
+ * with lancedb_table_free(). On failure, table_out remains NULL.
+ *
+ * A shallow clone creates a new table that shares the source's data files while
+ * keeping an independent manifest. The clone therefore depends on those files
+ * remaining in the source table. The SDK currently supports shallow clones on
+ * embedded directory connections; a deep clone request fails with
+ * LANCEDB_NOT_SUPPORTED there.
+ *
+ * The source and target strings, every string and component array reached from
+ * options, and the options struct itself are borrowed only for the duration of
+ * this call.
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_clone_table(
+    const LanceDBConnection* connection,
+    const char* target_table_name,
+    const char* source_uri,
+    const LanceDBCloneTableOptions* options,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
  * Drop a table from the database
  *
  * @param connection - pointer to LanceDBConnection
