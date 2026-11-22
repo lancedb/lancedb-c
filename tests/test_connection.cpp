@@ -705,6 +705,317 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespaces - listing and invalid argum
   }
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Namespace paths", "[connection]") {
+  char* error_message = nullptr;
+
+  const char* parent_path[] = {"parent"};
+  const char* child_path[] = {"parent", "child"};
+
+  SECTION("Create, list, describe, and drop nested namespaces") {
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, parent_path, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, child_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The root path lists the top-level namespace. A stale error slot is
+    // cleared on success.
+    char** names_out = nullptr;
+    size_t count_out = 0;
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, nullptr, 0, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count_out == 1);
+    REQUIRE(std::string(names_out[0]) == "parent");
+    lancedb_free_namespace_list(names_out, count_out);
+
+    // The parent path lists only its child namespace.
+    names_out = nullptr;
+    count_out = 0;
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, parent_path, 1, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count_out == 1);
+    REQUIRE(std::string(names_out[0]) == "child");
+    lancedb_free_namespace_list(names_out, count_out);
+
+    // The root reports an empty property map. The child was created without
+    // properties, so the SDK omits that map. A stale error slot is cleared on
+    // success.
+    LanceDBNamespaceDescription description{};
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_describe_namespace_path(
+        db, nullptr, 0, &description, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(description.has_properties);
+    REQUIRE(description.property_count == 0);
+    REQUIRE(description.property_keys == nullptr);
+    REQUIRE(description.property_values == nullptr);
+    REQUIRE_FALSE(description.has_context);
+    lancedb_free_namespace_description(&description);
+
+    REQUIRE(lancedb_connection_describe_namespace_path(
+        db, child_path, 2, &description, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE_FALSE(description.has_properties);
+    REQUIRE(description.property_count == 0);
+    REQUIRE(description.has_context == false);
+    lancedb_free_namespace_description(&description);
+
+    // A missing nested namespace keeps the SDK's not-found classification and
+    // leaves the provided description empty.
+    const char* missing_path[] = {"parent", "missing"};
+    char* stale_names[] = {nullptr};
+    description.has_properties = true;
+    description.property_keys = stale_names;
+    description.property_values = stale_names;
+    description.property_count = 1;
+    description.has_context = true;
+    description.context_keys = stale_names;
+    description.context_values = stale_names;
+    description.context_count = 1;
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_describe_namespace_path(
+        db, missing_path, 2, &description, &error_message) == LANCEDB_DATABASE_NOT_FOUND);
+    REQUIRE(error_message != nullptr);
+    REQUIRE_FALSE(description.has_properties);
+    REQUIRE(description.property_keys == nullptr);
+    REQUIRE(description.property_values == nullptr);
+    REQUIRE(description.property_count == 0);
+    REQUIRE_FALSE(description.has_context);
+    REQUIRE(description.context_keys == nullptr);
+    REQUIRE(description.context_values == nullptr);
+    REQUIRE(description.context_count == 0);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // Dropping the child leaves the parent, then dropping the parent removes it.
+    REQUIRE(lancedb_connection_drop_namespace_path(
+        db, child_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    names_out = nullptr;
+    count_out = 0;
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, parent_path, 1, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count_out == 0);
+    REQUIRE(names_out == nullptr);
+    lancedb_free_namespace_list(names_out, count_out);
+    REQUIRE(lancedb_connection_drop_namespace_path(
+        db, parent_path, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+
+  SECTION("Namespace path arguments are validated") {
+    const char* null_component[] = {"parent", nullptr};
+    const char* invalid_utf8[] = {NON_UTF8};
+    char** names_out = nullptr;
+    size_t count_out = 0;
+    char* stale_names[] = {nullptr};
+    LanceDBNamespaceDescription description{};
+
+    auto set_stale_description = [&]() {
+      description.has_properties = true;
+      description.property_keys = stale_names;
+      description.property_values = stale_names;
+      description.property_count = 1;
+      description.has_context = true;
+      description.context_keys = stale_names;
+      description.context_values = stale_names;
+      description.context_count = 1;
+    };
+
+    auto require_empty_description = [&]() {
+      REQUIRE_FALSE(description.has_properties);
+      REQUIRE(description.property_keys == nullptr);
+      REQUIRE(description.property_values == nullptr);
+      REQUIRE(description.property_count == 0);
+      REQUIRE_FALSE(description.has_context);
+      REQUIRE(description.context_keys == nullptr);
+      REQUIRE(description.context_values == nullptr);
+      REQUIRE(description.context_count == 0);
+    };
+
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, null_component, 2, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, invalid_utf8, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    names_out = stale_names;
+    count_out = 42;
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, nullptr, 1, &names_out, &count_out, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(names_out == nullptr);
+    REQUIRE(count_out == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const char* invalid_component[] = {"bad name"};
+    names_out = stale_names;
+    count_out = 42;
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, invalid_component, 1, &names_out, &count_out, &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(names_out == nullptr);
+    REQUIRE(count_out == 0);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    set_stale_description();
+    error_message = const_cast<char*>("stale error");
+    REQUIRE(lancedb_connection_describe_namespace_path(
+        db, nullptr, 1, &description, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    require_empty_description();
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_drop_namespace_path(
+        db, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_drop_table_path(
+        db, "table", nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_rename_table_path(
+        db, "old", "new", nullptr, 1, nullptr, 0, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_drop_all_tables_path(
+        db, nullptr, 1, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    // A zero length is the root namespace even when a non-NULL pointer is passed.
+    REQUIRE(lancedb_connection_list_namespaces_path(
+        db, invalid_utf8, 0, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_free_namespace_list(names_out, count_out);
+
+    LanceDBTableNamesBuilder* builder = lancedb_connection_table_names_builder(db);
+    REQUIRE(builder != nullptr);
+    REQUIRE(lancedb_table_names_builder_namespace(builder, nullptr, 1) == nullptr);
+
+    // Zero length with a non-NULL pointer is the root namespace for the builder too.
+    builder = lancedb_connection_table_names_builder(db);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_table_names_builder_namespace(builder, invalid_utf8, 0);
+    REQUIRE(builder != nullptr);
+    names_out = nullptr;
+    count_out = 0;
+    REQUIRE(lancedb_table_names_builder_execute(
+        builder, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_free_table_names(names_out, count_out);
+
+    lancedb_free_namespace_description(nullptr);
+  }
+
+  SECTION("Table management paths target the selected namespace") {
+    const char* workspace_path[] = {"workspace"};
+    const char* nested_path[] = {"workspace", "nested"};
+
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, workspace_path, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, nested_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    create_empty_table("shared");
+
+    // The root sees the table while the nested namespace does not.
+    LanceDBTableNamesBuilder* builder = lancedb_connection_table_names_builder(db);
+    REQUIRE(builder != nullptr);
+    char** names_out = nullptr;
+    size_t count_out = 0;
+    REQUIRE(lancedb_table_names_builder_execute(
+        builder, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count_out == 1);
+    REQUIRE(std::string(names_out[0]) == "shared");
+    lancedb_free_table_names(names_out, count_out);
+
+    builder = lancedb_connection_table_names_builder(db);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_table_names_builder_namespace(builder, nested_path, 2);
+    REQUIRE(builder != nullptr);
+    names_out = nullptr;
+    count_out = 0;
+    REQUIRE(lancedb_table_names_builder_execute(
+        builder, &names_out, &count_out, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count_out == 0);
+    REQUIRE(names_out == nullptr);
+    lancedb_free_table_names(names_out, count_out);
+
+    // Dropping a root table through the nested namespace must not remove it.
+    REQUIRE(lancedb_connection_drop_table_path(
+        db, "shared", nested_path, 2, &error_message) == LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    LanceDBTable* table = nullptr;
+    REQUIRE(lancedb_connection_open_table(
+        db, "shared", &table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    lancedb_table_free(table);
+
+    // Dropping all tables in the nested namespace leaves the root table alone.
+    REQUIRE(lancedb_connection_drop_all_tables_path(
+        db, nested_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_open_table(
+        db, "shared", &table, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_table_free(table);
+
+    // The root path drops the root table.
+    REQUIRE(lancedb_connection_drop_all_tables_path(
+        db, nullptr, 0, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_open_table(
+        db, "shared", &table, &error_message) == LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_connection_drop_namespace_path(
+        db, nested_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_drop_namespace_path(
+        db, workspace_path, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Connection - table operations with invalid arguments", "[connection]") {
   char* error_message = nullptr;
   const char* _namespace = nullptr;
