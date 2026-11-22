@@ -497,6 +497,7 @@ if(BUILD_TESTS)
     tests/test_main.cpp
     tests/test_common.cpp
     tests/test_c_enum_inputs.c
+    tests/test_branch_diff.cpp
     tests/test_table.cpp
   )
   target_link_libraries(lancedb_table_tests
@@ -901,6 +902,11 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_json_tests COMMAND $<TARGET_FILE:lancedb_json_tests>)
     add_test(NAME lancedb_arrow_stream_tests COMMAND $<TARGET_FILE:lancedb_arrow_stream_tests>)
   endif()
+
+  # The table tests use a local HTTP server for remote branch operations.
+  set_tests_properties(lancedb_table_tests PROPERTIES
+    ENVIRONMENT "NO_PROXY=127.0.0.1;no_proxy=127.0.0.1"
+  )
 
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)
   add_test(NAME lancedb_vector_index_tests COMMAND $<TARGET_FILE:lancedb_vector_index_tests>)
