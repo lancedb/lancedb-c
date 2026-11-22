@@ -456,6 +456,30 @@ if(BUILD_TESTS)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
+  # Add test executable for table delta tests (runs with valgrind)
+  add_executable(lancedb_delta_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_delta_enum_inputs.c
+    tests/test_delta.cpp
+  )
+  target_link_libraries(lancedb_delta_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_delta_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_delta_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_delta_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
   # Add test executable for scalar index tests (runs with valgrind)
   add_executable(lancedb_index_tests
     tests/test_main.cpp
@@ -625,7 +649,7 @@ if(BUILD_TESTS)
   # C_STANDARD is a target property. Apply strict C17 only to the targets that
   # compile the C consumer helper; each has no other C sources, so the C++
   # sources and all other targets keep their existing flags.
-  foreach(target lancedb_index_tests lancedb_df_query_tests lancedb_vector_query_tests lancedb_table_tests)
+  foreach(target lancedb_index_tests lancedb_df_query_tests lancedb_vector_query_tests lancedb_table_tests lancedb_delta_tests)
     set_target_properties(${target} PROPERTIES
       C_STANDARD 17
       C_STANDARD_REQUIRED ON
@@ -679,6 +703,19 @@ if(BUILD_TESTS)
         --log-file=${CMAKE_BINARY_DIR}/valgrind_table_meta.txt
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
         $<TARGET_FILE:lancedb_table_meta_tests>
+    )
+    # Run table delta tests with valgrind
+    add_test(NAME lancedb_delta_tests
+      COMMAND ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite,possible
+        --errors-for-leak-kinds=definite,possible
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_delta.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_delta_tests>
     )
     # Run scalar index tests with valgrind
     add_test(NAME lancedb_index_tests
@@ -737,6 +774,7 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_connection_tests COMMAND $<TARGET_FILE:lancedb_connection_tests>)
     add_test(NAME lancedb_table_tests COMMAND $<TARGET_FILE:lancedb_table_tests>)
     add_test(NAME lancedb_table_meta_tests COMMAND $<TARGET_FILE:lancedb_table_meta_tests>)
+    add_test(NAME lancedb_delta_tests COMMAND $<TARGET_FILE:lancedb_delta_tests>)
     add_test(NAME lancedb_index_tests COMMAND $<TARGET_FILE:lancedb_index_tests>)
     add_test(NAME lancedb_query_tests COMMAND $<TARGET_FILE:lancedb_query_tests>)
     add_test(NAME lancedb_df_query_tests COMMAND $<TARGET_FILE:lancedb_df_query_tests>)
