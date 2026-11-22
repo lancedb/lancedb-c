@@ -16,6 +16,12 @@ use crate::connection::{
 };
 use crate::error::lancedb_free_string;
 
+#[derive(Clone, Copy)]
+enum MergeResponse {
+    Conflict,
+    Success,
+}
+
 struct LocalMergeServer {
     uri: String,
     merge_requests: Arc<AtomicUsize>,
@@ -24,7 +30,7 @@ struct LocalMergeServer {
 }
 
 impl LocalMergeServer {
-    fn start() -> Self {
+    fn start(response: MergeResponse) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local merge fixture");
         listener
             .set_nonblocking(true)
@@ -39,7 +45,7 @@ impl LocalMergeServer {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let _ = serve_request(stream, &thread_count);
+                        let _ = serve_request(stream, &thread_count, response);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
@@ -71,7 +77,11 @@ impl Drop for LocalMergeServer {
     }
 }
 
-fn serve_request(mut stream: TcpStream, merge_requests: &AtomicUsize) -> std::io::Result<()> {
+fn serve_request(
+    mut stream: TcpStream,
+    merge_requests: &AtomicUsize,
+    response: MergeResponse,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
 
@@ -127,7 +137,12 @@ fn serve_request(mut stream: TcpStream, merge_requests: &AtomicUsize) -> std::io
         )
     } else if path.contains("/merge_insert/") {
         merge_requests.fetch_add(1, Ordering::SeqCst);
-        ("409 Conflict", "{}")
+        match response {
+            MergeResponse::Conflict => ("409 Conflict", "{}"),
+            // Keep the optional metrics absent so num_rows is visibly the only
+            // reported field copied into the C result.
+            MergeResponse::Success => ("200 OK", r#"{"num_rows":1}"#),
+        }
     } else {
         ("404 Not Found", "{}")
     };
@@ -192,8 +207,11 @@ fn fixture_reader() -> *mut LanceDBRecordBatchReader {
     Box::into_raw(Box::new(LanceDBRecordBatchReader::new(Box::new(reader))))
 }
 
-unsafe fn run_merge(retries: Option<u8>) -> (usize, LanceDBError, bool) {
-    let server = LocalMergeServer::start();
+unsafe fn run_merge(
+    retries: Option<u8>,
+    response: MergeResponse,
+) -> (usize, LanceDBError, bool, LanceDBMergeInsertResultV2) {
+    let server = LocalMergeServer::start(response);
     let table = open_remote_table(&server);
     let data = fixture_reader();
     let on_columns = [CString::new("id").expect("fixture join key")];
@@ -230,28 +248,52 @@ unsafe fn run_merge(retries: Option<u8>) -> (usize, LanceDBError, bool) {
     }
     lancedb_table_free(table);
 
-    (server.merge_requests(), status, has_error)
+    (server.merge_requests(), status, has_error, result)
 }
 
-// The raw default and an explicit zero are distinct: the SDK keeps its own
-// retry budget for the former and sends no retry override for the latter.
-// A local 409 fixture observes the actual merge requests, so this reaches the
-// SDK transport decision instead of only checking our pointer conversion.
+// The raw default, an explicit zero and an explicit positive budget are
+// distinct: the SDK keeps its own budget for the former and applies the
+// pointed-to value for the others. A local 409 fixture observes the actual
+// merge requests, so this reaches the SDK transport decision instead of only
+// checking our pointer conversion.
 #[test]
 fn merge_insert_retry_override_reaches_the_remote_transport() {
-    let (default_requests, default_status, default_error) = unsafe { run_merge(None) };
+    let (default_requests, default_status, default_error, _) =
+        unsafe { run_merge(None, MergeResponse::Conflict) };
     assert_ne!(default_status, LanceDBError::Success);
     assert!(default_error);
-    assert!(
-        default_requests > 1,
-        "the SDK default should retry a 409, saw {default_requests} request(s)"
+    assert_eq!(
+        default_requests, 3,
+        "the SDK default budget should make three failed attempts"
     );
 
-    let (zero_requests, zero_status, zero_error) = unsafe { run_merge(Some(0)) };
+    let (zero_requests, zero_status, zero_error, _) =
+        unsafe { run_merge(Some(0), MergeResponse::Conflict) };
     assert_ne!(zero_status, LanceDBError::Success);
     assert!(zero_error);
     assert_eq!(
         zero_requests, 1,
         "an explicit zero retry budget must disable transport retries"
     );
+
+    let (two_requests, two_status, two_error, _) =
+        unsafe { run_merge(Some(2), MergeResponse::Conflict) };
+    assert_ne!(two_status, LanceDBError::Success);
+    assert!(two_error);
+    assert_eq!(
+        two_requests, 2,
+        "an explicit budget of two allows two failed attempts"
+    );
+
+    let (success_requests, success_status, success_error, result) =
+        unsafe { run_merge(None, MergeResponse::Success) };
+    assert_eq!(success_status, LanceDBError::Success);
+    assert!(!success_error);
+    assert_eq!(success_requests, 1);
+    assert_eq!(result.num_rows, 1);
+    assert_eq!(result.version, 0);
+    assert_eq!(result.num_inserted_rows, 0);
+    assert_eq!(result.num_updated_rows, 0);
+    assert_eq!(result.num_deleted_rows, 0);
+    assert_eq!(result.num_attempts, 0);
 }

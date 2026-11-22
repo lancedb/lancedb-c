@@ -2658,5 +2658,5 @@ pub unsafe extern "C" fn lancedb_table_drop_columns(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote"))]
 mod merge_insert_retry_tests;
