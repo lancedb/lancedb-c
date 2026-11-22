@@ -711,6 +711,106 @@ LanceDBError lancedb_connection_open_table(
 );
 
 /**
+ * Open table option fields of LanceDBOpenTableOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB default, so an omitted index cache size stays distinct from
+ * an explicit zero, and an omitted managed-versioning value stays distinct from
+ * an explicit false.
+ */
+typedef enum {
+    LANCEDB_OPEN_TABLE_INDEX_CACHE_SIZE = 1 << 0,
+    LANCEDB_OPEN_TABLE_VERSION = 1 << 1,
+    LANCEDB_OPEN_TABLE_MANAGED_VERSIONING = 1 << 2
+} LanceDBOpenTableField;
+
+/**
+ * Options for lancedb_connection_open_table_with_options
+ *
+ * A zero-initialized struct keeps every SDK default. set_fields selects the
+ * scalar overrides; an unknown bit is rejected with LANCEDB_INVALID_ARGUMENT.
+ *
+ * namespace_path is a borrowed array of namespace_path_len borrowed strings.
+ * Zero length is the root namespace and accepts a NULL array. A positive length
+ * requires a non-NULL array of non-NULL, NUL-terminated UTF-8 strings.
+ *
+ * location and branch are borrowed strings. NULL leaves that option unset; a
+ * non-NULL string, including an empty one, is passed unchanged. For branch, the
+ * SDK treats "main" as the default branch. storage_keys and storage_values are
+ * parallel arrays of storage_count borrowed strings for this table only. A
+ * zero count omits per-table storage options. A non-zero count requires both arrays and
+ * every entry to be non-NULL and valid UTF-8.
+ *
+ * index_cache_size and version are read only when their set_fields bit is set.
+ * Setting the bit selects the value, including zero, instead of treating zero as
+ * omitted. managed_versioning is also read only when its bit is set: 0 selects
+ * false and 1 selects true; every other value is rejected. Leaving the bit unset
+ * passes no managed-versioning preference.
+ *
+ * The C layer forwards these options to the SDK unchanged. The SDK decides which
+ * backend accepts them and may resolve values from the backend. At the pinned
+ * SDK version:
+ * - An embedded listing root table uses location in place of the derived table
+ *   path, and per-table storage options override connection options on the same
+ *   key. index_cache_size applies only when the SDK open request has no other
+ *   read parameters. Per-table storage options create such parameters, and so
+ *   do connection-level storage options; in either case the separate cache size
+ *   is ignored. version selects a read-only detached snapshot.
+ *   managed_versioning is forwarded, but a plain listing connection has no
+ *   namespace client, so it does not enable namespace-managed commits.
+ * - An embedded namespace table (a non-empty namespace_path) gets its location,
+ *   namespace storage options and managed-versioning state from the namespace.
+ *   The SDK does not apply the request location, index_cache_size or
+ *   managed_versioning value to that open. Per-table storage options are passed
+ *   through, but namespace values win on the same key. version and branch still
+ *   compose in the SDK after the namespace table is opened.
+ * - An Enterprise connection rejects index_cache_size, per-table storage
+ *   options, location and managed_versioning (whether true or false) with
+ *   LANCEDB_NOT_SUPPORTED. namespace_path is part of the table identifier, and
+ *   version and branch are resolved by the server.
+ *
+ * The options struct and every string it points to are borrowed for the
+ * duration of the call and are not consumed.
+ */
+typedef struct {
+    uint32_t set_fields;                  // Bitmask of LanceDBOpenTableField values (0 = defaults)
+    const char* const* namespace_path;    // Namespace path parts (NULL with length 0 for root)
+    size_t namespace_path_len;            // Number of namespace path parts
+    const char* location;                 // Custom location (NULL to derive it)
+    const char* const* storage_keys;      // Storage option keys (NULL when storage_count is 0)
+    const char* const* storage_values;    // Storage option values matching storage_keys
+    size_t storage_count;                 // Number of per-table storage options
+    uint32_t index_cache_size;            // Index cache entries; read only when its bit is set
+    uint64_t version;                     // Table version; read only when its bit is set
+    const char* branch;                   // Branch name (NULL for the default branch)
+    int managed_versioning;               // 0 = false, 1 = true; read only when its bit is set
+} LanceDBOpenTableOptions;
+
+/**
+ * Open an existing table with SDK open-table builder options
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param table_name - null-terminated C string containing the table name
+ * @param options - pointer to read-only options, or NULL for every SDK default
+ * @param table_out - pointer to receive the opened table
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On entry, a non-NULL table_out is set to NULL and the error message slot is
+ * cleared. The table is written only on success, so a failure leaves it NULL.
+ * This differs from lancedb_connection_open_table, which leaves its output
+ * unchanged on failure. The caller frees a returned table with
+ * lancedb_table_free() and a returned error message with lancedb_free_string().
+ */
+LanceDBError lancedb_connection_open_table_with_options(
+    const LanceDBConnection* connection,
+    const char* table_name,
+    const LanceDBOpenTableOptions* options,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
  * Drop a table from the database
  *
  * @param connection - pointer to LanceDBConnection
