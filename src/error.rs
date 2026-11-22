@@ -144,7 +144,11 @@ pub(crate) fn error_to_error_code(error: &lancedb::error::Error) -> LanceDBError
                 .or_else(|| storage_failure_from_message(&message))
                 .unwrap_or(fallback)
         }
+        // the remote variants only exist when the SDK is built with its
+        // `remote` feature, which is off when this library is built without it
+        #[cfg(feature = "remote")]
         lancedb::error::Error::Http { .. } => LanceDBError::Http,
+        #[cfg(feature = "remote")]
         lancedb::error::Error::Retry { .. } => LanceDBError::Retry,
         lancedb::error::Error::Arrow { .. } => LanceDBError::Arrow,
         lancedb::error::Error::NotSupported { .. } => LanceDBError::NotSupported,

@@ -232,8 +232,17 @@ def collect_declarations(ast_path: Path) -> Declarations:
             if node.get("kind") == "TypedefDecl" and node.get("name") and _main_location(node.get("loc", {})):
                 owned = None
                 for child in node.get("inner", []):
-                    if child.get("kind") == "ElaboratedType" and child.get("ownedTagDecl"):
+                    if child.get("kind") != "ElaboratedType":
+                        continue
+                    if child.get("ownedTagDecl"):
                         owned = child["ownedTagDecl"]["id"]
+                    else:
+                        # A typedef after a separate struct definition refers
+                        # to the earlier tag instead of owning it.
+                        for nested in child.get("inner", []):
+                            if nested.get("kind") == "RecordType" and nested.get("decl"):
+                                owned = nested["decl"]["id"]
+                                break
                 typedefs[node["name"]] = owned
             if (
                 node.get("kind") == "FunctionDecl"
@@ -342,6 +351,9 @@ FUNCTION_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     ("lancedb_json_matches", "schema"): Allow(allow_const=True),
 }
 FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
+    # The standard C spelling is `const void**`; cbindgen adds a const to the
+    # inner pointer for the equivalent Rust `*const *const c_void`.
+    ("ArrowArray", "buffers"): Allow(allow_const=True),
     # The header exposes a read-only view of result data. Rust owns the
     # pointers privately so it can free them with Drop.
     ("LanceDBIndexInfo", "name"): Allow(allow_const=True),
@@ -439,7 +451,7 @@ def target_sizes(clang: Clang) -> Dict[str, int]:
 
 def record_layouts(
     clang: Clang, header: Path, include_dir: Optional[Path]
-) -> Dict[int, Tuple[int, int, Dict[str, int]]]:
+) -> Dict[object, Tuple[int, int, Dict[str, int]]]:
     command = [clang.executable] + clang.args()
     if include_dir is not None:
         command.extend(["-I", str(include_dir)])
@@ -455,8 +467,8 @@ def record_layouts(
         ]
     )
     output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
-    layouts: Dict[int, Tuple[int, int, Dict[str, int]]] = {}
-    current_line: Optional[int] = None
+    layouts: Dict[object, Tuple[int, int, Dict[str, int]]] = {}
+    current_key: Optional[object] = None
     current_fields: Dict[str, int] = {}
     current_size: Optional[int] = None
     current_align: Optional[int] = None
@@ -464,16 +476,25 @@ def record_layouts(
     for line in output.splitlines():
         match = re.search(r"struct \(unnamed at (.*):(\d+):\d+\)", line)
         if match:
-            if current_line is not None and current_size is not None and current_align is not None:
-                layouts[current_line] = (current_size, current_align, current_fields)
+            if current_key is not None and current_size is not None and current_align is not None:
+                layouts[current_key] = (current_size, current_align, current_fields)
             current_fields = {}
             current_size = None
             current_align = None
-            current_line = None
+            current_key = None
             if Path(match.group(1)).resolve() == wanted:
-                current_line = int(match.group(2))
+                current_key = int(match.group(2))
             continue
-        if current_line is None:
+        match = re.search(r"struct (\w+)\s*$", line)
+        if match:
+            if current_key is not None and current_size is not None and current_align is not None:
+                layouts[current_key] = (current_size, current_align, current_fields)
+            current_fields = {}
+            current_size = None
+            current_align = None
+            current_key = match.group(1)
+            continue
+        if current_key is None:
             continue
         match = re.match(r"\s*(\d+) \|\s+(.+?)\s*$", line)
         if match and not match.group(2).startswith("["):
@@ -485,8 +506,8 @@ def record_layouts(
         if match:
             current_size = int(match.group(1))
             current_align = int(match.group(2))
-    if current_line is not None and current_size is not None and current_align is not None:
-        layouts[current_line] = (current_size, current_align, current_fields)
+    if current_key is not None and current_size is not None and current_align is not None:
+        layouts[current_key] = (current_size, current_align, current_fields)
     return layouts
 
 
@@ -494,8 +515,8 @@ def compare_declarations(
     header: Declarations,
     generated: Declarations,
     rust_exports: Set[str],
-    header_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
-    generated_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
+    header_layouts: Dict[object, Tuple[int, int, Dict[str, int]]],
+    generated_layouts: Dict[object, Tuple[int, int, Dict[str, int]]],
 ) -> List[str]:
     errors: List[str] = []
     header_functions = set(header.functions)
@@ -566,8 +587,8 @@ def compare_declarations(
             )
         left_line = header.struct_locations[name]
         right_line = generated.struct_locations[name]
-        left_layout = header_layouts.get(left_line)
-        right_layout = generated_layouts.get(right_line)
+        left_layout = header_layouts.get(left_line) or header_layouts.get(name)
+        right_layout = generated_layouts.get(right_line) or generated_layouts.get(name)
         if left_layout is None or right_layout is None:
             errors.append(f"struct {name}: record layout was not emitted by clang")
             continue
@@ -655,14 +676,24 @@ def clang_ast(clang: Clang, header: Path, include_dir: Optional[Path], output: P
 
 
 def generate_bindings(cbindgen: str, repo: Path, output: Path, header_text: str) -> None:
-    opaque = re.findall(r"typedef\s+struct\s+(\w+)\s+\1\s*;", header_text)
+    # A typedef with a separate complete struct definition is not opaque. The
+    # Arrow C ABI declares its named struct first and keeps the typedef only
+    # for C callers, so cbindgen must still emit the struct members.
+    opaque = [
+        name
+        for name in re.findall(r"typedef\s+struct\s+(\w+)\s+\1\s*;", header_text)
+        if not re.search(r"(?:typedef\s+)?struct\s+{}\s*\{{".format(re.escape(name)), header_text)
+    ]
     # Enums used only through checked raw c_int parameters do not otherwise
     # appear in cbindgen's reachable declarations; ask for every public header
     # enum explicitly so their values are compared too.
     enums = re.findall(r"typedef\s+enum\s*\{.*?\}\s*(\w+)\s*;", header_text, re.DOTALL)
     config = """language = "C"
 include_guard = "LANCEDB_CBINDGEN_H"
-style = "type"
+# Keep named struct tags as well as typedefs. The Arrow C ABI structs refer to
+# themselves recursively, which an anonymous typedef cannot express, and the
+# declaration comparison only depends on the typedef name and layout.
+style = "both"
 documentation = false
 
 [export]
@@ -705,7 +736,7 @@ def check_header(
     clang: Clang,
     generated: Declarations,
     rust_export_names: Set[str],
-    generated_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
+    generated_layouts: Dict[object, Tuple[int, int, Dict[str, int]]],
     work: Path,
     name: str,
 ) -> List[str]:
@@ -720,7 +751,7 @@ def check_header(
 
 def prepare_generated(
     repo: Path, cbindgen: str, clang: Clang, work: Path
-) -> Tuple[Declarations, Dict[int, Tuple[int, int, Dict[str, int]]]]:
+) -> Tuple[Declarations, Dict[object, Tuple[int, int, Dict[str, int]]]]:
     header_path = repo / "include" / "lancedb.h"
     generated_path = work / "generated.h"
     generate_bindings(cbindgen, repo, generated_path, header_path.read_text())
@@ -783,7 +814,7 @@ def run_self_test(
     clang: Clang,
     generated: Declarations,
     rust_export_names: Set[str],
-    generated_layouts: Dict[int, Tuple[int, int, Dict[str, int]]],
+    generated_layouts: Dict[object, Tuple[int, int, Dict[str, int]]],
     work: Path,
 ) -> List[str]:
     original = header_path.read_text()
