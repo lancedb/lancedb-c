@@ -4956,6 +4956,45 @@ LanceDBError lancedb_table_create_index(
 );
 
 /**
+ * Create any supported index with explicit train and exist_ok builder choices
+ *
+ * Takes the same table, columns, index type, tuning options and error handling
+ * as lancedb_table_create_index(). train and exist_ok use -1 for the SDK default,
+ * 0 for false and 1 for true. The SDK defaults are train = true, exist_ok = false
+ * and replace = true.
+ *
+ * On an embedded table, train = 0 creates an empty index: its statistics report
+ * zero indexed rows and every table row unindexed. exist_ok = 1 preserves an
+ * existing index with the requested name, or with the SDK default name when the
+ * options name is empty or NULL, and returns success without rebuilding it. It
+ * takes precedence over replace = 1, so no replacement or training happens.
+ *
+ * A remote LanceDB Enterprise endpoint cannot honor train = 0 as an empty local
+ * index. The SDK does not send train, logs a warning, and the endpoint creates
+ * the index and populates it in the background. For exist_ok = 1, the SDK sends
+ * an exist_ok query parameter and disables replace in that request.
+ *
+ * The SDK documents train as not yet supported for vector indices. A NULL options
+ * pointer behaves like lancedb_index_options_default(). Values outside -1, 0 and
+ * 1, other invalid options and SDK errors are returned through error_message
+ * when provided. wait_timeout_ms and all other behavior are the same as
+ * lancedb_table_create_index().
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_create_index_with_builder_options(
+    const LanceDBTable* table,
+    const char* const* columns,
+    size_t num_columns,
+    LanceDBIndexType index_type,
+    const LanceDBIndexOptions* options,
+    int train,
+    int exist_ok,
+    char** error_message
+);
+
+/**
  * List all indices on the table
  *
  * @param table - pointer to LanceDBTable
