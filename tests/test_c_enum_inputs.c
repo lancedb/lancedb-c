@@ -17,6 +17,7 @@
  */
 _Static_assert(sizeof(LanceDBError) == sizeof(int), "LanceDBError must have the C int ABI");
 _Static_assert(sizeof(LanceDBDistanceType) == sizeof(int), "LanceDBDistanceType must have the C int ABI");
+_Static_assert(sizeof(LanceDBNormalizeMethod) == sizeof(int), "LanceDBNormalizeMethod must have the C int ABI");
 _Static_assert(sizeof(LanceDBIndexType) == sizeof(int), "LanceDBIndexType must have the C int ABI");
 _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType must have the C int ABI");
 _Static_assert(sizeof(LanceDBBinaryOp) == sizeof(int), "LanceDBBinaryOp must have the C int ABI");
@@ -95,6 +96,14 @@ LanceDBError lancedb_test_set_distance_type(
     char** error_message) {
   return lancedb_vector_query_distance_type(
       query, (LanceDBDistanceType)distance_type, error_message);
+}
+
+LanceDBError lancedb_test_set_normalize_method(
+    LanceDBVectorQuery* query,
+    int normalize_method,
+    char** error_message) {
+  return lancedb_vector_query_norm(
+      query, (LanceDBNormalizeMethod)normalize_method, error_message);
 }
 
 LanceDBExpr* lancedb_test_expr_binary(
