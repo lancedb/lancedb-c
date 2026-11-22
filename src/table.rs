@@ -477,6 +477,32 @@ pub unsafe extern "C" fn lancedb_table_merge_insert_with_result(
     }
 }
 
+/// Update option fields of `LanceDBUpdateOptions`
+///
+/// These values mirror the `LanceDBUpdateField` enumerators of the public header.
+const UPDATE_RETRIES: u32 = 1 << 0;
+const UPDATE_ALL_FIELDS: u32 = UPDATE_RETRIES;
+
+/// Options for `lancedb_table_update_with_options`
+///
+/// `set_fields` selects the overrides; a field whose bit is not set keeps the
+/// SDK default, so an omitted retry stays distinct from an explicit 0.
+///
+/// `retries` is a failed-attempt threshold, not a replay count. For a sequence
+/// of retryable HTTP status responses, the SDK increments its request-failure
+/// counter before testing it against the budget: with repeated 409 responses, 1
+/// returns the first failure without resending, while 3 can resend twice and
+/// returns the third failure.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct LanceDBUpdateOptions {
+    /// Bitmask of `LanceDBUpdateField` values; 0 uses every default
+    pub set_fields: u32,
+    /// Per-call remote failed-attempt threshold; 0 disables retries. Embedded
+    /// tables ignore it.
+    pub retries: u8,
+}
+
 /// Result of an update operation.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -489,46 +515,57 @@ pub struct LanceDBUpdateResult {
     pub version: u64,
 }
 
-/// Update rows in a table using SQL expressions
-///
-/// # Safety
-/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
-/// - `columns` and `expressions` must point to arrays of `num_assignments` valid
-///   null-terminated C strings, with `columns[i]` assigned the value of `expressions[i]`.
-///   The inputs are paired by index; the SDK evaluates every expression against the
-///   original row, so assignments do not observe each other
-/// - `num_assignments` must be greater than zero
-/// - `predicate`, when not NULL, must be a valid null-terminated C string containing an SQL
-///   predicate. An empty predicate updates all rows
-/// - `result_out` must be a valid pointer to receive the operation result
-/// - `error_message` can be NULL to ignore detailed error messages
-///
-/// # Returns
-/// - Error code indicating success or failure
-#[no_mangle]
-pub unsafe extern "C" fn lancedb_table_update(
-    table: *const LanceDBTable,
+/// Paired C arrays that describe one update's assignments
+struct UpdateAssignmentInput {
     columns: *const *const c_char,
     expressions: *const *const c_char,
     num_assignments: usize,
+}
+
+/// Run one SDK update from the C argument layout
+///
+/// The caller decides whether a result pointer is required. `result_out` is
+/// written only after a successful commit, so a failure leaves it unchanged.
+unsafe fn execute_update(
+    table: *const LanceDBTable,
+    input: UpdateAssignmentInput,
     predicate: *const c_char,
+    options: *const LanceDBUpdateOptions,
     result_out: *mut LanceDBUpdateResult,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null()
-        || columns.is_null()
-        || expressions.is_null()
-        || num_assignments == 0
-        || result_out.is_null()
+        || input.columns.is_null()
+        || input.expressions.is_null()
+        || input.num_assignments == 0
     {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
 
-    let mut assignments = Vec::with_capacity(num_assignments);
-    for i in 0..num_assignments {
-        let column_ptr = *columns.add(i);
-        let expression_ptr = *expressions.add(i);
+    let retries = if options.is_null() {
+        None
+    } else {
+        let options = &*options;
+        let unknown = options.set_fields & !UPDATE_ALL_FIELDS;
+        if unknown != 0 {
+            set_custom_error_message(
+                error_message,
+                &format!("unknown update option bits: 0x{unknown:x}"),
+            );
+            return LanceDBError::InvalidArgument;
+        }
+        if options.set_fields & UPDATE_RETRIES != 0 {
+            Some(options.retries)
+        } else {
+            None
+        }
+    };
+
+    let mut assignments = Vec::with_capacity(input.num_assignments);
+    for i in 0..input.num_assignments {
+        let column_ptr = *input.columns.add(i);
+        let expression_ptr = *input.expressions.add(i);
         if column_ptr.is_null() || expression_ptr.is_null() {
             set_invalid_argument_message(error_message);
             return LanceDBError::InvalidArgument;
@@ -573,6 +610,11 @@ pub unsafe extern "C" fn lancedb_table_update(
         if let Some(predicate) = predicate {
             builder = builder.only_if(predicate);
         }
+        if let Some(retries) = retries {
+            // An explicit 0 reaches the SDK as a disabled retry budget; an
+            // omitted retry leaves the SDK default in place.
+            builder = builder.retries(retries);
+        }
         for (column, expression) in assignments {
             // The input order only preserves the caller's column/expression pairing.
             // The SDK evaluates every expression against the original row.
@@ -581,14 +623,103 @@ pub unsafe extern "C" fn lancedb_table_update(
         builder.execute().await
     }) {
         Ok(update_result) => {
-            *result_out = LanceDBUpdateResult {
-                rows_updated: update_result.rows_updated,
-                version: update_result.version,
-            };
+            if !result_out.is_null() {
+                *result_out = LanceDBUpdateResult {
+                    rows_updated: update_result.rows_updated,
+                    version: update_result.version,
+                };
+            }
             LanceDBError::Success
         }
         Err(e) => handle_error(&e, error_message),
     }
+}
+
+/// Update rows in a table using SQL expressions
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` and `expressions` must point to arrays of `num_assignments` valid
+///   null-terminated C strings, with `columns[i]` assigned the value of `expressions[i]`.
+///   The inputs are paired by index; the SDK evaluates every expression against the
+///   original row, so assignments do not observe each other
+/// - `num_assignments` must be greater than zero
+/// - `predicate`, when not NULL, must be a valid null-terminated C string containing an SQL
+///   predicate. An empty predicate updates all rows
+/// - `result_out` must be a valid pointer to receive the operation result
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_update(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    expressions: *const *const c_char,
+    num_assignments: usize,
+    predicate: *const c_char,
+    result_out: *mut LanceDBUpdateResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if result_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    execute_update(
+        table,
+        UpdateAssignmentInput {
+            columns,
+            expressions,
+            num_assignments,
+        },
+        predicate,
+        ptr::null(),
+        result_out,
+        error_message,
+    )
+}
+
+/// Update rows in a table using SQL expressions, with options and an optional result
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `columns` and `expressions` must point to arrays of `num_assignments` valid
+///   null-terminated C strings, with `columns[i]` assigned the value of `expressions[i]`.
+///   The inputs are paired by index; the SDK evaluates every expression against the
+///   original row, so assignments do not observe each other
+/// - `num_assignments` must be greater than zero
+/// - `predicate`, when not NULL, must be a valid null-terminated C string containing an SQL
+///   predicate. An empty predicate updates all rows
+/// - `options`, when not NULL, must point to a valid `LanceDBUpdateOptions`
+/// - `result_out` can be NULL when the caller does not need the result
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_update_with_options(
+    table: *const LanceDBTable,
+    columns: *const *const c_char,
+    expressions: *const *const c_char,
+    num_assignments: usize,
+    predicate: *const c_char,
+    options: *const LanceDBUpdateOptions,
+    result_out: *mut LanceDBUpdateResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    execute_update(
+        table,
+        UpdateAssignmentInput {
+            columns,
+            expressions,
+            num_assignments,
+        },
+        predicate,
+        options,
+        result_out,
+        error_message,
+    )
 }
 
 /// Create a RecordBatchReader from Arrow C ABI structures
@@ -822,6 +953,55 @@ pub unsafe extern "C" fn lancedb_table_count_rows_with_status(
     }
 }
 
+/// Count rows in table matching an optional SQL filter, preserving failures
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `filter`, when not NULL, must be a valid null-terminated C string containing an
+///   SQL predicate. A NULL filter counts every row; a non-NULL string, including an
+///   empty one, is passed to the SDK unchanged
+/// - `count_out` must be a valid pointer to receive the row count
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+///
+/// On success, `count_out` is set to the number of matching rows, which is 0 when
+/// none match. On failure, `count_out` is left unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_count_rows_filtered(
+    table: *const LanceDBTable,
+    filter: *const c_char,
+    count_out: *mut usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || count_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let filter = if filter.is_null() {
+        None
+    } else {
+        let Ok(filter) = CStr::from_ptr(filter).to_str() else {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        };
+        Some(filter.to_owned())
+    };
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.count_rows(filter)) {
+        Ok(count) => {
+            *count_out = count;
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Statistics on the number of rows in table fragments, part of `LanceDBTableStats`
 #[repr(C)]
 #[derive(Debug)]
@@ -928,19 +1108,32 @@ pub unsafe extern "C" fn lancedb_table_stats(
     LanceDBError::Success
 }
 
-/// Delete rows from table based on predicate
+/// Result of a delete operation.
 ///
-/// # Safety
-/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
-/// - `predicate` must be a valid null-terminated C string containing SQL WHERE clause
-/// - `error_message` can be NULL to ignore detailed error messages
+/// Every field is copied unchanged from the SDK's `DeleteResult`; this layer
+/// does not fill in or synthesize a value. The SDK defaults each field missing
+/// from a remote response to zero independently: a version-only response leaves
+/// `num_deleted_rows` at zero, and a count-only response leaves `version` at
+/// zero. Zero can mean "not reported"; a reported `num_deleted_rows` of zero is
+/// also valid when no rows matched. An empty legacy response leaves both fields
+/// zero.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LanceDBDeleteResult {
+    /// Rows deleted; 0 may mean not reported by a remote response.
+    pub num_deleted_rows: u64,
+    /// Commit version; 0 may mean not reported by a remote response.
+    pub version: u64,
+}
+
+/// Run one SDK delete with an SQL predicate
 ///
-/// # Returns
-/// - Error code indicating success or failure
-#[no_mangle]
-pub unsafe extern "C" fn lancedb_table_delete(
+/// `result_out` is written only after a successful commit, so a failure leaves
+/// it unchanged. The caller decides whether the result is required.
+unsafe fn execute_sql_delete(
     table: *const LanceDBTable,
     predicate: *const c_char,
+    result_out: *mut LanceDBDeleteResult,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
     if table.is_null() || predicate.is_null() {
@@ -957,9 +1150,93 @@ pub unsafe extern "C" fn lancedb_table_delete(
     let runtime = get_runtime();
 
     match runtime.block_on(tbl.delete(predicate_str)) {
-        Ok(_) => LanceDBError::Success,
+        Ok(delete_result) => {
+            if !result_out.is_null() {
+                *result_out = LanceDBDeleteResult {
+                    num_deleted_rows: delete_result.num_deleted_rows,
+                    version: delete_result.version,
+                };
+            }
+            LanceDBError::Success
+        }
         Err(e) => handle_error(&e, error_message),
     }
+}
+
+/// Run one SDK delete with a DataFusion expression
+///
+/// The expression is consumed on every path. `result_out` is written only after
+/// a successful commit, so a failure leaves it unchanged.
+unsafe fn execute_df_delete(
+    table: *const LanceDBTable,
+    expr: *mut LanceDBExpr,
+    result_out: *mut LanceDBDeleteResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if expr.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let expr_box = Box::from_raw(expr);
+
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.delete(&expr_box.inner)) {
+        Ok(delete_result) => {
+            if !result_out.is_null() {
+                *result_out = LanceDBDeleteResult {
+                    num_deleted_rows: delete_result.num_deleted_rows,
+                    version: delete_result.version,
+                };
+            }
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
+/// Delete rows from table based on predicate
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `predicate` must be a valid null-terminated C string containing SQL WHERE clause
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_delete(
+    table: *const LanceDBTable,
+    predicate: *const c_char,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    execute_sql_delete(table, predicate, ptr::null_mut(), error_message)
+}
+
+/// Delete rows from table based on predicate, with an optional SDK result
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `predicate` must be a valid null-terminated C string containing SQL WHERE clause
+/// - `result_out` can be NULL when the caller does not need the result
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_delete_with_result(
+    table: *const LanceDBTable,
+    predicate: *const c_char,
+    result_out: *mut LanceDBDeleteResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    execute_sql_delete(table, predicate, result_out, error_message)
 }
 
 /// Delete rows from table using a DataFusion expression
@@ -978,24 +1255,28 @@ pub unsafe extern "C" fn lancedb_table_df_delete(
     expr: *mut LanceDBExpr,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
-    if expr.is_null() {
-        set_invalid_argument_message(error_message);
-        return LanceDBError::InvalidArgument;
-    }
+    execute_df_delete(table, expr, ptr::null_mut(), error_message)
+}
 
-    let expr_box = Box::from_raw(expr);
-
-    if table.is_null() {
-        set_invalid_argument_message(error_message);
-        return LanceDBError::InvalidArgument;
-    }
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
-
-    match runtime.block_on(tbl.delete(&expr_box.inner)) {
-        Ok(_) => LanceDBError::Success,
-        Err(e) => handle_error(&e, error_message),
-    }
+/// Delete rows from table using a DataFusion expression, with an optional SDK result
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `expr` must be a valid pointer returned from `lancedb_expr_*` functions
+/// - `expr` is consumed by this function on every path; do not use or free it after calling
+/// - `result_out` can be NULL when the caller does not need the result
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - Error code indicating success or failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_df_delete_with_result(
+    table: *const LanceDBTable,
+    expr: *mut LanceDBExpr,
+    result_out: *mut LanceDBDeleteResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    execute_df_delete(table, expr, result_out, error_message)
 }
 
 /// Vector search using nearest_to with full result conversion
