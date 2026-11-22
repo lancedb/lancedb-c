@@ -21,6 +21,7 @@ namespace {
 struct ControlledStream {
   std::shared_ptr<arrow::Schema> schema;
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+  std::vector<std::shared_ptr<arrow::Array>> arrays;
   int schema_error_code = 0;
   std::string schema_error;
   size_t fail_at_batch = std::numeric_limits<size_t>::max();
@@ -59,6 +60,21 @@ extern "C" int controlled_get_next(struct ArrowArrayStream* stream,
   if (index == state->fail_at_batch) {
     state->last_error = state->batch_error;
     return state->batch_error_code;
+  }
+
+  // Array entries let a test hand over a valid struct array that cannot be
+  // represented as a RecordBatch, without changing the stream callbacks.
+  if (!state->arrays.empty()) {
+    if (index >= state->arrays.size()) {
+      *out = ArrowArray{};
+      return 0;
+    }
+    auto status = arrow::ExportArray(*state->arrays[index], out);
+    if (!status.ok()) {
+      state->last_error = status.ToString();
+      return EINVAL;
+    }
+    return 0;
   }
 
   if (index >= state->batches.size()) {
@@ -144,6 +160,17 @@ std::shared_ptr<arrow::RecordBatch> make_batch_with_value(int num_rows,
   REQUIRE(key_builder.Finish(&key_array).ok());
   REQUIRE(data_builder.Finish(&data_array).ok());
   return arrow::RecordBatch::Make(schema, num_rows, {key_array, data_array});
+}
+
+// Build a valid struct array whose root has one null row. Its child columns
+// are ordinary valid Arrow arrays; only the top-level struct is invalid for a
+// RecordBatch.
+std::shared_ptr<arrow::StructArray> make_root_null_struct(
+    const std::shared_ptr<arrow::RecordBatch>& batch) {
+  auto null_bitmap = arrow::AllocateEmptyBitmap(batch->num_rows()).ValueOrDie();
+  null_bitmap->mutable_data()[0] &= static_cast<uint8_t>(~1U);
+  return arrow::StructArray::Make(batch->columns(), batch->schema()->fields(),
+                                  std::move(null_bitmap), 1).ValueOrDie();
 }
 
 // Read every key through the existing IPC result path, so the check covers
@@ -465,5 +492,38 @@ TEST_CASE_METHOD(LanceDBFixture, "Arrow C Stream import does not treat a zero-ro
   REQUIRE(read_table_keys(table) == "key_0,key_1");
   REQUIRE(state.release_calls.load() == 1);
 
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "Arrow C Stream import rejects root-null struct rows",
+                 "[arrow_stream]") {
+  constexpr int initial_rows = 1;
+  LanceDBTable* table = create_table_with_data("stream_root_nulls", initial_rows, 0);
+  const auto version = lancedb_table_version(table);
+  REQUIRE(lancedb_table_count_rows(table) == initial_rows);
+
+  auto batch = create_test_record_batch(2, 10);
+  auto root_null = make_root_null_struct(batch);
+  REQUIRE(root_null->null_count() == 1);
+  REQUIRE(root_null->IsNull(0));
+  REQUIRE(root_null->IsValid(1));
+
+  ControlledStream state;
+  state.schema = batch->schema();
+  state.arrays = {root_null};
+
+  struct ArrowArrayStream stream;
+  auto reader = import_controlled_stream(state, &stream);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_add(table, reader, &error_message) != LANCEDB_SUCCESS);
+  REQUIRE(error_message != nullptr);
+  REQUIRE(std::string(error_message).find("null rows") != std::string::npos);
+  REQUIRE(lancedb_table_count_rows(table) == initial_rows);
+  REQUIRE(lancedb_table_version(table) == version);
+  REQUIRE(state.get_next_calls.load() >= 1);
+  REQUIRE(state.release_calls.load() == 1);
+
+  lancedb_free_string(error_message);
   lancedb_table_free(table);
 }

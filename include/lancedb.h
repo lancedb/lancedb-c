@@ -2384,15 +2384,26 @@ LanceDBError lancedb_record_batch_reader_from_arrow(
  * callback, LANCEDB_INVALID_INPUT when get_schema reports an error, and
  * LANCEDB_ARROW when the returned schema cannot be imported.
  *
+ * The imported batches must be representable as Arrow RecordBatches: the root
+ * struct cannot have null rows. Nullable child fields, zero-row batches, and a
+ * root validity bitmap with no nulls are accepted. A root with actual nulls is
+ * reported as an Arrow error when that batch is consumed, before its child
+ * columns are written.
+ *
+ * The stream, its schema and each returned ArrowArray are independently owned.
+ * The producer must keep the schema alive until its schema release callback
+ * runs and keep each array alive until that array's own release callback runs.
+ * Arrays may be released after the stream or on a different thread; the schema
+ * is likewise independent of the stream.
+ *
  * The schema is acquired synchronously on the calling thread before this
  * function returns. No record batch is pulled at import time; batches are read
  * lazily when the reader is consumed by lancedb_table_create(),
  * lancedb_table_add() or lancedb_table_merge_insert(). Calls on one stream are
  * serialized, but callbacks may run on SDK worker threads, and release may run
  * on a worker or on the thread that frees the reader. A producer must therefore
- * allow its callbacks to be invoked from different threads over time, keep its
- * private state alive until release, and keep each array it hands over alive
- * until that array's own release callback runs.
+ * allow its callbacks to be invoked from different threads over time, and keep
+ * its private state alive until release.
  *
  * This binding does not collect all batches before writing. The pinned SDK may
  * still buffer depending on the backend: embedded create/add stream batches,

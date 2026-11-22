@@ -295,6 +295,17 @@ impl Iterator for ImportedArrowStreamReader {
             }
         };
 
+        // A RecordBatch represents rows only through its child columns, so a
+        // top-level struct with actual null rows cannot be represented. Check
+        // the parsed root before extracting the children; dropping `data`
+        // releases the imported ArrowArray on this error path.
+        let root_null_count = data.null_count();
+        if root_null_count != 0 {
+            return Some(Err(ArrowError::InvalidArgumentError(format!(
+                "the imported Arrow struct has {root_null_count} null rows, which a RecordBatch cannot represent"
+            ))));
+        }
+
         let row_count = data.len();
         let batch = RecordBatch::try_new_with_options(
             self.schema.clone(),
