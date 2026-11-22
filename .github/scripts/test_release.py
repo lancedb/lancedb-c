@@ -229,6 +229,8 @@ class PrepareTests(ReleaseFixture):
         self.assertIn(LANCEDB_REVISION, notes)
         self.assertIn(LANCE_REVISION, notes)
         self.assertIn("preview release", notes)
+        self.assertIn("only functions declared in `include/lancedb.h`", notes)
+        self.assertIn("AWS-LC jitterentropy", notes)
         for entry in metadata["packages"]:
             self.assertIn(entry["archive"], notes)
             self.assertIn(entry["sha256"], notes)

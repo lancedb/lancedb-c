@@ -9,6 +9,8 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,6 +19,9 @@ const DEV_VERSION: &str = "0.0.0-dev";
 fn main() {
     println!("cargo:rerun-if-env-changed=LANCEDB_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=LANCEDB_VERSION");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=LANCEDB_REAL_LINKER");
+    println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
 
     let root = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -24,9 +29,353 @@ fn main() {
     if root.join(".git").exists() {
         emit_git_rerun_paths(&root);
     }
+    emit_export_control_watch(&root);
 
     let version = resolve_version(&root);
     println!("cargo:rustc-env=LANCEDB_BUILD_VERSION={version}");
+
+    emit_export_controls(&root);
+}
+
+fn emit_export_control_watch(root: &Path) {
+    let mut fingerprint = 0xcbf29ce484222325_u64;
+    for relative in ["cmake/export-linker.sh", "cmake/export-linker.cmd"] {
+        let path = root.join(relative);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for byte in bytes {
+            fingerprint ^= u64::from(byte);
+            fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+        }
+    }
+    for name in ["CC", "LANCEDB_REAL_LINKER", "RUSTC_LINKER"] {
+        if let Some(value) = env::var_os(name) {
+            for byte in value.to_string_lossy().bytes() {
+                fingerprint ^= u64::from(byte);
+                fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+            }
+            fingerprint ^= 0xff;
+            fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+        }
+    }
+    println!("cargo:rustc-env=LANCEDB_EXPORT_CONTROL_FINGERPRINT={fingerprint:016x}");
+    emit_resolved_linker();
+}
+
+fn emit_resolved_linker() {
+    // Cargo resolves a target linker from its configuration and exposes it to
+    // build scripts. The explicit wrapper must forward that path instead of
+    // falling back to cc. A caller-provided LANCEDB_REAL_LINKER always wins.
+    if env::var_os("LANCEDB_REAL_LINKER").is_some() {
+        return;
+    }
+    let Some(linker) = env::var_os("RUSTC_LINKER") else {
+        return;
+    };
+    let file_name = Path::new(&linker)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    if file_name == "export-linker.sh" || file_name == "export-linker.cmd" {
+        return;
+    }
+    println!(
+        "cargo:rustc-env=LANCEDB_REAL_LINKER={}",
+        Path::new(&linker).display()
+    );
+}
+
+fn emit_export_controls(root: &Path) {
+    let header_path = root.join("include/lancedb.h");
+    println!("cargo:rerun-if-changed={}", header_path.display());
+    let target = env::var("TARGET").expect("TARGET is set by Cargo");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    let header = fs::read_to_string(&header_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", header_path.display()));
+    let functions = public_functions(&header);
+    if functions.is_empty() {
+        panic!(
+            "no public lancedb_ functions found in {}",
+            header_path.display()
+        );
+    }
+
+    if target.ends_with("-pc-windows-msvc") {
+        emit_msvc_export_controls(&functions, &out_dir, &target);
+    } else if target.contains("-apple-darwin") {
+        let mut text = String::new();
+        for name in &functions {
+            text.push('_');
+            text.push_str(name);
+            text.push('\n');
+        }
+        let path = out_dir.join("lancedb.exported_symbols");
+        fs::write(&path, text)
+            .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
+        println!(
+            "cargo:rustc-env=LANCEDB_EXPORTED_SYMBOLS={}",
+            path.display()
+        );
+    } else if target.contains("-linux-") {
+        let mut text = String::from("{\n  global:\n");
+        for name in &functions {
+            text.push_str("    ");
+            text.push_str(name);
+            text.push_str(";\n");
+        }
+        text.push_str("\n  local:\n    *;\n};\n");
+        let path = out_dir.join("lancedb.version_script");
+        fs::write(&path, text)
+            .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
+        println!("cargo:rustc-env=LANCEDB_EXPORT_MAP={}", path.display());
+    }
+}
+
+fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str) {
+    let output_dir = cargo_output_dir(out_dir);
+    let deps_dir = output_dir.join("deps");
+    let mut definition = String::from("LIBRARY lancedb.dll\nEXPORTS\n");
+    for name in functions {
+        definition.push_str("  ");
+        definition.push_str(name);
+        definition.push('\n');
+    }
+    let definition_path = out_dir.join("lancedb.def");
+    fs::write(&definition_path, definition)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", definition_path.display()));
+
+    let machine = if target.starts_with("aarch64") {
+        "ARM64"
+    } else if target.starts_with("x86_64") {
+        "X64"
+    } else {
+        panic!("unsupported MSVC architecture in target {target}");
+    };
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_DEF={}",
+        definition_path.display()
+    );
+    println!("cargo:rustc-env=LANCEDB_MSVC_MACHINE={machine}");
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY={}",
+        out_dir.join("lancedb.dll.lib").display()
+    );
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_EXPORT_FILE={}",
+        out_dir.join("lancedb.dll.exp").display()
+    );
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY_DEPS={}",
+        deps_dir.join("lancedb.dll.lib").display()
+    );
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY_UPLIFT={}",
+        output_dir.join("lancedb.dll.lib").display()
+    );
+}
+
+fn cargo_output_dir(out_dir: &Path) -> PathBuf {
+    let build_dir = out_dir
+        .ancestors()
+        .find(|path| path.file_name() == Some(OsStr::new("build")))
+        .unwrap_or_else(|| panic!("OUT_DIR {} has no build directory", out_dir.display()));
+    build_dir
+        .parent()
+        .unwrap_or_else(|| panic!("build directory {} has no parent", build_dir.display()))
+        .to_path_buf()
+}
+
+fn public_functions(header: &str) -> Vec<String> {
+    let text = remove_preprocessor_lines(&strip_comments(header));
+    let mut functions = BTreeSet::new();
+    for block in extern_c_blocks(&text) {
+        let block = strip_nested_braces(&block);
+        for statement in split_statements(&block) {
+            let statement = statement.trim();
+            if statement.is_empty()
+                || statement.starts_with("static")
+                || statement.starts_with("typedef")
+            {
+                continue;
+            }
+            if let Some(name) = first_lancedb_function(statement) {
+                functions.insert(name);
+            }
+        }
+    }
+    functions.into_iter().collect()
+}
+
+fn strip_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            if index < chars.len() {
+                output.push('\n');
+                index += 1;
+            }
+        } else if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                if chars[index] == '\n' {
+                    output.push('\n');
+                }
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+        } else if chars[index] == '"' || chars[index] == '\'' {
+            let quote = chars[index];
+            output.push(quote);
+            index += 1;
+            while index < chars.len() {
+                output.push(chars[index]);
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    index += 1;
+                    output.push(chars[index]);
+                } else if chars[index] == quote {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn remove_preprocessor_lines(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut continuation = false;
+    for line in text.lines() {
+        if continuation || line.trim_start().starts_with('#') {
+            continuation = line.trim_end().ends_with('\\');
+            output.push('\n');
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn extern_c_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("extern \"C\"") {
+        let after = &rest[start + "extern \"C\"".len()..];
+        let Some(open) = after.find('{') else {
+            break;
+        };
+        let content = &after[open + 1..];
+        let mut depth = 1usize;
+        let mut end = None;
+        for (index, character) in content.char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        blocks.push(content[..end].to_string());
+        rest = &content[end + 1..];
+    }
+    blocks
+}
+
+fn strip_nested_braces(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for character in text.chars() {
+        match character {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => output.push(character),
+            _ => {}
+        }
+    }
+    output
+}
+
+fn split_statements(text: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut parentheses = 0i32;
+    let mut brackets = 0i32;
+    for character in text.chars() {
+        match character {
+            '(' => {
+                parentheses += 1;
+                current.push(character);
+            }
+            ')' => {
+                parentheses -= 1;
+                current.push(character);
+            }
+            '[' => {
+                brackets += 1;
+                current.push(character);
+            }
+            ']' => {
+                brackets -= 1;
+                current.push(character);
+            }
+            ';' if parentheses == 0 && brackets == 0 => {
+                statements.push(current);
+                current = String::new();
+            }
+            _ => current.push(character),
+        }
+    }
+    if !current.trim().is_empty() {
+        statements.push(current);
+    }
+    statements
+}
+
+fn first_lancedb_function(statement: &str) -> Option<String> {
+    let bytes = statement.as_bytes();
+    let mut offset = 0;
+    while let Some(relative) = statement[offset..].find("lancedb_") {
+        let start = offset + relative;
+        let preceded_by_identifier =
+            start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        if preceded_by_identifier {
+            offset = start + 1;
+            continue;
+        }
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        let mut next = end;
+        while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+            next += 1;
+        }
+        if next < bytes.len() && bytes[next] == b'(' {
+            return Some(statement[start..end].to_string());
+        }
+        offset = end.max(start + 1);
+    }
+    None
 }
 
 fn resolve_version(root: &Path) -> String {

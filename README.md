@@ -101,10 +101,22 @@ the same metadata and package the unversioned library path used by consumers.
 
 If you prefer to build manually:
 
-1. **Build the Rust library:**
+1. **Build the export-controlled shared library:**
    ```bash
-   cargo build --release
+   cargo rustc --release -- -C linker=./cmake/export-linker.sh
    ```
+
+   On Windows use `-C linker=.\cmake\export-linker.cmd` from a Visual Studio
+   developer shell. Plain `cargo build` remains the normal path for static,
+   rlib and external-provider development, but it does not apply the
+   shared-library export boundary; CMake, the package workflow and this
+   command are the supported shared build entries.
+
+   The export boundary and paired import-library verification cover Linux ELF,
+   macOS Mach-O and native Windows MSVC shared builds. Windows GNU shared
+   builds and their installed `liblancedb.dll.a` consumers remain supported,
+   but Windows GNU is not a release target and does not use the MSVC export
+   policy.
 
 2. **Compile the C++ simple example with Arrow:**
    ```bash
@@ -181,9 +193,9 @@ this revision with the default flags contain it. `oss`, `geo` and
 `fp16kernels` are opt-in for source builds:
 
 ```bash
-cargo build --release --locked -p lancedb-c
-cargo build --release --locked -p lancedb-c --features geo,fp16kernels
-cargo build --release --locked -p lancedb-c --no-default-features --features remote,gcs
+cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh
+cargo rustc --release --locked -p lancedb-c --features geo,fp16kernels -- -C linker=./cmake/export-linker.sh
+cargo rustc --release --locked -p lancedb-c --no-default-features --features remote,gcs -- -C linker=./cmake/export-linker.sh
 ```
 
 Feature selection applies to the packages Cargo selects. A workspace build also
@@ -212,7 +224,7 @@ callers.
   Clang 6 or GCC 12 and newer. GCC 11 rejects the AVX2 object with `'_Float16'
   is not supported on this target` and does not know `-mavx512fp16`. Point `CC`
   at a supported compiler when the default is older, for example
-  `CC=clang cargo build --release --locked -p lancedb-c --features fp16kernels`.
+  `CC=clang cargo rustc --release --locked -p lancedb-c --features fp16kernels -- -C linker=./cmake/export-linker.sh`.
 
 ## Prebuilt Shared-Library Packages
 
@@ -226,6 +238,14 @@ Each package is named
 public header, the license, the Windows import library when the platform needs
 one, and a `manifest.json` describing the paths. A `SHA256SUMS` file covers the
 package contents; the archive has a sibling `.sha256` file.
+
+The shared library exports exactly the functions declared in `include/lancedb.h`.
+Earlier preview packages also exposed incidental symbols from statically linked
+dependencies (CRC, BLAKE3, and AWS-LC jitterentropy). Those were never part of
+the C API and are no longer exported. No documented C function is removed and
+the public header is unchanged; a caller that resolved an implementation symbol
+by name must provide its own copy. The next preview notes should mention this
+export-surface change.
 
 The C binding has its own version line, independent of the Cargo package and
 the pinned SDK. The Cargo package version is fixed at `0.0.0`; the release
