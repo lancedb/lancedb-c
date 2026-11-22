@@ -124,6 +124,11 @@ const char* lancedb_version(void);
 typedef struct LanceDBConnectBuilder LanceDBConnectBuilder;
 
 /**
+ * Opaque handle to a LanceDB ConnectNamespaceBuilder
+ */
+typedef struct LanceDBConnectNamespaceBuilder LanceDBConnectNamespaceBuilder;
+
+/**
  * Opaque handle to a LanceDB Connection
  */
 typedef struct LanceDBConnection LanceDBConnection;
@@ -1048,6 +1053,208 @@ LanceDBConnectBuilder* lancedb_connect_builder_session(LanceDBConnectBuilder* bu
  * After calling this function, the builder pointer must not be used.
  */
 void lancedb_connect_builder_free(LanceDBConnectBuilder* builder);
+
+/**
+ * Namespace operations that can be pushed down to the namespace backend
+ *
+ * These values are the SDK's complete set of pushdown operations. They are
+ * explicit so a C caller can pass and be rejected for any other value.
+ */
+typedef enum {
+    LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE = 0,  // Execute queries through the namespace server
+    LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE = 1  // Request the SDK's CreateTable pushdown
+} LanceDBNamespacePushdownOperation;
+
+/**
+ * Create a ConnectNamespaceBuilder for a Lance namespace implementation
+ *
+ * @param ns_impl - NUL-terminated namespace implementation name
+ * @param property_keys - array of property names (NULL when property_count is 0)
+ * @param property_values - array of property values matching property_keys
+ * @param property_count - number of namespace implementation properties
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * "dir" is always available and requires a "root" property. "rest" is
+ * available only when the library is built with the remote feature. The pinned
+ * SDK rejects any other implementation when the builder is executed. Other
+ * properties, their defaults, and required values are defined by the selected
+ * namespace implementation.
+ *
+ * The implementation name, property arrays, and every string they point to are
+ * borrowed only for the duration of this call and copied into the returned
+ * builder. A zero property_count accepts NULL arrays. A positive count requires
+ * both arrays and every entry to be non-NULL, NUL-terminated UTF-8 strings.
+ *
+ * For the "dir" implementation, properties whose names start with "storage."
+ * apply to its own root object store. This is separate from the connection
+ * storage-options map set by
+ * lancedb_connect_namespace_builder_storage_option().
+ *
+ * The returned builder must be freed with
+ * lancedb_connect_namespace_builder_free() if it is not executed.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace(
+    const char* ns_impl,
+    const char* const* property_keys,
+    const char* const* property_values,
+    size_t property_count
+);
+
+/**
+ * Execute the namespace connection and return a Connection handle
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param connection - pointer to receive the LanceDBConnection pointer
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The builder is consumed on every path and must not be used after calling.
+ * connection is written only on success, when it receives a handle that must be
+ * freed with lancedb_connection_free(); on failure it is left unchanged. An
+ * existing *error_message value is preserved on success, consistent with
+ * lancedb_connect_builder_execute(). On error, a non-NULL error_message
+ * receives a message that the caller frees with lancedb_free_string().
+ *
+ * The SDK decides whether the implementation exists in this build, validates
+ * the implementation properties, and performs the connection. The URI of the
+ * returned connection is "namespace://<implementation>".
+ */
+LanceDBError lancedb_connect_namespace_builder_execute(
+    LanceDBConnectNamespaceBuilder* builder,
+    LanceDBConnection** connection,
+    char** error_message
+);
+
+/**
+ * Set an option for the storage layer of a namespace connection
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param key - NUL-terminated option name
+ * @param value - NUL-terminated option value
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL. These options apply to table
+ * access through the namespace connection. They are not the "storage.*"
+ * implementation properties that the "dir" namespace uses for its own root
+ * object store.
+ *
+ * At the pinned SDK, the table creation path falls back to this map only when
+ * the namespace response omits storage_options. An explicit empty
+ * storage_options map prevents that fallback. The selected map overrides
+ * per-write keys with the same name.
+ *
+ * Opening a table uses the describe_table storage options plus the options
+ * supplied on that open request, with namespace values winning on overlaps; it
+ * does not use this connection-level map there.
+ *
+ * The SDK does not validate every option during the namespace connection
+ * itself.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_storage_option(
+    LanceDBConnectNamespaceBuilder* builder,
+    const char* key,
+    const char* value
+);
+
+/**
+ * Set an additional property for the namespace client
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param key - NUL-terminated property name
+ * @param value - NUL-terminated property value
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL.
+ *
+ * Namespace client properties are merged into the implementation properties
+ * when the builder is executed. The SDK decides which value wins when the same
+ * key is supplied as an implementation property and as a namespace client
+ * property. For the "dir" implementation, a property whose name starts with
+ * "storage." configures its own root object store even when it is supplied
+ * through this setter; this differs from
+ * lancedb_connect_namespace_builder_storage_option(), which configures table
+ * access for the connection.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_namespace_client_property(
+    LanceDBConnectNamespaceBuilder* builder,
+    const char* key,
+    const char* value
+);
+
+/**
+ * Set the read consistency interval for a namespace connection
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param interval_ms - read consistency interval in milliseconds
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Leaving this setter unused keeps the SDK default: no freshness constraint is
+ * added to reads. An explicit 0 requests strong consistency. A positive value
+ * requests eventual consistency. A NULL builder returns NULL.
+ *
+ * This has the same meaning and defaults as
+ * lancedb_connect_builder_read_consistency_interval_ms() for a URI connection.
+ * The configured mode can be read back with
+ * lancedb_connection_read_consistency().
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_read_consistency_interval_ms(
+    LanceDBConnectNamespaceBuilder* builder,
+    uint64_t interval_ms
+);
+
+/**
+ * Set a session for the namespace connection builder
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param session - pointer to LanceDBSession, or NULL to keep the default session
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Passing NULL session is a no-op. A non-NULL session is borrowed for the call;
+ * the builder keeps it alive through a cloned reference, and the caller still
+ * owns its handle and must free it with lancedb_session_free().
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_session(
+    LanceDBConnectNamespaceBuilder* builder,
+    const LanceDBSession* session
+);
+
+/**
+ * Add an operation to push down to the namespace backend
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param operation - raw integer value of a LanceDBNamespacePushdownOperation enumerator
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Operations are opt-in; unset means the SDK executes them locally. Call this
+ * setter more than once to add multiple operations. A value outside the
+ * LanceDBNamespacePushdownOperation enumerators returns NULL.
+ *
+ * With LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE, queries execute through the
+ * namespace server; a query with a nonempty order_by still executes locally and
+ * needs client access to table storage. LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE
+ * is the SDK's other pushdown value; at the pinned SDK version the namespace
+ * create path still declares the table and writes locally, so this option is
+ * forwarded without changing that path. The SDK owns whether and how an
+ * implementation applies either operation.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_pushdown_operation(
+    LanceDBConnectNamespaceBuilder* builder,
+    int operation
+);
+
+/**
+ * Free a ConnectNamespaceBuilder
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ *
+ * After calling this function, the builder pointer must not be used.
+ */
+void lancedb_connect_namespace_builder_free(LanceDBConnectNamespaceBuilder* builder);
 
 /**
  * Get the URI of the connection
@@ -3234,6 +3441,59 @@ LanceDBError lancedb_query_select(
 );
 
 /**
+ * Reset a plain query to every non-system column
+ *
+ * This clears a projection set by lancedb_query_select() or
+ * lancedb_query_select_dynamic(). The most recent projection call wins.
+ * lancedb_query_with_row_id() still appends the `_rowid` metadata column.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_select_all(
+    LanceDBQuery* query,
+    char** error_message
+);
+
+/**
+ * Set an expression-based column projection for query
+ *
+ * Each pair adds one output column: names[i] is the output name and
+ * expressions[i] is an SQL expression over the table columns. Columns are
+ * returned in the given order, which may differ from the table order. The names
+ * and expressions are copied; the arrays may be released after the call.
+ *
+ * A zero num_columns selects no columns. Both arrays must still be non-NULL.
+ * Calling this function replaces a projection from lancedb_query_select() or
+ * lancedb_query_select_all(), and a later call to either of those replaces this
+ * projection.
+ *
+ * The SDK evaluates the expressions and decides whether a backend supports
+ * dynamic projection. An unsupported backend's SDK error is returned unchanged.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param names - array of num_columns output column names
+ * @param expressions - array of num_columns SQL expressions
+ * @param num_columns - number of entries in each array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_select_dynamic(
+    LanceDBQuery* query,
+    const char* const* names,
+    const char* const* expressions,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
  * Ask a plain query to return the `_rowid` metadata column
  *
  * This applies to ordinary scans and standalone full-text searches built with
@@ -3328,8 +3588,9 @@ LanceDBError lancedb_query_full_text_search(
  * that many intervening tokens, so `slop = 1` matches both `alpha beta` and
  * `alpha gap beta` for the phrase `alpha beta`.
  *
- * If `column` is NULL or empty, the index chooses the text column, which works
- * when exactly one column has a full-text index. An explicit column selects it.
+ * If `column` is NULL or empty, the SDK chooses an indexed text column. An
+ * explicit column can be scanned without an index by embedded LanceDB; an
+ * indexed phrase query requires positions in the index.
  *
  * The constructor copies `text` and `column`, so the caller may change or free
  * them after this call returns. The returned handle owns an SDK query. Attach
@@ -3339,14 +3600,21 @@ LanceDBError lancedb_query_full_text_search(
  * return.
  *
  * The SDK selects embedded, namespace, or Enterprise execution from the
- * connection. Embedded LanceDB evaluates the phrase locally and requires a
- * full-text index with positions. Create it with lancedb_table_create_index()
- * and `fts_with_position = 1`; an index without positions makes execution fail
- * with the SDK's missing-position error. A namespace connection sends the
- * structured phrase to the namespace server. LanceDB Enterprise servers 0.3.0
- * and later receive the structured query. Older Enterprise servers receive
- * only the column and the phrase text quoted as one string, so a nonzero slop
- * is not transmitted.
+ * connection. Embedded LanceDB can scan an explicitly named column without an
+ * index; an indexed phrase query requires a full-text index with stored
+ * positions. Create it with lancedb_table_create_index() and
+ * `fts_with_position = 1`; an index without positions makes an indexed phrase
+ * query fail with the SDK's missing-position error. A namespace connection
+ * forwards the structured node only when QueryTable pushdown is enabled and
+ * selected with LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE. LanceDB Enterprise
+ * servers 0.3.0 and later accept the structured node. Older Enterprise servers
+ * receive only the column and the phrase text quoted as one string, so a
+ * nonzero slop is not transmitted.
+ *
+ * The pinned Lance indexed path converts `slop` to signed 32-bit. Values from 0
+ * through INT32_MAX keep their indexed meaning; larger `uint32_t` values are
+ * forwarded unchanged by this API but can return no matches because of that
+ * internal conversion. This function does not clamp or reject them.
  *
  * On entry `*query_out` and the error message are cleared. On success
  * `*query_out` owns a handle that the caller frees with
@@ -3492,6 +3760,60 @@ LanceDBError lancedb_vector_query_select(
 );
 
 /**
+ * Reset a vector query to every non-system column
+ *
+ * This clears a projection set by lancedb_vector_query_select() or
+ * lancedb_vector_query_select_dynamic(). The most recent projection call wins.
+ * lancedb_vector_query_with_row_id() still appends the `_rowid` metadata
+ * column.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_select_all(
+    LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
+ * Set an expression-based column projection for vector query
+ *
+ * Each pair adds one output column: names[i] is the output name and
+ * expressions[i] is an SQL expression over the table columns. Columns are
+ * returned in the given order, which may differ from the table order. The names
+ * and expressions are copied; the arrays may be released after the call.
+ *
+ * A zero num_columns selects no columns. Both arrays must still be non-NULL.
+ * Calling this function replaces a projection from lancedb_vector_query_select()
+ * or lancedb_vector_query_select_all(), and a later call to either of those
+ * replaces this projection.
+ *
+ * The SDK evaluates the expressions and decides whether a backend supports
+ * dynamic projection. An unsupported backend's SDK error is returned unchanged.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param names - array of num_columns output column names
+ * @param expressions - array of num_columns SQL expressions
+ * @param num_columns - number of entries in each array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_select_dynamic(
+    LanceDBVectorQuery* query,
+    const char* const* names,
+    const char* const* expressions,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
  * Ask a vector query to return the `_rowid` metadata column
  *
  * This also applies to a hybrid vector plus full-text query. The UInt64
@@ -3595,8 +3917,12 @@ LanceDBError lancedb_vector_query_where_filter(
  * that text column; embedded LanceDB can also scan it without an index, while
  * an index is recommended for larger tables.
  *
- * Embedded LanceDB does not support lancedb_vector_query_explain_plan() for a
- * query with both nearest and full-text search. Execute the query instead.
+ * Embedded LanceDB executes this hybrid query as two searches and fuses their
+ * results. EXPLAIN, output schema inspection, and ANALYZE need a single SDK
+ * plan, so lancedb_vector_query_explain_plan(),
+ * lancedb_vector_query_output_schema() and
+ * lancedb_vector_query_analyze_plan() may return the SDK's unsupported-shape
+ * error. Execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
@@ -3880,6 +4206,35 @@ LanceDBError lancedb_vector_query_ef(
 );
 
 /**
+ * Get the output schema of a query
+ *
+ * The schema comes from the same configured query that
+ * lancedb_query_execute() would run, so a dynamic projection's aliases, types
+ * and order are visible before execution. The query is not consumed. The SDK
+ * decides how a backend resolves the plan; an Enterprise table may send the
+ * SDK's `/query/` request and read the schema from the returned stream.
+ *
+ * On entry, *schema_out and the error message are cleared. On success,
+ * *schema_out holds an owned Arrow C Data schema; release it with
+ * lancedb_free_arrow_schema(). On failure it stays NULL and the error message is
+ * set when requested. A schema that the C data interface cannot represent
+ * returns LANCEDB_ARROW with the conversion detail.
+ *
+ * @param query - pointer to LanceDBQuery (NOT consumed)
+ * @param schema_out - pointer to receive the Arrow schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_output_schema(
+    const LanceDBQuery* query,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Get the query execution plan without executing the query
  *
  * Returns a human-readable string describing what steps will be taken
@@ -3904,15 +4259,75 @@ LanceDBError lancedb_query_explain_plan(
 );
 
 /**
+ * Execute the query and return an analyzed plan with runtime metrics
+ *
+ * ANALYZE executes an analyzable query plan to collect runtime metrics. It
+ * reads the same data and has the same side effects as execution while
+ * returning no rows. The query is not consumed and can still be executed.
+ *
+ * On entry, *plan_out and the error message are cleared. On success, *plan_out
+ * holds a NUL-terminated plan string; release it with lancedb_free_string(). On
+ * failure it stays NULL and the error message is set when requested.
+ *
+ * @param query - pointer to LanceDBQuery (NOT consumed)
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_analyze_plan(
+    const LanceDBQuery* query,
+    char** plan_out,
+    char** error_message
+);
+
+/**
+ * Get the output schema of a vector query
+ *
+ * The schema comes from the same configured query that
+ * lancedb_vector_query_execute() would run, so a dynamic projection's aliases,
+ * types and order are visible before execution. The query is not consumed. The
+ * SDK decides how a backend resolves the plan; an Enterprise table may send the
+ * SDK's `/query/` request and read the schema from the returned stream.
+ *
+ * Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+ * two searches and fuses their results. Output schema inspection requires a
+ * single SDK plan, so it may return the same unsupported hybrid error as
+ * lancedb_vector_query_explain_plan().
+ *
+ * On entry, *schema_out and the error message are cleared. On success,
+ * *schema_out holds an owned Arrow C Data schema; release it with
+ * lancedb_free_arrow_schema(). On failure it stays NULL and the error message is
+ * set when requested. A schema that the C data interface cannot represent
+ * returns LANCEDB_ARROW with the conversion detail.
+ *
+ * @param query - pointer to LanceDBVectorQuery (NOT consumed)
+ * @param schema_out - pointer to receive the Arrow schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_output_schema(
+    const LanceDBVectorQuery* query,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Get the vector query execution plan without executing the query
  *
  * Returns a human-readable string describing what steps will be taken
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
  *
- * Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
- * full-text search at plan time with the SDK's unsupported-shape error because
- * one scanner cannot combine them. That is an SDK limitation, not a C-side
+ * Embedded LanceDB executes a hybrid query that combines nearest-neighbour and
+ * full-text search as two searches and fuses their results. EXPLAIN requires a
+ * single SDK plan, so embedded LanceDB rejects that hybrid at plan time with
+ * the SDK's unsupported-shape error. That is an SDK limitation, not a C-side
  * argument error; execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
@@ -3928,6 +4343,36 @@ LanceDBError lancedb_query_explain_plan(
 LanceDBError lancedb_vector_query_explain_plan(
     const LanceDBVectorQuery* query,
     bool verbose,
+    char** plan_out,
+    char** error_message
+);
+
+/**
+ * Execute the vector query and return an analyzed plan with runtime metrics
+ *
+ * ANALYZE executes an analyzable query plan to collect runtime metrics. It
+ * reads the same data and has the same side effects as execution while
+ * returning no rows. The query is not consumed and can still be executed.
+ *
+ * Embedded LanceDB executes a hybrid nearest-neighbour plus full-text query as
+ * two searches and fuses their results. ANALYZE requires one analyzable SDK
+ * plan, so it may return the same unsupported hybrid error as
+ * lancedb_vector_query_explain_plan().
+ *
+ * On entry, *plan_out and the error message are cleared. On success, *plan_out
+ * holds a NUL-terminated plan string; release it with lancedb_free_string(). On
+ * failure it stays NULL and the error message is set when requested.
+ *
+ * @param query - pointer to LanceDBVectorQuery (NOT consumed)
+ * @param plan_out - pointer to receive the plan string
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_analyze_plan(
+    const LanceDBVectorQuery* query,
     char** plan_out,
     char** error_message
 );

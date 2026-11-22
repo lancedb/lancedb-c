@@ -635,10 +635,14 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - invalid arguments", "[query]")
 
   SECTION("Query setters with null query should fail") {
     const char* columns[] = {"key"};
+    const char* expressions[] = {"key"};
 
     REQUIRE(lancedb_query_limit(nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_offset(nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_select(nullptr, columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_all(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_dynamic(nullptr, columns, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_where_filter(nullptr, "key = 'key_0'", nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_with_row_id(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_fast_search(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
@@ -648,7 +652,12 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - invalid arguments", "[query]")
     LanceDBQuery* query = lancedb_query_new(table);
     REQUIRE(query != nullptr);
 
+    const char* expressions[] = {"key"};
     REQUIRE(lancedb_query_select(query, nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_dynamic(query, nullptr, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_dynamic(query, expressions, nullptr, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_where_filter(query, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
 
@@ -660,12 +669,21 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - invalid arguments", "[query]")
     const char* const invalid_utf8 = "\xff\xfe";
     const char* invalid_columns[] = {invalid_utf8};
     const char* null_columns[] = {nullptr};
+    const char* columns[] = {"key"};
+    const char* expressions[] = {"key"};
+    const char* invalid_expressions[] = {invalid_utf8};
 
     LanceDBQuery* query = lancedb_query_new(table);
     REQUIRE(query != nullptr);
 
     REQUIRE(lancedb_query_select(query, null_columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_select(query, invalid_columns, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_dynamic(query, null_columns, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_dynamic(query, invalid_columns, expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_select_dynamic(query, columns, invalid_expressions, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_query_where_filter(query, invalid_utf8, nullptr) == LANCEDB_INVALID_ARGUMENT);
 
     lancedb_query_free(query);
@@ -854,6 +872,202 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - explain plan", "[query][explai
     LanceDBQuery* query = lancedb_query_new(table);
     REQUIRE(query != nullptr);
     REQUIRE(lancedb_query_explain_plan(query, true, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    lancedb_query_free(query);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - dynamic projection and inspection", "[query]") {
+  const std::string table_name = "query_dynamic_projection_test";
+  constexpr int total_rows = 10;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  const char* names[] = {"key_length", "key_copy", "is_key_three"};
+  const char* expressions[] = {
+      "cast(length(key) as bigint)", "key", "key = 'key_3'"};
+
+  auto query_with_dynamic_projection = [&] {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select_dynamic(
+        query, names, expressions, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return query;
+  };
+
+  auto output_schema_of = [&](LanceDBQuery* query) {
+    FFI_ArrowSchema* schema = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_output_schema(query, &schema, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(schema != nullptr);
+
+    auto imported = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(schema));
+    REQUIRE(imported.ok());
+    lancedb_free_arrow_schema(schema);
+    return imported.ValueOrDie();
+  };
+
+  auto analyze_plan_of = [&](LanceDBQuery* query) {
+    char* plan = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_analyze_plan(query, &plan, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+
+    std::string result(plan);
+    lancedb_free_string(plan);
+    return result;
+  };
+
+  SECTION("Dynamic projection order and types drive the schema and rows") {
+    LanceDBQuery* query = query_with_dynamic_projection();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_where_filter(query, "key = 'key_3'", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() == 3);
+    REQUIRE(schema->field(0)->name() == "key_length");
+    REQUIRE(schema->field(0)->type()->id() == arrow::Type::INT64);
+    REQUIRE(schema->field(1)->name() == "key_copy");
+    REQUIRE(schema->field(1)->type()->id() == arrow::Type::STRING);
+    REQUIRE(schema->field(2)->name() == "is_key_three");
+    REQUIRE(schema->field(2)->type()->id() == arrow::Type::BOOL);
+
+    auto rows = collect_query_rows(lancedb_query_execute(query));
+    REQUIRE(rows.schema->Equals(*schema));
+    REQUIRE(rows.num_rows() == 1);
+
+    auto batch = rows.batches.front();
+    auto key_length =
+        std::static_pointer_cast<arrow::Int64Array>(batch->GetColumnByName("key_length"));
+    REQUIRE(key_length != nullptr);
+    REQUIRE(key_length->Value(0) == 5);
+
+    auto key_copy =
+        std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("key_copy"));
+    REQUIRE(key_copy != nullptr);
+    REQUIRE(key_copy->GetString(0) == "key_3");
+
+    auto is_key_three = std::static_pointer_cast<arrow::BooleanArray>(
+        batch->GetColumnByName("is_key_three"));
+    REQUIRE(is_key_three != nullptr);
+    REQUIRE(is_key_three->Value(0));
+  }
+
+  SECTION("Select all resets a static or dynamic projection") {
+    LanceDBQuery* query = query_with_dynamic_projection();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select_all(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() == 2);
+    REQUIRE(schema->field(0)->name() == "key");
+    REQUIRE(schema->field(1)->name() == "data");
+
+    const char* key_column[] = {"key"};
+    REQUIRE(lancedb_query_select(query, key_column, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() == 1);
+    REQUIRE(schema->field(0)->name() == "key");
+
+    REQUIRE(lancedb_query_select_all(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    schema = output_schema_of(query);
+    REQUIRE(schema->num_fields() == 2);
+    REQUIRE(schema->field(0)->name() == "key");
+    REQUIRE(schema->field(1)->name() == "data");
+
+    lancedb_query_free(query);
+  }
+
+  SECTION("Analyze plan reflects the configured query and executes it") {
+    LanceDBQuery* query = query_with_dynamic_projection();
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_where_filter(query, "key = 'key_7'", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto plan = analyze_plan_of(query);
+    REQUIRE(plan.length() > 0);
+    // key_7 only appears in the predicate; the projection uses key_3.
+    REQUIRE(plan.find("key_7") != std::string::npos);
+    REQUIRE(plan.find("metrics=[output_rows=") != std::string::npos);
+
+    // analyze_plan does not consume the query.
+    auto rows = collect_query_rows(lancedb_query_execute(query));
+    REQUIRE(rows.num_rows() == 1);
+    auto batch = rows.batches.front();
+    auto key_copy =
+        std::static_pointer_cast<arrow::StringArray>(batch->GetColumnByName("key_copy"));
+    REQUIRE(key_copy != nullptr);
+    REQUIRE(key_copy->GetString(0) == "key_7");
+    auto is_key_three = std::static_pointer_cast<arrow::BooleanArray>(
+        batch->GetColumnByName("is_key_three"));
+    REQUIRE(is_key_three != nullptr);
+    REQUIRE(!is_key_three->Value(0));
+  }
+
+  SECTION("Inspection preserves SDK errors and clears outputs on failure") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* bad_names[] = {"bad"};
+    const char* bad_expressions[] = {"missing_column + 1"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select_dynamic(query, bad_names, bad_expressions, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    FFI_ArrowSchema* schema = reinterpret_cast<FFI_ArrowSchema*>(uintptr_t{1});
+    REQUIRE(lancedb_query_output_schema(query, &schema, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    char* plan = reinterpret_cast<char*>(uintptr_t{1});
+    error_message = nullptr;
+    REQUIRE(lancedb_query_analyze_plan(query, &plan, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_query_free(query);
+  }
+
+  SECTION("Inspection rejects null arguments and clears outputs") {
+    FFI_ArrowSchema* schema = reinterpret_cast<FFI_ArrowSchema*>(uintptr_t{1});
+    char* plan = reinterpret_cast<char*>(uintptr_t{1});
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_query_output_schema(nullptr, &schema, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(schema == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_query_analyze_plan(nullptr, &plan, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(plan == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_query_output_schema(query, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_analyze_plan(query, nullptr, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
     lancedb_query_free(query);
   }
 

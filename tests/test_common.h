@@ -82,6 +82,15 @@ int directory_exists(const char* path);
 // Helper function to remove directory recursively
 int remove_directory(const char* path);
 
+// Create an empty table on any connection, including a namespace connection
+void create_empty_table_on(LanceDBConnection* db, const std::string& table_name);
+
+// Open an existing table on any connection and require success
+LanceDBTable* open_table_on(LanceDBConnection* db, const std::string& table_name);
+
+// Require that a table cannot be opened on any connection because it is missing
+void require_table_not_found_on(LanceDBConnection* db, const std::string& table_name);
+
 class BaseFixture {
 protected:
   const std::string data_dir;
