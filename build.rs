@@ -100,7 +100,14 @@ fn emit_git_rerun_paths(root: &Path) {
         } else {
             root.join(directory)
         };
-        for relative in ["HEAD", "packed-refs", "refs", "refs/tags"] {
+        // The reftable tables list is rewritten by every ref update.
+        for relative in [
+            "HEAD",
+            "packed-refs",
+            "refs",
+            "refs/tags",
+            "reftable/tables.list",
+        ] {
             let path = directory.join(relative);
             if path.exists() && seen.insert(path.clone()) {
                 println!("cargo:rerun-if-changed={}", path.display());

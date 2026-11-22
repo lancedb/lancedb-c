@@ -192,7 +192,15 @@ function(lancedb_render_header source destination version)
 
   get_filename_component(destination_directory "${destination}" DIRECTORY)
   file(MAKE_DIRECTORY "${destination_directory}")
-  file(WRITE "${destination}" "${rendered_text}")
+  # Rewriting identical bytes would make generated-header consumers rebuild.
+  if(EXISTS "${destination}")
+    file(READ "${destination}" existing_text)
+  else()
+    set(existing_text "")
+  endif()
+  if(NOT "${existing_text}" STREQUAL "${rendered_text}")
+    file(WRITE "${destination}" "${rendered_text}")
+  endif()
 endfunction()
 
 # Tag refs are inputs to the configure-time result. Track them so an existing
@@ -215,7 +223,7 @@ if(LANCEDB_GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     if(NOT IS_ABSOLUTE "${git_directory}")
       set(git_directory "${CMAKE_CURRENT_SOURCE_DIR}/${git_directory}")
     endif()
-    foreach(relative IN ITEMS HEAD packed-refs refs refs/tags)
+    foreach(relative IN ITEMS HEAD packed-refs refs refs/tags reftable/tables.list)
       if(EXISTS "${git_directory}/${relative}")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
           "${git_directory}/${relative}")
@@ -226,9 +234,10 @@ if(LANCEDB_GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
   # A symbolic HEAD keeps .git/HEAD pointing at the branch name, so committing
   # or resetting the branch tip does not change HEAD itself. Resolve the
   # effective ref through Git so worktrees and relocated refs use the same path
-  # Git actually reads. Watch the loose ref when present and its parent
-  # directory so a later loose ref created over a packed one is still noticed;
-  # packed-refs is already covered above.
+  # Git actually reads. Watch the loose ref when present and its closest
+  # existing ancestor, so Git creating a missing nested hierarchy over a packed
+  # ref is still noticed. packed-refs and reftable/tables.list are covered
+  # above.
   execute_process(
     COMMAND "${LANCEDB_GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
             symbolic-ref -q HEAD
@@ -254,10 +263,18 @@ if(LANCEDB_GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
           "${symbolic_ref_path}")
       endif()
-      get_filename_component(symbolic_ref_directory "${symbolic_ref_path}" DIRECTORY)
-      if(IS_DIRECTORY "${symbolic_ref_directory}")
+      set(symbolic_ref_ancestor "${symbolic_ref_path}")
+      while(NOT IS_DIRECTORY "${symbolic_ref_ancestor}")
+        get_filename_component(symbolic_ref_parent "${symbolic_ref_ancestor}" DIRECTORY)
+        if(symbolic_ref_parent STREQUAL symbolic_ref_ancestor OR
+           symbolic_ref_parent STREQUAL "")
+          break()
+        endif()
+        set(symbolic_ref_ancestor "${symbolic_ref_parent}")
+      endwhile()
+      if(IS_DIRECTORY "${symbolic_ref_ancestor}")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-          "${symbolic_ref_directory}")
+          "${symbolic_ref_ancestor}")
       endif()
     endif()
   endif()
