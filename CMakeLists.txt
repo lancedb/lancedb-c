@@ -146,38 +146,6 @@ option(BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_DOCS "Build documentation" OFF)
 option(BUILD_TESTS "Build tests" OFF)
 option(BUILD_CONSUMER_TEST "Build the standalone package consumer smoke test" OFF)
-option(BUILD_COVERAGE "Enable Rust code coverage reporting (requires llvm-tools-preview)" OFF)
-
-if(BUILD_COVERAGE)
-  if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(WARNING "Code coverage results with an optimized build may be misleading. Consider using -DCMAKE_BUILD_TYPE=Debug")
-  endif()
-
-  # Find llvm-profdata and llvm-cov via rustc sysroot or system PATH
-  execute_process(
-    COMMAND rustc --print sysroot
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    OUTPUT_VARIABLE RUST_SYSROOT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  execute_process(
-    COMMAND rustc -vV
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    OUTPUT_VARIABLE RUSTC_VERSION_INFO
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  string(REGEX MATCH "host: ([a-zA-Z0-9_-]+)" _match "${RUSTC_VERSION_INFO}")
-  set(RUST_HOST_TRIPLE "${CMAKE_MATCH_1}")
-  find_program(_profdata llvm-profdata HINTS "${RUST_SYSROOT}/lib/rustlib/${RUST_HOST_TRIPLE}/bin" NO_DEFAULT_PATH)
-  find_program(_cov llvm-cov HINTS "${RUST_SYSROOT}/lib/rustlib/${RUST_HOST_TRIPLE}/bin" NO_DEFAULT_PATH)
-  if(_profdata AND _cov)
-    list(GET _profdata 0 LLVM_PROFDATA)
-    list(GET _cov 0 LLVM_COV)
-  else()
-    find_program(LLVM_PROFDATA llvm-profdata REQUIRED)
-    find_program(LLVM_COV llvm-cov REQUIRED)
-  endif()
-endif()
 
 find_package(Threads REQUIRED)
 if (BUILD_EXAMPLES OR BUILD_TESTS)
@@ -199,15 +167,6 @@ configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
 # rust-lib target
   set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --target-dir "${CMAKE_BINARY_DIR}/target")
-if(BUILD_COVERAGE)
-  set(PROFRAW_DIR "${CMAKE_BINARY_DIR}/profraw")
-  set(BUILD_PROFRAW_DIR "${PROFRAW_DIR}/build")
-  file(MAKE_DIRECTORY "${PROFRAW_DIR}" "${BUILD_PROFRAW_DIR}")
-  set(BUILD_PROFRAW_ENV "LLVM_PROFILE_FILE=${BUILD_PROFRAW_DIR}/%p_%m.profraw")
-  # Use CARGO_ENCODED_RUSTFLAGS (0x1f-separated) instead of RUSTFLAGS
-  # so that Cargo includes it in its fingerprint and triggers a rebuild
-  set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env "CARGO_ENCODED_RUSTFLAGS=-Cinstrument-coverage" "${BUILD_PROFRAW_ENV}" ${CARGO_BUILD_COMMAND})
-endif()
 add_custom_target(rust-lib ALL
   COMMAND ${CARGO_BUILD_COMMAND}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -284,9 +243,6 @@ if(BUILD_EXAMPLES)
 
   # external_provider helper crate (provides external_object_store_provider_create)
   set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${CMAKE_BINARY_DIR}/target")
-  if(BUILD_COVERAGE)
-    set(EXT_PROVIDER_CARGO_CMD ${CMAKE_COMMAND} -E env "CARGO_ENCODED_RUSTFLAGS=-Cinstrument-coverage" "${BUILD_PROFRAW_ENV}" ${EXT_PROVIDER_CARGO_CMD})
-  endif()
   if(WIN32)
     set(EXT_PROVIDER_SHARED_PATH "${RUST_TARGET_DIR}/lancedb_external_provider${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(EXT_PROVIDER_IMPORT_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb_external_provider${CMAKE_IMPORT_LIBRARY_SUFFIX}")
@@ -417,8 +373,6 @@ if(BUILD_TESTS)
     FetchContent_MakeAvailable(Catch2)
   endif()
 
-  set(TEST_TARGETS "")
-
   # Add test executable for connection tests (runs with valgrind)
   add_executable(lancedb_connection_tests
     tests/test_main.cpp
@@ -441,7 +395,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_connection_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_connection_tests)
 
   # Add test executable for table tests (runs with valgrind)
   add_executable(lancedb_table_tests
@@ -465,7 +418,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_table_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_table_tests)
 
   # Add test executable for table metadata/version tests (runs with valgrind)
   add_executable(lancedb_table_meta_tests
@@ -489,7 +441,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_table_meta_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_table_meta_tests)
 
   # Add test executable for scalar index tests (runs with valgrind)
   add_executable(lancedb_index_tests
@@ -516,7 +467,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_index_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_index_tests)
 
   # Add test executable for vector tests (runs without valgrind)
   add_executable(lancedb_vector_index_tests
@@ -541,7 +491,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_vector_index_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_vector_index_tests)
 
   # Add test executable for query tests (runs with valgrind)
   add_executable(lancedb_query_tests
@@ -565,7 +514,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_query_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_query_tests)
 
   # Add test executable for DataFusion expression query tests
   add_executable(lancedb_df_query_tests
@@ -590,7 +538,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_df_query_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_df_query_tests)
 
   # Add test executable for JSON expression tests
   add_executable(lancedb_json_tests
@@ -613,7 +560,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_json_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_json_tests)
 
   # Add test executable for vector query tests (runs without valgrind)
   add_executable(lancedb_vector_query_tests
@@ -638,7 +584,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_vector_query_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_vector_query_tests)
 
   # Add test executable for full-text and hybrid query tests (runs without valgrind)
   add_executable(lancedb_fts_tests
@@ -662,7 +607,6 @@ if(BUILD_TESTS)
   set_target_properties(lancedb_fts_tests PROPERTIES
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
-  list(APPEND TEST_TARGETS lancedb_fts_tests)
 
   # C_STANDARD is a target property. Apply strict C17 only to the targets that
   # compile the C consumer helper; each has no other C sources, so the C++
@@ -678,13 +622,6 @@ if(BUILD_TESTS)
   # Enable CTest
   enable_testing()
 
-  # Set up coverage profraw output directory
-  if(BUILD_COVERAGE)
-    set(TEST_ENV_PREFIX ${CMAKE_COMMAND} -E env "LLVM_PROFILE_FILE=${PROFRAW_DIR}/%p_%m.profraw")
-  else()
-    set(TEST_ENV_PREFIX)
-  endif()
-
   # Check if valgrind is available
   find_program(VALGRIND_EXECUTABLE valgrind)
   if(VALGRIND_EXECUTABLE)
@@ -692,7 +629,7 @@ if(BUILD_TESTS)
     # Run connection tests with valgrind
     # Fail on definite and possible leaks; known false positives are in valgrind.supp
     add_test(NAME lancedb_connection_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -705,7 +642,7 @@ if(BUILD_TESTS)
     )
     # Run table tests with valgrind
     add_test(NAME lancedb_table_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -718,7 +655,7 @@ if(BUILD_TESTS)
     )
     # Run table metadata/version tests with valgrind
     add_test(NAME lancedb_table_meta_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -731,7 +668,7 @@ if(BUILD_TESTS)
     )
     # Run scalar index tests with valgrind
     add_test(NAME lancedb_index_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -744,7 +681,7 @@ if(BUILD_TESTS)
     )
     # Run query tests with valgrind
     add_test(NAME lancedb_query_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -757,7 +694,7 @@ if(BUILD_TESTS)
     )
     # Run DataFusion expression query tests with valgrind
     add_test(NAME lancedb_df_query_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -770,7 +707,7 @@ if(BUILD_TESTS)
     )
     # Run JSON expression tests with valgrind
     add_test(NAME lancedb_json_tests
-      COMMAND ${TEST_ENV_PREFIX} ${VALGRIND_EXECUTABLE}
+      COMMAND ${VALGRIND_EXECUTABLE}
         --tool=memcheck
         --leak-check=full
         --show-leak-kinds=definite,possible
@@ -783,47 +720,21 @@ if(BUILD_TESTS)
     )
   else()
     message(WARNING "Valgrind not found, running tests without memory checking")
-    add_test(NAME lancedb_connection_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_connection_tests>)
-    add_test(NAME lancedb_table_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_tests>)
-    add_test(NAME lancedb_table_meta_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_table_meta_tests>)
-    add_test(NAME lancedb_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_index_tests>)
-    add_test(NAME lancedb_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_query_tests>)
-    add_test(NAME lancedb_df_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_df_query_tests>)
-    add_test(NAME lancedb_json_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_json_tests>)
+    add_test(NAME lancedb_connection_tests COMMAND $<TARGET_FILE:lancedb_connection_tests>)
+    add_test(NAME lancedb_table_tests COMMAND $<TARGET_FILE:lancedb_table_tests>)
+    add_test(NAME lancedb_table_meta_tests COMMAND $<TARGET_FILE:lancedb_table_meta_tests>)
+    add_test(NAME lancedb_index_tests COMMAND $<TARGET_FILE:lancedb_index_tests>)
+    add_test(NAME lancedb_query_tests COMMAND $<TARGET_FILE:lancedb_query_tests>)
+    add_test(NAME lancedb_df_query_tests COMMAND $<TARGET_FILE:lancedb_df_query_tests>)
+    add_test(NAME lancedb_json_tests COMMAND $<TARGET_FILE:lancedb_json_tests>)
   endif()
 
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)
-  add_test(NAME lancedb_vector_index_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_index_tests>)
+  add_test(NAME lancedb_vector_index_tests COMMAND $<TARGET_FILE:lancedb_vector_index_tests>)
   # Run vector query tests WITHOUT valgrind (too slow under valgrind)
-  add_test(NAME lancedb_vector_query_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_vector_query_tests>)
+  add_test(NAME lancedb_vector_query_tests COMMAND $<TARGET_FILE:lancedb_vector_query_tests>)
   # Run full-text and hybrid query tests WITHOUT valgrind (index and query work is slow under valgrind)
-  add_test(NAME lancedb_fts_tests COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_fts_tests>)
-
-  if(BUILD_COVERAGE)
-    set(PROFDATA_FILE "${CMAKE_BINARY_DIR}/coverage.profdata")
-    set(COVERAGE_REPORT_DIR "${CMAKE_BINARY_DIR}/coverage-report")
-
-    add_custom_target(coverage
-      # Run tests via ctest with profiling output directed to profraw dir
-      COMMAND ${TEST_ENV_PREFIX}
-        ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} -j
-      # Merge profiling data
-      COMMAND sh -c "${LLVM_PROFDATA} merge -sparse ${PROFRAW_DIR}/*.profraw -o ${PROFDATA_FILE}"
-      # Print coverage summary
-      COMMAND ${LLVM_COV} report ${SHARED_LIB_PATH}
-        --instr-profile=${PROFDATA_FILE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/
-      # Generate HTML report
-      COMMAND ${LLVM_COV} show ${SHARED_LIB_PATH}
-        --instr-profile=${PROFDATA_FILE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/
-        --format=html
-        --output-dir=${COVERAGE_REPORT_DIR}
-      WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-      DEPENDS ${TEST_TARGETS}
-      COMMENT "Running tests and generating Rust code coverage report..."
-    )
-  endif()
+  add_test(NAME lancedb_fts_tests COMMAND $<TARGET_FILE:lancedb_fts_tests>)
 endif()
 
 # Compile and run the public header with a strict C17 consumer. The source has
@@ -853,17 +764,13 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
-  if(TARGET coverage)
-    add_dependencies(coverage lancedb_c17_consumer)
-  endif()
-
   set(_c17_ctest_config_args)
   if(CMAKE_CONFIGURATION_TYPES)
     set(_c17_ctest_config_args -C $<CONFIG>)
   endif()
 
   add_custom_target(check-c17
-    COMMAND ${TEST_ENV_PREFIX} ${CMAKE_CTEST_COMMAND}
+    COMMAND ${CMAKE_CTEST_COMMAND}
       --test-dir ${CMAKE_CURRENT_BINARY_DIR}
       ${_c17_ctest_config_args}
       -R "^lancedb_c17_consumer$"
@@ -875,7 +782,7 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
   )
 
   add_test(NAME lancedb_c17_consumer
-    COMMAND ${TEST_ENV_PREFIX} $<TARGET_FILE:lancedb_c17_consumer>
+    COMMAND $<TARGET_FILE:lancedb_c17_consumer>
       ${CMAKE_CURRENT_BINARY_DIR}/c17-consumer-db
   )
 
@@ -975,11 +882,6 @@ if(BUILD_CONSUMER_TEST)
   message(STATUS "Consumer test: Enabled")
 else()
   message(STATUS "Consumer test: Disabled (use -DBUILD_CONSUMER_TEST=ON to enable)")
-endif()
-if(BUILD_COVERAGE)
-  message(STATUS "Coverage: Enabled")
-else()
-  message(STATUS "Coverage: Disabled (use -DBUILD_COVERAGE=ON to enable)")
 endif()
 if(BUILD_DOCS)
   message(STATUS "Documentation: Enabled")
