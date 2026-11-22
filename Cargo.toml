@@ -38,10 +38,10 @@ fp16kernels = ["lancedb/fp16kernels"]
 [dependencies]
 tokio = { version = "1.23", features = ["rt-multi-thread"] }
 libc = "0.2"
-lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.21", default-features = false }
-lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
-lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
-lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.25" }
+lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.22", default-features = false }
+lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.26" }
+lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.26" }
+lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.26" }
 arrow-array = "59.2.0"
 arrow-ipc = "59.2.0"
 arrow-schema = "59.2.0"

@@ -17,6 +17,7 @@ use lance_namespace::models::{
     CreateNamespaceRequest, DescribeNamespaceRequest, DropNamespaceRequest,
 };
 use lancedb::connection::{connect, ConnectBuilder, Connection, TableNamesBuilder};
+use lancedb::database::ReadConsistency;
 use lancedb::utils::validate_table_name;
 use lancedb::Table;
 
@@ -30,6 +31,10 @@ use crate::types::LanceDBRecordBatchReader;
 #[repr(C)]
 pub struct LanceDBConnectBuilder {
     inner: Box<ConnectBuilder>,
+    // The SDK dispatches every URI starting with "db" to its remote path. Keep
+    // the same classification so remote-only setters never land in a native
+    // storage provider's options.
+    is_remote: bool,
 }
 
 /// Opaque handle to a Connection
@@ -317,6 +322,22 @@ pub struct LanceDBSessionCacheStats {
     pub size_bytes: usize,
 }
 
+/// Read consistency mode reported to C callers
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanceDBReadConsistencyType {
+    Manual = 0,
+    Eventual = 1,
+    Strong = 2,
+}
+
+/// Read consistency of a connection returned to C callers
+#[repr(C)]
+pub struct LanceDBReadConsistency {
+    pub kind: LanceDBReadConsistencyType,
+    pub interval_ms: u64,
+}
+
 const DEFAULT_INDEX_CACHE_SIZE_BYTES: usize = 6 * 1024 * 1024 * 1024;
 const DEFAULT_METADATA_CACHE_SIZE_BYTES: usize = 1024 * 1024 * 1024;
 
@@ -389,7 +410,7 @@ unsafe fn single_namespace_from_c(
 ///
 /// An empty input returns a NULL array, matching the empty list contract of the
 /// public API. Returns NULL on allocation or interior-NUL failure.
-unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
+pub(crate) unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
     let count = values.len();
     if count == 0 {
         return Some(ptr::null_mut());
@@ -412,7 +433,7 @@ unsafe fn c_string_array(values: Vec<String>) -> Option<*mut *mut c_char> {
 }
 
 /// Free an array returned by `c_string_array`.
-unsafe fn free_c_string_array(values: *mut *mut c_char, count: usize) {
+pub(crate) unsafe fn free_c_string_array(values: *mut *mut c_char, count: usize) {
     if values.is_null() {
         return;
     }
@@ -492,6 +513,122 @@ unsafe fn write_string_list(
     }
 }
 
+/// Wrap an updated SDK builder for C callers
+fn connect_builder_handle(builder: ConnectBuilder, is_remote: bool) -> *mut LanceDBConnectBuilder {
+    Box::into_raw(Box::new(LanceDBConnectBuilder {
+        inner: Box::new(builder),
+        is_remote,
+    }))
+}
+
+#[cfg(feature = "remote")]
+fn apply_api_key(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.api_key(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_api_key(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+#[cfg(feature = "remote")]
+fn apply_region(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.region(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_region(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+#[cfg(feature = "remote")]
+fn apply_host_override(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.host_override(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_host_override(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+#[cfg(feature = "remote")]
+fn apply_sql_host_override(builder: ConnectBuilder, value: &str) -> ConnectBuilder {
+    builder.sql_host_override(value)
+}
+
+#[cfg(not(feature = "remote"))]
+fn apply_sql_host_override(builder: ConnectBuilder, _value: &str) -> ConnectBuilder {
+    builder
+}
+
+/// Consume a builder and apply a remote-only string option
+///
+/// A NULL builder or value leaves nothing to return. The builder is consumed
+/// even when the value is invalid, matching the other consuming setters. Native
+/// connections keep the builder unchanged so the value cannot reach native
+/// storage options.
+unsafe fn connect_builder_with_remote_string(
+    builder: *mut LanceDBConnectBuilder,
+    value: *const c_char,
+    apply: impl FnOnce(ConnectBuilder, &str) -> ConnectBuilder,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if value.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(value) = CStr::from_ptr(value).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let is_remote = builder_box.is_remote;
+    let connect_builder = *builder_box.inner;
+    let updated_builder = if is_remote {
+        apply(connect_builder, value)
+    } else {
+        connect_builder
+    };
+    connect_builder_handle(updated_builder, is_remote)
+}
+
+/// Consume a builder and apply a key/value option
+///
+/// A NULL builder, key or value leaves nothing to return. The builder is
+/// consumed even when a string is invalid, matching the other consuming setters.
+unsafe fn connect_builder_with_key_value(
+    builder: *mut LanceDBConnectBuilder,
+    key: *const c_char,
+    value: *const c_char,
+    apply: impl FnOnce(ConnectBuilder, &str, &str) -> ConnectBuilder,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+
+    if key.is_null() || value.is_null() {
+        return ptr::null_mut();
+    }
+
+    let Ok(key) = CStr::from_ptr(key).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let Ok(value) = CStr::from_ptr(value).to_str() else {
+        return ptr::null_mut();
+    };
+
+    let is_remote = builder_box.is_remote;
+    let updated_builder = apply(*builder_box.inner, key, value);
+    connect_builder_handle(updated_builder, is_remote)
+}
+
 /// Create a ConnectBuilder for the given URI
 ///
 /// # Safety
@@ -512,11 +649,7 @@ pub unsafe extern "C" fn lancedb_connect(uri: *const c_char) -> *mut LanceDBConn
     };
 
     let builder = connect(str_uri);
-    let boxed_builder = Box::new(LanceDBConnectBuilder {
-        inner: Box::new(builder),
-    });
-
-    Box::into_raw(boxed_builder)
+    connect_builder_handle(builder, str_uri.starts_with("db"))
 }
 
 /// Execute the connection and return a Connection handle
@@ -579,31 +712,156 @@ pub unsafe extern "C" fn lancedb_connect_builder_storage_option(
     key: *const c_char,
     value: *const c_char,
 ) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_key_value(builder, key, value, |builder, key, value| {
+        builder.storage_option(key, value)
+    })
+}
+
+/// Set the API key for a LanceDB Enterprise or LanceDB Cloud connection
+///
+/// The value is only applied when the connection dispatches to the SDK remote
+/// path. Native connections keep their storage options unchanged.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `api_key` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_api_key(
+    builder: *mut LanceDBConnectBuilder,
+    api_key: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_remote_string(builder, api_key, apply_api_key)
+}
+
+/// Set the region for a db:// connection
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `region` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_region(
+    builder: *mut LanceDBConnectBuilder,
+    region: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_remote_string(builder, region, apply_region)
+}
+
+/// Set the host override for a LanceDB Enterprise connection
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `host_override` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_host_override(
+    builder: *mut LanceDBConnectBuilder,
+    host_override: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_remote_string(builder, host_override, apply_host_override)
+}
+
+/// Set the SQL service host override for a LanceDB Enterprise connection
+///
+/// The SQL endpoint is contacted only when the connection executes SQL.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `sql_host_override` must be a valid null-terminated C string
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_sql_host_override(
+    builder: *mut LanceDBConnectBuilder,
+    sql_host_override: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_remote_string(builder, sql_host_override, apply_sql_host_override)
+}
+
+/// Set an additional property for the connection's namespace client
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `key` and `value` must be valid null-terminated C strings
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_namespace_client_property(
+    builder: *mut LanceDBConnectBuilder,
+    key: *const c_char,
+    value: *const c_char,
+) -> *mut LanceDBConnectBuilder {
+    connect_builder_with_key_value(builder, key, value, |builder, key, value| {
+        builder.namespace_client_property(key, value)
+    })
+}
+
+/// Enable or disable manifest-backed directory namespace mode
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_manifest_enabled(
+    builder: *mut LanceDBConnectBuilder,
+    enabled: bool,
+) -> *mut LanceDBConnectBuilder {
     if builder.is_null() {
         return ptr::null_mut();
     }
 
     let builder_box = Box::from_raw(builder);
+    let is_remote = builder_box.is_remote;
+    let updated_builder = (*builder_box.inner).manifest_enabled(enabled);
+    connect_builder_handle(updated_builder, is_remote)
+}
 
-    if key.is_null() || value.is_null() {
+/// Set the read consistency interval in milliseconds
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_read_consistency_interval_ms(
+    builder: *mut LanceDBConnectBuilder,
+    interval_ms: u64,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
         return ptr::null_mut();
     }
 
-    let Ok(key_str) = CStr::from_ptr(key).to_str() else {
-        return ptr::null_mut();
-    };
-
-    let Ok(value_str) = CStr::from_ptr(value).to_str() else {
-        return ptr::null_mut();
-    };
-
-    let connect_builder = *builder_box.inner;
-    let updated_builder = connect_builder.storage_option(key_str, value_str);
-    let boxed_builder = Box::new(LanceDBConnectBuilder {
-        inner: Box::new(updated_builder),
-    });
-
-    Box::into_raw(boxed_builder)
+    let builder_box = Box::from_raw(builder);
+    let is_remote = builder_box.is_remote;
+    let updated_builder = (*builder_box.inner)
+        .read_consistency_interval(std::time::Duration::from_millis(interval_ms));
+    connect_builder_handle(updated_builder, is_remote)
 }
 
 /// Set a session for the connection builder
@@ -626,6 +884,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_session(
     }
 
     let builder_box = Box::from_raw(builder);
+    let is_remote = builder_box.is_remote;
     let connect_builder = *builder_box.inner;
 
     let updated_builder = if session.is_null() {
@@ -635,11 +894,7 @@ pub unsafe extern "C" fn lancedb_connect_builder_session(
         connect_builder.session(session_ref.inner.clone())
     };
 
-    let boxed_builder = Box::new(LanceDBConnectBuilder {
-        inner: Box::new(updated_builder),
-    });
-
-    Box::into_raw(boxed_builder)
+    connect_builder_handle(updated_builder, is_remote)
 }
 
 /// Free a ConnectBuilder
@@ -682,6 +937,49 @@ pub unsafe extern "C" fn lancedb_connection_uri(
     });
 
     cached_uri.as_ptr()
+}
+
+/// Get the read consistency of a connection
+///
+/// # Safety
+/// - `connection` must be a valid pointer returned from `lancedb_connect_builder_execute`
+/// - `consistency_out` must be a valid pointer to receive the read consistency
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On success, `consistency_out` is set to the SDK's read consistency. On
+/// failure, it is left unchanged, so a caller can keep its own sentinel there.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connection_read_consistency(
+    connection: *const LanceDBConnection,
+    consistency_out: *mut LanceDBReadConsistency,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if connection.is_null() || consistency_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let read_consistency = match get_runtime().block_on((*connection).inner.read_consistency()) {
+        Ok(read_consistency) => read_consistency,
+        Err(error) => return handle_error(&error, error_message),
+    };
+
+    let (kind, interval_ms) = match read_consistency {
+        ReadConsistency::Manual => (LanceDBReadConsistencyType::Manual, 0),
+        ReadConsistency::Eventual(interval) => (
+            LanceDBReadConsistencyType::Eventual,
+            // The C setter only creates whole-millisecond intervals. Clamping
+            // keeps a duration from any other source representable in the
+            // fixed-width C field instead of truncating it.
+            u64::try_from(interval.as_millis()).unwrap_or(u64::MAX),
+        ),
+        ReadConsistency::Strong => (LanceDBReadConsistencyType::Strong, 0),
+    };
+
+    *consistency_out = LanceDBReadConsistency { kind, interval_ms };
+    LanceDBError::Success
 }
 
 /// Internal helper to create a session with optional custom registry
@@ -2237,4 +2535,111 @@ pub unsafe extern "C" fn lancedb_run_on_stack(
     stacker::maybe_grow(red_zone, stack_size, || {
         callback(user_data);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The SDK keeps builder options private. Debug is the observable builder
+    // representation at this boundary, so inspect it directly.
+    fn builder_debug(builder: *mut LanceDBConnectBuilder) -> String {
+        let builder = unsafe { &*builder };
+        format!("{:?}", builder.inner)
+    }
+
+    #[test]
+    fn dedicated_remote_strings_stay_out_of_native_options() {
+        let uri = CString::new("file:///tmp/lancedb-c-native-options").unwrap();
+        let secret = CString::new("dummy-native-secret").unwrap();
+        let value = CString::new("dummy-native-value").unwrap();
+
+        let builder = unsafe { lancedb_connect(uri.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_api_key(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_region(builder, value.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_host_override(builder, value.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_sql_host_override(builder, value.as_ptr()) };
+        assert!(!builder.is_null());
+
+        let debug = builder_debug(builder);
+        assert!(!debug.contains("remote_database_api_key"));
+        assert!(!debug.contains("remote_database_region"));
+        assert!(!debug.contains("remote_database_host_override"));
+        assert!(!debug.contains("remote_database_sql_host_override"));
+        assert!(!debug.contains(secret.to_str().unwrap()));
+
+        unsafe { lancedb_connect_builder_free(builder) };
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn dedicated_remote_strings_reach_the_remote_builder() {
+        let uri = CString::new("db://test").unwrap();
+        let secret = CString::new("dummy-remote-secret").unwrap();
+        let region = CString::new("us-east-1").unwrap();
+
+        let builder = unsafe { lancedb_connect(uri.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_api_key(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_region(builder, region.as_ptr()) };
+        assert!(!builder.is_null());
+
+        let debug = builder_debug(builder);
+        assert!(debug.contains("remote_database_api_key"));
+        assert!(debug.contains("remote_database_region"));
+        assert!(debug.contains(secret.to_str().unwrap()));
+
+        unsafe { lancedb_connect_builder_free(builder) };
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn remote_classification_matches_the_sdk_db_prefix() {
+        let uri = CString::new("db-not-a-uri").unwrap();
+        let secret = CString::new("dummy-malformed-remote-secret").unwrap();
+
+        let builder = unsafe { lancedb_connect(uri.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_api_key(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+
+        let debug = builder_debug(builder);
+        assert!(debug.contains("remote_database_api_key"));
+        assert!(debug.contains(secret.to_str().unwrap()));
+
+        unsafe { lancedb_connect_builder_free(builder) };
+    }
+
+    #[cfg(not(feature = "remote"))]
+    #[test]
+    fn remote_setters_validate_and_return_the_builder_without_remote_feature() {
+        let uri = CString::new("db://test").unwrap();
+        let secret = CString::new("dummy-no-remote-secret").unwrap();
+
+        let builder = unsafe { lancedb_connect(uri.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_api_key(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_region(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder = unsafe { lancedb_connect_builder_host_override(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+        let builder =
+            unsafe { lancedb_connect_builder_sql_host_override(builder, secret.as_ptr()) };
+        assert!(!builder.is_null());
+
+        let debug = builder_debug(builder);
+        assert!(!debug.contains("remote_database_api_key"));
+        assert!(!debug.contains("remote_database_region"));
+        assert!(!debug.contains("remote_database_host_override"));
+        assert!(!debug.contains("remote_database_sql_host_override"));
+        assert!(!debug.contains(secret.to_str().unwrap()));
+
+        unsafe { lancedb_connect_builder_free(builder) };
+    }
 }
