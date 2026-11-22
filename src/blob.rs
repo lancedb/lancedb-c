@@ -22,7 +22,7 @@ use arrow_schema::ffi::FFI_ArrowSchema;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use lancedb::blob::{BlobDescriptor, BlobDescriptorSource, BlobFile};
 
-use crate::arrow_ffi::import_borrowed_struct_array;
+use crate::arrow_ffi::import_descriptor_struct_array;
 use crate::connection::{get_runtime, LanceDBTable};
 use crate::error::{
     clear_error_message, handle_blob_file_error, handle_error, set_custom_error_message,
@@ -371,7 +371,7 @@ unsafe fn read_descriptor_row(
     })?;
     validate_descriptor_schema(&schema)?;
 
-    let array = import_borrowed_struct_array(array_ptr, schema_ptr).map_err(|error| {
+    let array = import_descriptor_struct_array(array_ptr, schema_ptr).map_err(|error| {
         DescriptorError::arrow(format!("Failed to import descriptor Arrow array: {error}"))
     })?;
 

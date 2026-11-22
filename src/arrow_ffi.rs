@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The LanceDB Authors
 
-//! Borrowed imports of Arrow C Data struct arrays.
+//! Private Arrow C Data decoding for the blob descriptor consumer.
 //!
-//! The C Data Interface transfers ownership of an `ArrowArray` when it is
-//! imported. Some C entry points only read an array for the duration of the
-//! call and leave the producer's release callback in the caller's hands. The
-//! helper here makes that borrowing explicit without parsing Arrow buffers by
-//! hand.
+//! This module intentionally stays out of `lancedb_json_matches`, which keeps
+//! its existing borrowed import and conversion semantics unchanged. The C Data
+//! Interface transfers ownership of an `ArrowArray` when it is imported, so the
+//! descriptor entry point copies the C struct and clears the release callback in
+//! the copy instead of taking the caller's array.
 
 use std::ptr;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ use lancedb::arrow::arrow_data::ArrayData;
 /// - `array` and `schema` must point to valid, initialized Arrow C Data structs
 /// - `array` must stay alive and unchanged for the lifetime of the returned array
 /// - `schema` must describe a struct array
-pub(crate) unsafe fn import_borrowed_struct_array(
+pub(crate) unsafe fn import_descriptor_struct_array(
     array: *const FFI_ArrowArray,
     schema: *const FFI_ArrowSchema,
 ) -> Result<StructArray, ArrowError> {
