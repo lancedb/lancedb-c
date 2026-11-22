@@ -621,9 +621,11 @@ def compare_declarations(
         right_members = generated.enums.get(name)
         if right_members is None:
             # These are header-only bit masks, not Rust enums. Their values are
-            # covered by the C++ optimize and update option tests rather than cbindgen.
+            # covered by the C++ optimize, update and open-table option tests
+            # rather than cbindgen.
             if name in (
                 "LanceDBCompactionField",
+                "LanceDBOpenTableField",
                 "LanceDBPruneField",
                 "LanceDBUpdateField",
             ):
