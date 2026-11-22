@@ -1268,14 +1268,13 @@ typedef enum {
  * default. An unknown set_fields bit is rejected with LANCEDB_INVALID_ARGUMENT
  * before the update starts.
  *
- * retries is a failed-attempt threshold, not a replay count: the SDK increments
- * its failure counter before testing it against the budget. With repeated 409
- * responses, 1 returns the first retryable failure without resending, while 3
- * can resend twice and returns the third failure. A positive N therefore allows
- * at most N-1 resends after the initial failed attempt. Embedded tables ignore
- * it. Leave the LANCEDB_UPDATE_RETRIES bit unset to keep the SDK default; set it
- * with 0 to disable retries explicitly. Ambiguous write results are never
- * replayed.
+ * retries is a failed-attempt threshold, not a replay count. For a sequence of
+ * retryable HTTP status responses, the SDK increments its request-failure
+ * counter before testing it against the budget: with repeated 409 responses, 1
+ * returns the first failure without resending, while 3 can resend twice and
+ * returns the third failure. Embedded tables ignore it. Leave the
+ * LANCEDB_UPDATE_RETRIES bit unset to keep the SDK default; set it with 0 to
+ * disable retries explicitly. Ambiguous write results are never replayed.
  *
  * The options struct is borrowed for the duration of the call and is not consumed.
  */
@@ -1373,10 +1372,10 @@ LanceDBError lancedb_table_update_with_options(
  *
  * Every field is copied unchanged from the SDK's DeleteResult; this layer does
  * not fill in or synthesize a value. The SDK defaults each field missing from a
- * remote response to zero independently, so a version-only response leaves
- * num_deleted_rows at zero and a count-only response leaves version at zero.
- * Zero therefore means "not reported" for that field, not necessarily no rows
- * or no commit. An empty legacy response leaves both fields zero.
+ * remote response to zero independently: a version-only response leaves
+ * num_deleted_rows at zero, and a count-only response leaves version at zero.
+ * Zero can mean "not reported"; a reported num_deleted_rows of zero is also
+ * valid when no rows matched. An empty legacy response leaves both fields zero.
  */
 typedef struct {
     uint64_t num_deleted_rows;  // Rows deleted; 0 may mean not reported
