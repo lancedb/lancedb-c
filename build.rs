@@ -19,6 +19,8 @@ const DEV_VERSION: &str = "0.0.0-dev";
 fn main() {
     println!("cargo:rerun-if-env-changed=LANCEDB_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=LANCEDB_VERSION");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=LANCEDB_REAL_LINKER");
 
     let root = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -26,7 +28,6 @@ fn main() {
     if root.join(".git").exists() {
         emit_git_rerun_paths(&root);
     }
-    require_export_control_config();
     emit_export_control_watch(&root);
 
     let version = resolve_version(&root);
@@ -35,22 +36,9 @@ fn main() {
     emit_export_controls(&root);
 }
 
-fn require_export_control_config() {
-    if env::var_os("LANCEDB_EXPORT_CONTROL_CONFIG").is_none() {
-        panic!(
-            "lancedb-c requires the repository .cargo/config.toml export-control linker; \
-             run Cargo from the repository root or use the documented CMake/package entry"
-        );
-    }
-}
-
 fn emit_export_control_watch(root: &Path) {
     let mut fingerprint = 0xcbf29ce484222325_u64;
-    for relative in [
-        ".cargo/config.toml",
-        "cmake/export-linker.sh",
-        "cmake/export-linker.cmd",
-    ] {
+    for relative in ["cmake/export-linker.sh", "cmake/export-linker.cmd"] {
         let path = root.join(relative);
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes = fs::read(&path)
@@ -60,41 +48,24 @@ fn emit_export_control_watch(root: &Path) {
             fingerprint = fingerprint.wrapping_mul(0x100000001b3);
         }
     }
-    println!("cargo:rustc-env=LANCEDB_EXPORT_CONTROL_FINGERPRINT={fingerprint:016x}");
-}
-
-fn reject_linker_overrides(target: &str) {
-    let key = format!(
-        "CARGO_TARGET_{}_LINKER",
-        target.replace('-', "_").to_uppercase()
-    );
-    if env::var_os(&key).is_some() {
-        panic!(
-            "{key} would bypass the lancedb-c export-control linker; unset it or use the \
-             documented CMake/package entry"
-        );
-    }
-    for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
-        let Some(value) = env::var_os(name) else {
-            continue;
-        };
-        let value = value.to_string_lossy();
-        if value.contains("linker=") || value.contains("-Clinker") || value.contains("-C linker") {
-            panic!(
-                "{name} would bypass the lancedb-c export-control linker; remove the linker \
-                 override or use the documented CMake/package entry"
-            );
+    for name in ["CC", "LANCEDB_REAL_LINKER"] {
+        if let Some(value) = env::var_os(name) {
+            for byte in value.to_string_lossy().bytes() {
+                fingerprint ^= u64::from(byte);
+                fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+            }
+            fingerprint ^= 0xff;
+            fingerprint = fingerprint.wrapping_mul(0x100000001b3);
         }
     }
+    println!("cargo:rustc-env=LANCEDB_EXPORT_CONTROL_FINGERPRINT={fingerprint:016x}");
 }
 
 fn emit_export_controls(root: &Path) {
     let header_path = root.join("include/lancedb.h");
     println!("cargo:rerun-if-changed={}", header_path.display());
     let target = env::var("TARGET").expect("TARGET is set by Cargo");
-    let host = env::var("HOST").expect("HOST is set by Cargo");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
-    reject_linker_overrides(&target);
     let header = fs::read_to_string(&header_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", header_path.display()));
     let functions = public_functions(&header);
@@ -106,7 +77,7 @@ fn emit_export_controls(root: &Path) {
     }
 
     if target.ends_with("-pc-windows-msvc") {
-        emit_msvc_export_controls(&functions, &out_dir, &target, &host);
+        emit_msvc_export_controls(&functions, &out_dir, &target);
     } else if target.contains("-apple-darwin") {
         let mut text = String::new();
         for name in &functions {
@@ -121,10 +92,6 @@ fn emit_export_controls(root: &Path) {
             "cargo:rustc-env=LANCEDB_EXPORTED_SYMBOLS={}",
             path.display()
         );
-        // This sentinel is only understood by the repository linker wrapper.
-        // If Cargo is told to use another linker, the real linker rejects it
-        // instead of silently producing a library with dependency exports.
-        println!("cargo:rustc-cdylib-link-arg=-Wl,-lancedb-export-control");
     } else if target.contains("-linux-") {
         let mut text = String::from("{\n  global:\n");
         for name in &functions {
@@ -137,22 +104,12 @@ fn emit_export_controls(root: &Path) {
         fs::write(&path, text)
             .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
         println!("cargo:rustc-env=LANCEDB_EXPORT_MAP={}", path.display());
-        // See the Mach-O sentinel above. GNU ld and LLD both reject this
-        // unknown option if the wrapper is bypassed.
-        println!("cargo:rustc-cdylib-link-arg=-Wl,--lancedb-export-control");
     }
 }
 
-fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str, host: &str) {
-    // MSVC cross-compilation from a non-Windows host has no native lib.exe.
-    // The supported Windows packages are built on native Windows runners.
-    if !host.contains("windows") {
-        println!("cargo:warning=skipping MSVC export controls for {target} on host {host}");
-        return;
-    }
+fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str) {
     let output_dir = cargo_output_dir(out_dir);
     let deps_dir = output_dir.join("deps");
-
     let mut definition = String::from("LIBRARY lancedb.dll\nEXPORTS\n");
     for name in functions {
         definition.push_str("  ");
@@ -170,28 +127,18 @@ fn emit_msvc_export_controls(functions: &[String], out_dir: &Path, target: &str,
     } else {
         panic!("unsupported MSVC architecture in target {target}");
     };
-    // Keep every generated file under OUT_DIR. Cargo and rustc replace the
-    // normal output basename in the profile and deps directories, so an export
-    // file or import library there can disappear before the final link.
-    let import_library = out_dir.join("lancedb.dll.lib");
-    let status = Command::new("lib.exe")
-        .arg("/nologo")
-        .arg(format!("/DEF:{}", definition_path.display()))
-        .arg(format!("/OUT:{}", import_library.display()))
-        .arg(format!("/MACHINE:{machine}"))
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run lib.exe: {error}"));
-    if !status.success() {
-        panic!("lib.exe did not create {}", import_library.display());
-    }
-    let export_file = out_dir.join("lancedb.dll.exp");
-    if !export_file.is_file() {
-        panic!("lib.exe did not create {}", export_file.display());
-    }
-    println!("cargo:rustc-cdylib-link-arg={}", export_file.display());
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_DEF={}",
+        definition_path.display()
+    );
+    println!("cargo:rustc-env=LANCEDB_MSVC_MACHINE={machine}");
     println!(
         "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY={}",
-        import_library.display()
+        out_dir.join("lancedb.dll.lib").display()
+    );
+    println!(
+        "cargo:rustc-env=LANCEDB_MSVC_EXPORT_FILE={}",
+        out_dir.join("lancedb.dll.exp").display()
     );
     println!(
         "cargo:rustc-env=LANCEDB_MSVC_IMPORT_LIBRARY_DEPS={}",

@@ -24,8 +24,68 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import check_exports
 import package
 import version
+
+
+class ExportCheckTests(unittest.TestCase):
+    def test_elf_exports_count_defined_data_and_skip_undefined(self) -> None:
+        output = """\
+  1: 0000000000001000    12 FUNC    GLOBAL DEFAULT   12 lancedb_public
+  2: 0000000000002000     4 OBJECT  GLOBAL DEFAULT   20 incidental_data
+  3: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND missing_symbol
+  4: 0000000000003000     4 OBJECT  LOCAL  DEFAULT   20 local_data
+"""
+        with mock.patch(
+            "check_exports.run",
+            return_value=subprocess.CompletedProcess([], 0, output, ""),
+        ):
+            self.assertEqual(
+                check_exports._elf_exports(Path("liblancedb.so")),
+                {"lancedb_public", "incidental_data"},
+            )
+
+    def test_pe_exports_read_counts_before_labels_and_forwarders(self) -> None:
+        output = """\
+Dump of file lancedb.dll
+
+  Section contains the following exports for lancedb.dll
+
+          1 ordinal base
+          2 number of functions
+          2 number of names
+
+    ordinal hint RVA      name
+
+          1    0 00001000 lancedb_public
+          2    1           forwarded_name (forwarded to other.dll.other)
+"""
+        with mock.patch(
+            "check_exports.run",
+            return_value=subprocess.CompletedProcess([], 0, output, ""),
+        ):
+            self.assertEqual(
+                check_exports._pe_exports(Path("lancedb.dll")),
+                {"lancedb_public", "forwarded_name"},
+            )
+
+    def test_pe_exports_reject_ordinal_only_entries(self) -> None:
+        output = """\
+          2 number of functions
+          1 number of names
+
+    ordinal hint RVA      name
+
+          1    0 00001000 lancedb_public
+          2    1 00001010
+"""
+        with mock.patch(
+            "check_exports.run",
+            return_value=subprocess.CompletedProcess([], 0, output, ""),
+        ):
+            with self.assertRaises(SystemExit):
+                check_exports._pe_exports(Path("lancedb.dll"))
 
 
 class PackageFixture(unittest.TestCase):

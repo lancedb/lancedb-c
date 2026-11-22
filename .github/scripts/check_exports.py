@@ -196,18 +196,40 @@ def _macho_exports(library: Path) -> set[str]:
 def _pe_exports(library: Path) -> set[str]:
     output = run(["dumpbin", "/nologo", "/exports", str(library)]).stdout
     exports: set[str] = set()
+    in_exports = False
     for line in output.splitlines():
+        if re.match(r"^\s*ordinal\s+hint\s+RVA\s+name\s*$", line, re.IGNORECASE):
+            in_exports = True
+            continue
+        if not in_exports:
+            continue
+        # Normal exports have an RVA. Forwarded exports omit it and put the
+        # forwarded target after the exported name.
         match = re.match(
-            r"^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)\s*$", line
+            r"^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)", line
         )
-        if match:
+        if match is None:
+            match = re.match(r"^\s+\d+\s+[0-9A-Fa-f]+\s+(\S+)", line)
+        if match is not None:
             exports.add(match.group(1))
     function_count = re.search(
-        r"number of functions\s+([0-9A-Fa-f]+)", output, re.IGNORECASE
+        r"^\s*([0-9A-Fa-f]+)\s+number of functions\s*$",
+        output,
+        re.IGNORECASE | re.MULTILINE,
     )
+    if function_count is None:
+        function_count = re.search(
+            r"number of functions\s+([0-9A-Fa-f]+)", output, re.IGNORECASE
+        )
     name_count = re.search(
-        r"number of names\s+([0-9A-Fa-f]+)", output, re.IGNORECASE
+        r"^\s*([0-9A-Fa-f]+)\s+number of names\s*$",
+        output,
+        re.IGNORECASE | re.MULTILINE,
     )
+    if name_count is None:
+        name_count = re.search(
+            r"number of names\s+([0-9A-Fa-f]+)", output, re.IGNORECASE
+        )
     if function_count and name_count:
         functions = int(function_count.group(1), 16)
         names = int(name_count.group(1), 16)
@@ -216,6 +238,11 @@ def _pe_exports(library: Path) -> set[str]:
                 f"{library} exports {functions} functions but only {names} names; "
                 "ordinal-only exports are not part of the public header"
             )
+    elif function_count and int(function_count.group(1), 16) != len(exports):
+        raise SystemExit(
+            f"{library} exports {function_count.group(1)} functions but named "
+            f"{len(exports)}; the export table could not be read completely"
+        )
     return exports
 
 

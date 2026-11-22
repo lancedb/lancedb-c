@@ -2,15 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The LanceDB Authors
 #
-# Replace rustc's generated export list only for the lancedb cdylib link.
-# Build.rs adds an unknown sentinel option so a bypassed wrapper fails in the
-# real linker instead of silently exporting dependency symbols. Every other
-# link invocation is forwarded unchanged.
+# Replace rustc's generated export list for the explicitly configured
+# lancedb shared-library link. Ordinary Cargo builds do not use this wrapper.
 
 set -euo pipefail
 
 args=("$@")
 temp_files=()
+
+# rustc and the compiler driver split -Wl options at commas. Keep generated
+# list paths comma-free even when the checkout path contains one.
+export_map=${LANCEDB_EXPORT_MAP:-}
+export_symbols=${LANCEDB_EXPORTED_SYMBOLS:-}
+if [[ -n "$export_map" && "$export_map" == *,* ]]; then
+  comma_free=$(mktemp "${TMPDIR:-/tmp}/lancedb-export-map.XXXXXX")
+  cp "$export_map" "$comma_free"
+  temp_files+=("$comma_free")
+  export_map=$comma_free
+fi
+if [[ -n "$export_symbols" && "$export_symbols" == *,* ]]; then
+  comma_free=$(mktemp "${TMPDIR:-/tmp}/lancedb-export-symbols.XXXXXX")
+  cp "$export_symbols" "$comma_free"
+  temp_files+=("$comma_free")
+  export_symbols=$comma_free
+fi
 
 cleanup() {
   for file in "${temp_files[@]}"; do
@@ -26,144 +41,254 @@ escape_response_arg() {
   printf '%s' "$value"
 }
 
-# Rewrite a rustc response file in place, preserving one argument per line.
-# Returns non-zero when the sentinel is present but no rustc export control was
-# found, so an unexpected rustc change cannot bypass filtering.
+# Rewrite one rustc response file. Rustc writes one escaped argument per line.
+# The returns non-zero only when a file was expected to contain an export
+# control but did not, so a compiler change cannot silently bypass filtering.
 rewrite_response_file() {
   local input=$1
   local output=$2
-  local sentinel=$3
-  local kind=$4
+  local kind=$3
   local pending=""
   local replaced=0
   local line
 
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == "$sentinel" ]]; then
-      continue
-    fi
+    case "$pending" in
+      elf_wl)
+        printf '%s\n' "-Wl,--version-script=$(escape_response_arg "$export_map")" >>"$output"
+        pending=""
+        replaced=1
+        continue
+        ;;
+      elf_direct)
+        printf '%s\n' "--version-script=$(escape_response_arg "$export_map")" >>"$output"
+        pending=""
+        replaced=1
+        continue
+        ;;
+      elf_xl)
+        if [[ "$line" == --version-script=* ]]; then
+          printf '%s\n' "--version-script=$(escape_response_arg "$export_map")" >>"$output"
+          pending=""
+          replaced=1
+          continue
+        fi
+        if [[ "$line" == "--version-script" ]]; then
+          pending="elf_xl_path"
+          continue
+        fi
+        printf '%s\n' "$line" >>"$output"
+        pending=""
+        continue
+        ;;
+      elf_xl_path)
+        printf '%s\n' "--version-script=$(escape_response_arg "$export_map")" >>"$output"
+        pending=""
+        replaced=1
+        continue
+        ;;
+      macho_wl)
+        if [[ "$line" == -Wl,* ]]; then
+          printf '%s\n' "-Wl,-exported_symbols_list,$(escape_response_arg "$export_symbols")" >>"$output"
+          pending=""
+          replaced=1
+          continue
+        fi
+        if [[ "$line" == "-Xlinker" ]]; then
+          printf '%s\n' "-Xlinker" >>"$output"
+          pending="macho_xl_path"
+          continue
+        fi
+        printf '%s\n' "-Wl,-exported_symbols_list,$(escape_response_arg "$export_symbols")" >>"$output"
+        pending=""
+        replaced=1
+        continue
+        ;;
+      macho_xl_opt)
+        if [[ "$line" == "-exported_symbols_list" ]]; then
+          printf '%s\n' "$line" >>"$output"
+          pending="macho_xl_opt_path"
+        else
+          printf '%s\n' "$line" >>"$output"
+          pending=""
+        fi
+        continue
+        ;;
+      macho_xl_opt_path)
+        if [[ "$line" == "-Xlinker" ]]; then
+          printf '%s\n' "-Xlinker" >>"$output"
+          pending="macho_xl_direct_path"
+        else
+          printf '%s\n' "$(escape_response_arg "$export_symbols")" >>"$output"
+          pending=""
+          replaced=1
+        fi
+        continue
+        ;;
+      macho_xl_direct_path)
+        printf '%s\n' "$(escape_response_arg "$export_symbols")" >>"$output"
+        pending=""
+        replaced=1
+        continue
+        ;;
+      macho_xl_path)
+        printf '%s\n' "-exported_symbols_list" "-Xlinker" "$(escape_response_arg "$export_symbols")" >>"$output"
+        pending=""
+        replaced=1
+        continue
+        ;;
+    esac
+
     if [[ "$kind" == "elf" ]]; then
       case "$line" in
-        -Wl,--version-script=* | --version-script=*)
-          printf '%s\n' "-Wl,--version-script=$(escape_response_arg "$LANCEDB_EXPORT_MAP")" >>"$output"
+        -Wl,--version-script=*)
+          printf '%s\n' "-Wl,--version-script=$(escape_response_arg "$export_map")" >>"$output"
           replaced=1
           continue
           ;;
-        -Wl,--version-script | --version-script)
-          pending="elf"
+        --version-script=*)
+          printf '%s\n' "--version-script=$(escape_response_arg "$export_map")" >>"$output"
+          replaced=1
+          continue
+          ;;
+        -Wl,--version-script)
+          pending="elf_wl"
+          continue
+          ;;
+        --version-script)
+          pending="elf_direct"
+          continue
+          ;;
+        -Xlinker)
+          printf '%s\n' "$line" >>"$output"
+          pending="elf_xl"
           continue
           ;;
       esac
     else
       case "$line" in
-        -Wl,-exported_symbols_list,* | -exported_symbols_list,*)
-          printf '%s\n' "-Wl,-exported_symbols_list,$(escape_response_arg "$LANCEDB_EXPORTED_SYMBOLS")" >>"$output"
+        -Wl,-exported_symbols_list,*)
+          printf '%s\n' "-Wl,-exported_symbols_list,$(escape_response_arg "$export_symbols")" >>"$output"
           replaced=1
           continue
           ;;
-        -Wl,-exported_symbols_list | -exported_symbols_list)
-          pending="macho"
+        -Wl,-exported_symbols_list)
+          pending="macho_wl"
+          continue
+          ;;
+        -Xlinker)
+          printf '%s\n' "$line" >>"$output"
+          pending="macho_xl_opt"
           continue
           ;;
       esac
     fi
-    if [[ -n "$pending" ]]; then
-      if [[ "$pending" == "elf" ]]; then
-        printf '%s\n' "-Wl,--version-script=$(escape_response_arg "$LANCEDB_EXPORT_MAP")" >>"$output"
-      else
-        printf '%s\n' "-Wl,-exported_symbols_list,$(escape_response_arg "$LANCEDB_EXPORTED_SYMBOLS")" >>"$output"
-      fi
-      pending=""
-      replaced=1
-      continue
-    fi
     printf '%s\n' "$line" >>"$output"
   done <"$input"
 
+  if [[ -n "$pending" ]]; then
+    echo "export-linker: truncated export control in response file $input" >&2
+    return 1
+  fi
   if ((replaced == 0)); then
     echo "export-linker: no export control in rustc response file $input" >&2
     return 1
   fi
 }
 
-have_sentinel=0
-response_rewritten=0
 if [[ -n "${LANCEDB_EXPORT_MAP:-}" ]]; then
-  sentinel="-Wl,--lancedb-export-control"
   kind="elf"
 elif [[ -n "${LANCEDB_EXPORTED_SYMBOLS:-}" ]]; then
-  sentinel="-Wl,-lancedb-export-control"
   kind="macho"
 else
-  sentinel=""
   kind=""
 fi
 
-if [[ -n "$sentinel" ]]; then
+if [[ -n "$kind" ]]; then
+  response_rewritten=0
   for ((index = 0; index < ${#args[@]}; index++)); do
     arg=${args[index]}
     if [[ "$arg" != @* ]]; then
       continue
     fi
     response_file=${arg#@}
-    if [[ ! -f "$response_file" ]] || ! grep -Fqx -- "$sentinel" "$response_file"; then
+    if [[ ! -f "$response_file" ]]; then
       continue
     fi
     temp_file=$(mktemp "${TMPDIR:-/tmp}/lancedb-link-args.XXXXXX")
     temp_files+=("$temp_file")
-    if ! rewrite_response_file "$response_file" "$temp_file" "$sentinel" "$kind"; then
-      cleanup
-      exit 1
+    if rewrite_response_file "$response_file" "$temp_file" "$kind"; then
+      args[index]="@$temp_file"
+      response_rewritten=1
+    else
+      rm -f "$temp_file"
+      temp_files=("${temp_files[@]/$temp_file}")
     fi
-    args[index]="@$temp_file"
-    have_sentinel=1
-    response_rewritten=1
   done
-fi
 
-filtered=()
-for arg in "${args[@]}"; do
-  if [[ -n "$sentinel" && "$arg" == "$sentinel" ]]; then
-    have_sentinel=1
-    continue
-  fi
-  filtered+=("$arg")
-done
-args=("${filtered[@]}")
-
-if ((have_sentinel)); then
   replaced=$response_rewritten
   for ((index = 0; index < ${#args[@]}; index++)); do
     if [[ "$kind" == "elf" ]]; then
       case "${args[index]}" in
-        -Wl,--version-script=* | --version-script=*)
-          args[index]="-Wl,--version-script=${LANCEDB_EXPORT_MAP}"
+        -Wl,--version-script=*)
+          args[index]="-Wl,--version-script=${export_map}"
           replaced=1
           ;;
-        -Wl,--version-script | --version-script)
-          args[index + 1]="${LANCEDB_EXPORT_MAP}"
+        --version-script=*)
+          args[index]="--version-script=${export_map}"
           replaced=1
+          ;;
+        -Wl,--version-script)
+          args[index+1]="${export_map}"
+          replaced=1
+          ;;
+        --version-script)
+          args[index+1]="${export_map}"
+          replaced=1
+          ;;
+        -Xlinker)
+          next=${args[index+1]:-}
+          if [[ "$next" == --version-script=* ]]; then
+            args[index+1]="--version-script=${export_map}"
+            replaced=1
+          elif [[ "$next" == "--version-script" ]]; then
+            args[index+2]="${export_map}"
+            replaced=1
+          fi
           ;;
       esac
     else
       case "${args[index]}" in
-        -Wl,-exported_symbols_list,* | -exported_symbols_list,*)
-          args[index]="-Wl,-exported_symbols_list,${LANCEDB_EXPORTED_SYMBOLS}"
+        -Wl,-exported_symbols_list,*)
+          args[index]="-Wl,-exported_symbols_list,${export_symbols}"
           replaced=1
           ;;
-        -Wl,-exported_symbols_list | -exported_symbols_list)
-          if [[ "${args[index + 1]:-}" == -Wl,* ]]; then
-            args[index + 1]="-Wl,${LANCEDB_EXPORTED_SYMBOLS}"
+        -Wl,-exported_symbols_list)
+          if [[ "${args[index+1]:-}" == -Wl,* ]]; then
+            args[index+1]="-Wl,${export_symbols}"
+          elif [[ "${args[index+1]:-}" == "-Xlinker" ]]; then
+            args[index+2]="${export_symbols}"
           else
-            args[index + 1]="${LANCEDB_EXPORTED_SYMBOLS}"
+            args[index+1]="${export_symbols}"
           fi
           replaced=1
+          ;;
+        -Xlinker)
+          if [[ "${args[index+1]:-}" == "-exported_symbols_list" ]]; then
+            if [[ "${args[index+2]:-}" == "-Xlinker" ]]; then
+              args[index+3]="${export_symbols}"
+            else
+              args[index+2]="${export_symbols}"
+            fi
+            replaced=1
+          fi
           ;;
       esac
     fi
   done
+
   if ((replaced == 0)); then
-    echo "export-linker: sentinel present but no export control was found" >&2
+    echo "export-linker: no export control was found in the lancedb link" >&2
     cleanup
     exit 1
   fi

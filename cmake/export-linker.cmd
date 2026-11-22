@@ -2,16 +2,26 @@
 REM SPDX-License-Identifier: Apache-2.0
 REM SPDX-FileCopyrightText: Copyright The LanceDB Authors
 REM
-REM Run the caller's MSVC linker and, after the lancedb DLL link, install the
-REM paired import library generated from the public export file. Every other
-REM link invocation is forwarded unchanged.
+REM Generate and use the paired MSVC export file for the explicitly configured
+REM lancedb shared-library link, then install the matching import library.
+REM Ordinary Cargo builds do not use this wrapper.
 
 setlocal EnableExtensions
 
 set "LANCEDB_LINKER=link.exe"
 if defined LANCEDB_REAL_LINKER set "LANCEDB_LINKER=%LANCEDB_REAL_LINKER%"
 
+if not defined LANCEDB_MSVC_DEF goto :link
+
+lib.exe /nologo /DEF:"%LANCEDB_MSVC_DEF%" /OUT:"%LANCEDB_MSVC_IMPORT_LIBRARY%" /MACHINE:%LANCEDB_MSVC_MACHINE%
+if errorlevel 1 exit /b 1
+"%LANCEDB_LINKER%" %* "%LANCEDB_MSVC_EXPORT_FILE%"
+goto :linked
+
+:link
 "%LANCEDB_LINKER%" %*
+
+:linked
 set "LANCEDB_STATUS=%ERRORLEVEL%"
 if not "%LANCEDB_STATUS%"=="0" exit /b %LANCEDB_STATUS%
 

@@ -1,21 +1,2 @@
 [env]
 AWS_LC_SYS_CMAKE_BUILDER = "1"
-# build.rs fails closed when Cargo discovers another configuration root.
-LANCEDB_EXPORT_CONTROL_CONFIG = "1"
-
-# The linker wrappers only replace the final liblancedb cdylib's export
-# controls. They forward build-script and external-provider links unchanged.
-[target.x86_64-unknown-linux-gnu]
-linker = "./cmake/export-linker.sh"
-
-[target.aarch64-unknown-linux-gnu]
-linker = "./cmake/export-linker.sh"
-
-[target.aarch64-apple-darwin]
-linker = "./cmake/export-linker.sh"
-
-[target.x86_64-pc-windows-msvc]
-linker = "./cmake/export-linker.cmd"
-
-[target.aarch64-pc-windows-msvc]
-linker = "./cmake/export-linker.cmd"

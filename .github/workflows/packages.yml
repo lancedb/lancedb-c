@@ -175,6 +175,7 @@ jobs:
         if: runner.os == 'macOS'
         run: >
           cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib --
+          -C "linker=${PWD}/cmake/export-linker.sh"
           -C link-arg=-Wl,-install_name,@rpath/liblancedb.dylib
 
       - name: Build shared library (Linux)
@@ -183,11 +184,14 @@ jobs:
         run: |
           soversion="$("${{ matrix.python }}" .github/scripts/version.py soversion)"
           cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib -- \
+            -C "linker=${PWD}/cmake/export-linker.sh" \
             -C "link-arg=-Wl,-soname,liblancedb.so.${soversion}"
 
       - name: Build shared library (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --release --locked --package lancedb-c --target ${{ matrix.target }}
+        run: >
+          cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib --
+          -C "linker=$env:GITHUB_WORKSPACE\cmake\export-linker.cmd"
 
       - name: Create package
         id: package

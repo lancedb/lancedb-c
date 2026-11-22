@@ -240,6 +240,15 @@ configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 # workflow. Linux records the versioned SONAME and macOS records an @rpath
 # install name so local installs and prebuilt packages resolve the same way.
 set(LANCEDB_RUST_LINK_ARGS)
+if(BUILD_SHARED_LIBS)
+  if(WIN32 AND MSVC AND CMAKE_HOST_WIN32)
+    list(APPEND LANCEDB_RUST_LINK_ARGS
+      "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.cmd")
+  elseif(NOT WIN32)
+    list(APPEND LANCEDB_RUST_LINK_ARGS
+      "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
+  endif()
+endif()
 if(APPLE)
   list(APPEND LANCEDB_RUST_LINK_ARGS
     "-C" "link-arg=-Wl,-install_name,@rpath/${LANCEDB_SHARED_LIBRARY_NAME}")
