@@ -299,6 +299,7 @@ class Allow:
 ENUM_PREFIXES = {
     "LanceDBError": "LANCEDB_",
     "LanceDBDistanceType": "LANCEDB_DISTANCE_",
+    "LanceDBNormalizeMethod": "LANCEDB_NORMALIZE_",
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
     "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
@@ -334,6 +335,7 @@ FUNCTION_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     ("lancedb_table_create_scalar_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
     ("lancedb_table_optimize", "optimize_type"): Allow(enum_int="LanceDBOptimizeType"),
     ("lancedb_vector_query_distance_type", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
+    ("lancedb_vector_query_norm", "normalize_method"): Allow(enum_int="LanceDBNormalizeMethod"),
     # Rust reads the Arrow C structures without mutating them; the public
     # header leaves the caller's pointers mutable.
     ("lancedb_json_matches", "arrays"): Allow(allow_const=True),
