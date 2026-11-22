@@ -195,26 +195,6 @@ reported with the affected function, argument, struct field or enumerator.
 Native C17 consumers remain platform runtime smoke tests rather than full
 declaration coverage, and MSVC C17 CI is owned by #107.
 
-### Code Coverage
-
-Generate a Rust code coverage report showing which `src/*.rs` lines are exercised by the C++ tests.
-
-**Dependencies:** `llvm` (provides `llvm-profdata` and `llvm-cov`)
-- RHEL/CentOS: `sudo dnf install llvm`
-- Ubuntu/Debian: `sudo apt-get install llvm`
-- Via rustup: `rustup component add llvm-tools-preview`
-
-**Build and run:**
-```bash
-mkdir -p build && cd build
-cmake .. -G Ninja -DBUILD_TESTS=ON -DBUILD_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
-ninja coverage
-```
-
-This runs all tests, prints a per-file coverage summary, and generates an HTML report at `build/coverage-report/index.html`.
-
-The latest coverage report from the `main` branch is available [here](https://nightly.link/lancedb/lancedb-c/workflows/coverage/main/coverage-report.zip).
-
 ## Documentation
 
 The LanceDB C API has comprehensive documentation generated from the header file comments.
