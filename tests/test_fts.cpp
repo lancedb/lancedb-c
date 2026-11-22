@@ -5,7 +5,10 @@
 
 #include "test_common.h"
 
+#include <cmath>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -57,6 +60,32 @@ std::vector<float> vector_for_row(int row) {
     vector[j] = static_cast<float>(row * 10 + static_cast<int>(j));
   }
   return vector;
+}
+
+std::shared_ptr<arrow::RecordBatch> create_fts_extra_record_batch(
+    int id, const std::string& text) {
+  auto schema = create_fts_test_schema();
+
+  arrow::Int32Builder id_builder;
+  arrow::StringBuilder text_builder;
+  arrow::FixedSizeListBuilder data_builder(
+      arrow::default_memory_pool(), std::make_unique<arrow::FloatBuilder>(), kDimensions);
+
+  REQUIRE(id_builder.Append(id).ok());
+  REQUIRE(text_builder.Append(text).ok());
+  auto list_builder = static_cast<arrow::FloatBuilder*>(data_builder.value_builder());
+  const auto vector = vector_for_row(id);
+  for (const float value : vector) {
+    REQUIRE(list_builder->Append(value).ok());
+  }
+  REQUIRE(data_builder.Append().ok());
+
+  std::shared_ptr<arrow::Array> id_array, text_array, data_array;
+  REQUIRE(id_builder.Finish(&id_array).ok());
+  REQUIRE(text_builder.Finish(&text_array).ok());
+  REQUIRE(data_builder.Finish(&data_array).ok());
+
+  return arrow::RecordBatch::Make(schema, 1, {id_array, text_array, data_array});
 }
 
 struct QueryResultBatches {
@@ -143,6 +172,54 @@ std::vector<int32_t> ordered_ids_of(const QueryResultBatches& result) {
 std::set<int32_t> ids_of(const QueryResultBatches& result) {
   const auto ordered = ordered_ids_of(result);
   return std::set<int32_t>(ordered.begin(), ordered.end());
+}
+
+float relevance_score_of(const QueryResultBatches& result, int32_t id) {
+  float score = 0.0F;
+  bool found = false;
+  for (const auto& batch : result.batches) {
+    auto id_column = batch->GetColumnByName("id");
+    auto score_column = batch->GetColumnByName("_relevance_score");
+    REQUIRE(id_column != nullptr);
+    REQUIRE(score_column != nullptr);
+    auto id_array = std::static_pointer_cast<arrow::Int32Array>(id_column);
+    auto score_array = std::static_pointer_cast<arrow::FloatArray>(score_column);
+    for (int64_t i = 0; i < id_array->length(); i++) {
+      if (id_array->Value(i) == id) {
+        REQUIRE(!found);
+        found = true;
+        score = score_array->Value(i);
+      }
+    }
+  }
+  REQUIRE(found);
+  return score;
+}
+
+std::map<int32_t, float> expected_rrf_scores(
+    const std::vector<int32_t>& vector_ids,
+    const std::vector<int32_t>& fts_ids,
+    float k) {
+  std::map<int32_t, float> scores;
+  for (size_t i = 0; i < vector_ids.size(); i++) {
+    scores[vector_ids[i]] += 1.0F / (k + static_cast<float>(i + 1));
+  }
+  for (size_t i = 0; i < fts_ids.size(); i++) {
+    scores[fts_ids[i]] += 1.0F / (k + static_cast<float>(i + 1));
+  }
+  return scores;
+}
+
+std::vector<int32_t> ids_ordered_by_score(const std::map<int32_t, float>& scores) {
+  std::vector<int32_t> ids;
+  ids.reserve(scores.size());
+  for (const auto& [id, _] : scores) {
+    ids.push_back(id);
+  }
+  std::sort(ids.begin(), ids.end(), [&](int32_t left, int32_t right) {
+    return scores.at(left) > scores.at(right);
+  });
+  return ids;
 }
 
 using LanceDBTablePtr = std::unique_ptr<LanceDBTable, void (*)(LanceDBTable*)>;
@@ -314,6 +391,62 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text search", "[fts]") {
     auto result = collect_query_result(lancedb_query_execute(query));
 
     REQUIRE(result.num_rows() == 0);
+  }
+}
+
+TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text row id and fast search", "[fts]") {
+  SECTION("with_row_id adds the actual metadata column") {
+    LanceDBQuery* query = lancedb_query_new(table());
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search(query, "doc7", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_with_row_id(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = collect_query_result(lancedb_query_execute(query));
+    REQUIRE(result.num_rows() == 1);
+    REQUIRE(ids_of(result) == std::set<int32_t>{7});
+    REQUIRE(result.schema->GetFieldByName("_rowid") != nullptr);
+
+    auto row_id_column = result.batches.at(0)->GetColumnByName("_rowid");
+    REQUIRE(row_id_column != nullptr);
+    auto row_id_array = std::static_pointer_cast<arrow::UInt64Array>(row_id_column);
+    REQUIRE(row_id_array->length() == 1);
+    REQUIRE(!row_id_array->IsNull(0));
+  }
+
+  SECTION("fast_search excludes rows appended after the text index") {
+    auto extra = create_fts_extra_record_batch(99, "doc99");
+    REQUIRE(lancedb_table_add(table(), create_reader_from_batch(extra), nullptr)
+        == LANCEDB_SUCCESS);
+
+    auto run_query = [&](bool fast_search) {
+      LanceDBQuery* query = lancedb_query_new(table());
+      REQUIRE(query != nullptr);
+
+      char* error_message = nullptr;
+      REQUIRE(lancedb_query_full_text_search(query, "doc99", "text", &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(lancedb_query_limit(query, 1, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      if (fast_search) {
+        REQUIRE(lancedb_query_fast_search(query, &error_message) == LANCEDB_SUCCESS);
+        REQUIRE(error_message == nullptr);
+      }
+
+      return collect_query_result(lancedb_query_execute(query));
+    };
+
+    auto unfiltered = run_query(false);
+    REQUIRE(unfiltered.num_rows() == 1);
+    REQUIRE(ids_of(unfiltered) == std::set<int32_t>{99});
+
+    auto fast = run_query(true);
+    REQUIRE(fast.num_rows() == 0);
   }
 }
 
@@ -492,6 +625,125 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - hybrid search", "[fts][vect
     REQUIRE(result.schema->GetFieldByName("id") != nullptr);
     REQUIRE(result.schema->GetFieldByName("text") == nullptr);
     REQUIRE(result.schema->GetFieldByName("_relevance_score") != nullptr);
+  }
+}
+
+TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - RRF k and normalization", "[fts][vector_query]") {
+  const auto query_vector = vector_for_row(0);
+  constexpr size_t limit = 10;
+  constexpr float custom_k = 12.0F;
+  constexpr float default_k = 60.0F;
+
+  auto run_vector_ids = [&]() {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return ordered_ids_of(collect_query_result(lancedb_vector_query_execute(query)));
+  };
+
+  auto run_fts_ids = [&]() {
+    LanceDBQuery* query = lancedb_query_new(table());
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search(query, "doc7", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return ordered_ids_of(collect_query_result(lancedb_query_execute(query)));
+  };
+
+  auto run_hybrid = [&](std::optional<float> k,
+                        std::optional<LanceDBNormalizeMethod> normalize_method) {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_full_text_search(query, "doc7", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    if (k.has_value()) {
+      REQUIRE(lancedb_vector_query_rerank_rrf(query, *k, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+    if (normalize_method.has_value()) {
+      REQUIRE(lancedb_vector_query_norm(query, *normalize_method, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+    return collect_query_result(lancedb_vector_query_execute(query));
+  };
+
+  const auto vector_ids = run_vector_ids();
+  const auto fts_ids = run_fts_ids();
+  // The fixture's row i vector is i * 10 + j, so the ten nearest vectors are
+  // rows 0..9. Only row 7 contains "doc7".
+  REQUIRE(vector_ids == std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+  REQUIRE(fts_ids == std::vector<int32_t>{7});
+
+  auto require_matches = [&](const QueryResultBatches& result, float k) {
+    REQUIRE(result.num_rows() == limit);
+    REQUIRE(result.schema->GetFieldByName("_relevance_score") != nullptr);
+
+    const auto expected = expected_rrf_scores(vector_ids, fts_ids, k);
+    const auto expected_order = ids_ordered_by_score(expected);
+    REQUIRE(ordered_ids_of(result) == expected_order);
+    for (const auto& [id, score] : expected) {
+      REQUIRE(std::abs(relevance_score_of(result, id) - score) < 1e-6F);
+    }
+  };
+
+  SECTION("an unset k uses the SDK default of 60") {
+    require_matches(run_hybrid(std::nullopt, std::nullopt), default_k);
+  }
+
+  SECTION("an explicit k changes every fusion score") {
+    auto custom = run_hybrid(custom_k, std::nullopt);
+    require_matches(custom, custom_k);
+
+    auto default_result = run_hybrid(std::nullopt, std::nullopt);
+    const auto expected_custom = expected_rrf_scores(vector_ids, fts_ids, custom_k);
+    const auto expected_default = expected_rrf_scores(vector_ids, fts_ids, default_k);
+    for (const auto& [id, score] : expected_custom) {
+      REQUIRE(std::abs(relevance_score_of(custom, id) - score) < 1e-6F);
+      REQUIRE(std::abs(relevance_score_of(default_result, id) - expected_default.at(id))
+          < 1e-6F);
+    }
+  }
+
+  SECTION("both normalization methods keep the RRF ranking and relevance scores") {
+    auto score_norm = run_hybrid(custom_k, LANCEDB_NORMALIZE_SCORE);
+    auto rank_norm = run_hybrid(custom_k, LANCEDB_NORMALIZE_RANK);
+    require_matches(score_norm, custom_k);
+    require_matches(rank_norm, custom_k);
+  }
+
+  SECTION("a reranker on a vector-only query does not change the rows") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_rerank_rrf(query, custom_k, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_norm(query, LANCEDB_NORMALIZE_RANK, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = collect_query_result(lancedb_vector_query_execute(query));
+    REQUIRE(ordered_ids_of(result) == std::vector<int32_t>{0, 1, 2});
   }
 }
 

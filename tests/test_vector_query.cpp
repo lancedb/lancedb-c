@@ -20,6 +20,88 @@ static std::vector<float> generate_random_query_vector(size_t dimensions) {
   return query_vector;
 }
 
+struct CollectedQueryRows {
+  std::shared_ptr<arrow::Schema> schema;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+
+  size_t num_rows() const {
+    size_t rows = 0;
+    for (const auto& batch : batches) {
+      rows += static_cast<size_t>(batch->num_rows());
+    }
+    return rows;
+  }
+};
+
+static CollectedQueryRows collect_query_rows(LanceDBQueryResult* query_result) {
+  REQUIRE(query_result != nullptr);
+
+  FFI_ArrowArray** result_arrays = nullptr;
+  FFI_ArrowSchema* result_schema = nullptr;
+  size_t count = 0;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_result_to_arrow(
+      query_result, &result_arrays, &result_schema, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  CollectedQueryRows collected;
+  if (count == 0) {
+    REQUIRE(result_arrays == nullptr);
+    REQUIRE(result_schema == nullptr);
+    return collected;
+  }
+
+  auto imported_schema = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(result_schema));
+  REQUIRE(imported_schema.ok());
+  collected.schema = imported_schema.ValueOrDie();
+
+  for (size_t i = 0; i < count; i++) {
+    auto imported_batch = arrow::ImportRecordBatch(
+        reinterpret_cast<ArrowArray*>(result_arrays[i]), collected.schema);
+    REQUIRE(imported_batch.ok());
+    collected.batches.push_back(imported_batch.ValueOrDie());
+  }
+
+  lancedb_free_arrow_arrays(result_arrays, count);
+  lancedb_free_arrow_schema(result_schema);
+  return collected;
+}
+
+static std::vector<std::string> keys_of(const CollectedQueryRows& rows) {
+  std::vector<std::string> keys;
+  for (const auto& batch : rows.batches) {
+    auto key_column = batch->GetColumnByName("key");
+    REQUIRE(key_column != nullptr);
+    auto key_array = std::static_pointer_cast<arrow::StringArray>(key_column);
+    for (int64_t i = 0; i < key_array->length(); i++) {
+      keys.push_back(key_array->GetString(i));
+    }
+  }
+  return keys;
+}
+
+static std::vector<uint64_t> row_ids_of(const CollectedQueryRows& rows) {
+  std::vector<uint64_t> row_ids;
+  for (const auto& batch : rows.batches) {
+    auto row_id_column = batch->GetColumnByName("_rowid");
+    REQUIRE(row_id_column != nullptr);
+    auto row_id_array = std::static_pointer_cast<arrow::UInt64Array>(row_id_column);
+    for (int64_t i = 0; i < row_id_array->length(); i++) {
+      REQUIRE(!row_id_array->IsNull(i));
+      row_ids.push_back(row_id_array->Value(i));
+    }
+  }
+  return row_ids;
+}
+
+static std::vector<float> vector_for_row(int row) {
+  std::vector<float> vector(TEST_SCHEMA_DIMENSIONS);
+  for (size_t j = 0; j < TEST_SCHEMA_DIMENSIONS; j++) {
+    vector[j] = static_cast<float>(row * 10 + static_cast<int>(j));
+  }
+  return vector;
+}
+
 // Count the rows across all batches in a query result and free the result.
 static size_t count_rows_and_free(LanceDBQueryResult* query_result) {
   REQUIRE(query_result != nullptr);
@@ -1304,6 +1386,93 @@ TEST_CASE_METHOD(LanceDBSessionFixture, "LanceDB Vector Query - repeated queries
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - row id, fast search and bypass flags", "[vector_query]") {
+  const std::string table_name = "vector_query_flags_test";
+  constexpr int indexed_rows = 128;
+  constexpr int appended_rows = 128;
+
+  LanceDBTable* table = create_table_with_data(table_name, indexed_rows, 0);
+  REQUIRE(table != nullptr);
+
+  const char* vector_columns[] = {"data"};
+  LanceDBVectorIndexConfig config = {
+    .num_partitions = 4,
+    .num_sub_vectors = -1,
+    .max_iterations = -1,
+    .sample_rate = 0.0f,
+    .distance_type = LANCEDB_DISTANCE_L2,
+    .replace = 0
+  };
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_vector_index(
+      table, vector_columns, 1, LANCEDB_INDEX_IVF_FLAT, &config, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  auto appended = create_test_record_batch(appended_rows, indexed_rows);
+  REQUIRE(lancedb_table_add(table, create_reader_from_batch(appended), nullptr) == LANCEDB_SUCCESS);
+
+  const auto query_vector = vector_for_row(indexed_rows + 72);
+
+  auto run_query = [&](bool fast_search, bool bypass_vector_index) {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_with_row_id(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    if (fast_search) {
+      REQUIRE(lancedb_vector_query_fast_search(query, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+    if (bypass_vector_index) {
+      REQUIRE(lancedb_vector_query_bypass_vector_index(query, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+
+    return collect_query_rows(lancedb_vector_query_execute(query));
+  };
+
+  SECTION("with_row_id returns the actual metadata column beside the nearest row") {
+    auto rows = run_query(false, false);
+    REQUIRE(rows.num_rows() == 1);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_200"});
+    REQUIRE(rows.schema->GetFieldByName("_rowid") != nullptr);
+    REQUIRE(row_ids_of(rows).size() == 1);
+  }
+
+  SECTION("fast_search returns only rows covered by the vector index") {
+    auto rows = run_query(true, false);
+    REQUIRE(rows.num_rows() == 1);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_127"});
+    REQUIRE(row_ids_of(rows).size() == 1);
+  }
+
+  SECTION("bypass_vector_index returns the exhaustive nearest row") {
+    auto indexed_rows_result = run_query(false, false);
+    auto bypassed = run_query(false, true);
+
+    REQUIRE(bypassed.num_rows() == 1);
+    REQUIRE(keys_of(bypassed) == std::vector<std::string>{"key_200"});
+    REQUIRE(row_ids_of(bypassed) == row_ids_of(indexed_rows_result));
+  }
+
+  SECTION("fast_search takes precedence over bypass_vector_index") {
+    auto rows = run_query(true, true);
+    REQUIRE(rows.num_rows() == 1);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_127"});
+  }
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and invalid arguments", "[vector_query]") {
   const std::string table_name = "vector_query_column_test";
   LanceDBTable* table = create_table_with_data(table_name, 20, 0);
@@ -1361,7 +1530,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
     REQUIRE(lancedb_vector_query_refine_factor(nullptr, 2, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_ef(nullptr, 10, nullptr) == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(lancedb_vector_query_distance_type(nullptr, LANCEDB_DISTANCE_L2, nullptr) == LANCEDB_INVALID_ARGUMENT);
-
+    REQUIRE(lancedb_vector_query_with_row_id(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_fast_search(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_bypass_vector_index(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_rerank_rrf(nullptr, 12.0F, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_vector_query_norm(nullptr, LANCEDB_NORMALIZE_RANK, nullptr) == LANCEDB_INVALID_ARGUMENT);
   }
 
   SECTION("Vector query with every distance type") {
@@ -1380,6 +1553,28 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column selection and in
       char* error_message = nullptr;
       REQUIRE(lancedb_vector_query_distance_type(query, type, &error_message) == LANCEDB_SUCCESS);
       REQUIRE(error_message == nullptr);
+
+      lancedb_vector_query_free(query);
+    }
+  }
+
+  SECTION("Invalid normalization method values are rejected") {
+    const int invalid_normalize_methods[] = {-1, 2};
+
+    for (const int normalize_method : invalid_normalize_methods) {
+      LanceDBVectorQuery* query = lancedb_vector_query_new(
+          table, vector.data(), vector.size());
+      REQUIRE(query != nullptr);
+
+      char* error_message = nullptr;
+      REQUIRE(lancedb_test_set_normalize_method(
+          query, normalize_method, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      REQUIRE(error_message != nullptr);
+      lancedb_free_string(error_message);
+
+      // A rejected setter leaves the query usable with a valid method.
+      REQUIRE(lancedb_vector_query_norm(
+          query, LANCEDB_NORMALIZE_RANK, nullptr) == LANCEDB_SUCCESS);
 
       lancedb_vector_query_free(query);
     }
