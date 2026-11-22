@@ -104,7 +104,10 @@ returns the built version from the loaded library as a static, NUL-terminated
 string owned by the library; the caller must not free it. Header, runtime string
 and package manifest therefore agree for a package built from the same source.
 A direct `cargo build` follows the same `LANCEDB_VERSION` override or exact-tag
-resolution for the runtime string, with `0.0.0-dev` when no tag is present.
+resolution for the runtime string, with `0.0.0-dev` when no tag is present. Use
+the CMake-installed or package-rendered header when a tagged direct Cargo build
+needs compile-time macros that match the runtime; the checked-in header
+deliberately stays at the development default.
 
 Tags use strict SemVer with a `v` prefix. If several valid tags point at the
 same commit, local builds prefer the last stable tag in Git's version sort,
