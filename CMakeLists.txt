@@ -903,8 +903,9 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_arrow_stream_tests COMMAND $<TARGET_FILE:lancedb_arrow_stream_tests>)
   endif()
 
-  # The table tests use a local HTTP server for remote branch operations.
-  set_tests_properties(lancedb_table_tests PROPERTIES
+  # The connection and table tests use loopback HTTP servers for remote
+  # client configuration and branch operations.
+  set_tests_properties(lancedb_connection_tests lancedb_table_tests PROPERTIES
     ENVIRONMENT "NO_PROXY=127.0.0.1;no_proxy=127.0.0.1"
   )
 
