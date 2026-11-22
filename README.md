@@ -150,10 +150,9 @@ implementations, the SDK's `object_store` edges, Azure namespace credential
 vending and the DynamoDB commit handler. The last two are the capabilities a
 default build did not have before, and the `s3+ddb://` commit path with them.
 
-Named AWS profiles are selected per store with the `aws_profile` storage option,
-which covers the embedded S3 store and the DynamoDB commit handler behind
-`s3+ddb://`, so one process can use different profiles without changing
-`AWS_PROFILE`:
+On the default S3 backend and the DynamoDB commit handler, `aws_profile` is a
+storage option that selects the AWS shared profile per store, so one process
+can open connections under different profiles without changing `AWS_PROFILE`:
 
 ```c
 LanceDBConnectBuilder* builder = lancedb_connect("s3+ddb://bucket/db?ddbTableName=commits");
@@ -161,21 +160,25 @@ builder = lancedb_connect_builder_storage_option(builder, "aws_profile", "analyt
 builder = lancedb_connect_builder_storage_option(builder, "aws_region", "eu-west-1");
 ```
 
-Per-store profile selection needs LanceDB SDK `v0.42.0-beta.22` and its Lance
-`v15.0.0-beta.26`. A build pinned to the older
-`v0.42.0-beta.21`/`v15.0.0-beta.25` pair ignores `aws_profile` and leaves both
-the S3 store and the DynamoDB client on the ambient chain; `Cargo.toml` records
-which pair a source build uses. `aws_region` overrides the region for the S3
-requests and for the DynamoDB client. Without it, the S3 store resolves the
-bucket's region through the S3 API unless a custom endpoint is configured; then
-the profile's region applies when the profile sets one, otherwise the default
-region chain does. The DynamoDB client uses the profile's region and falls back
-to the default region chain. The `v0.1.0-preview.1` release predates both the
-`dynamodb` forwarding and the profile routing: it was built without the
-`dynamodb` feature, so `s3+ddb://` is unavailable there.
+On those two paths the option takes effect from LanceDB SDK `v0.42.0-beta.22`
+with its Lance `v15.0.0-beta.26`. A build pinned to the earlier
+`v0.42.0-beta.21`/`v15.0.0-beta.25` pair ignores `aws_profile` there and keeps
+both on the ambient chains; `Cargo.toml` records which pair a source build
+uses. The `v0.1.0-preview.1` release predates the `dynamodb` forwarding and the
+profile routing: it was built without the `dynamodb` feature, so `s3+ddb://` is
+unavailable there.
 
-The default set is `remote,aws,gcs,azure,dynamodb`, and the prebuilt packages
-build with it. `oss`, `geo` and `fp16kernels` are opt-in for source builds:
+`aws_region` is the explicit region and wins over both the environment and the
+profile. Without it, the default S3 backend takes `AWS_REGION` when it is set
+and then falls back to ordinary bucket-region discovery. Custom S3 endpoints
+and the DynamoDB client instead use the SDK-resolved region, or the applicable
+default chain. An explicit `aws_profile` still follows the AWS SDK's environment
+precedence: `AWS_REGION` and the standard credential variables take precedence
+over the profile's own region and keys.
+
+The default set is `remote,aws,gcs,azure,dynamodb`, and packages built from
+this revision with the default flags contain it. `oss`, `geo` and
+`fp16kernels` are opt-in for source builds:
 
 ```bash
 cargo build --release --locked -p lancedb-c
