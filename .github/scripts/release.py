@@ -278,6 +278,21 @@ def collect_artifacts(
     return result
 
 
+def read_tagged_file(repo_root: Path, commit: str, relative: str) -> bytes:
+    """Read a package source file from the exact tagged commit."""
+    completed = subprocess.run(
+        ["git", "-C", str(repo_root), "show", f"{commit}:{relative}"],
+        capture_output=True,
+        env=os.environ.copy(),
+    )
+    if completed.returncode != 0:
+        fail(
+            f"could not read {relative} at {commit}: "
+            f"{completed.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    return completed.stdout
+
+
 def verify_archive_contents(
     archive: Path, repo_root: Path, target: package.Target, tag: ReleaseTag
 ) -> None:
@@ -338,11 +353,18 @@ def verify_archive_contents(
                 f"{sorted(actual_members - expected_members)}"
             )
 
-        for relative in (manifest["license"], manifest["include"]):
-            if package.sha256_file(package_root / relative) != package.sha256_file(
-                repo_root / relative
-            ):
-                fail(f"{archive.name} {relative} does not match the tagged source")
+        expected_header = package.render_header(
+            read_tagged_file(repo_root, tag.commit, manifest["include"]), tag.version
+        )
+        package_header = package_root / manifest["include"]
+        if package_header.read_bytes() != expected_header:
+            fail(
+                f"{archive.name} {manifest['include']} is not the rendered header "
+                f"for {tag.version}"
+            )
+        tagged_license = read_tagged_file(repo_root, tag.commit, manifest["license"])
+        if (package_root / manifest["license"]).read_bytes() != tagged_license:
+            fail(f"{archive.name} {manifest['license']} does not match the tagged source")
 
 
 def render_notes(

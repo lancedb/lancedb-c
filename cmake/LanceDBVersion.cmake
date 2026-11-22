@@ -149,3 +149,77 @@ if(NOT LANCEDB_VERSION STREQUAL LANCEDB_DEV_VERSION)
   endif()
 endif()
 string(REGEX MATCH "^[0-9]+[.][0-9]+[.][0-9]+" LANCEDB_PROJECT_VERSION "${LANCEDB_VERSION}")
+
+# The source header keeps these defaults so it compiles directly without a
+# generated file. CMake renders the block with the resolved build version for
+# the installed header. The package builder performs the same rendering.
+set(LANCEDB_HEADER_VERSION_DEFAULT "#define LANCEDB_VERSION_MAJOR 0
+#define LANCEDB_VERSION_MINOR 0
+#define LANCEDB_VERSION_PATCH 0
+#define LANCEDB_VERSION_STRING \"0.0.0-dev\"")
+
+function(lancedb_render_header source destination version)
+  if(NOT version STREQUAL LANCEDB_DEV_VERSION)
+    lancedb_parse_version("${version}" parsed_version)
+    if(NOT parsed_version STREQUAL version)
+      message(FATAL_ERROR "Cannot render invalid lancedb-c version '${version}'")
+    endif()
+  endif()
+
+  string(REGEX MATCH "^([0-9]+)[.]([0-9]+)[.]([0-9]+)" version_core "${version}")
+  set(major "${CMAKE_MATCH_1}")
+  set(minor "${CMAKE_MATCH_2}")
+  set(patch "${CMAKE_MATCH_3}")
+  if(version_core STREQUAL "" OR major STREQUAL "" OR minor STREQUAL "" OR patch STREQUAL "")
+    message(FATAL_ERROR "Cannot render lancedb-c version '${version}' without a numeric core")
+  endif()
+
+  set(rendered "#define LANCEDB_VERSION_MAJOR ${major}
+#define LANCEDB_VERSION_MINOR ${minor}
+#define LANCEDB_VERSION_PATCH ${patch}
+#define LANCEDB_VERSION_STRING \"${version}\"")
+
+  file(READ "${source}" source_text)
+  string(FIND "${source_text}" "\r" carriage_return)
+  if(NOT carriage_return EQUAL -1)
+    message(FATAL_ERROR "${source} must use LF line endings")
+  endif()
+  string(FIND "${source_text}" "${LANCEDB_HEADER_VERSION_DEFAULT}" default_position)
+  if(default_position EQUAL -1)
+    message(FATAL_ERROR "${source} does not contain the default LANCEDB_VERSION macros")
+  endif()
+  string(REPLACE "${LANCEDB_HEADER_VERSION_DEFAULT}" "${rendered}" rendered_text "${source_text}")
+
+  get_filename_component(destination_directory "${destination}" DIRECTORY)
+  file(MAKE_DIRECTORY "${destination_directory}")
+  file(WRITE "${destination}" "${rendered_text}")
+endfunction()
+
+# Tag refs are inputs to the configure-time result. Track them so an existing
+# build directory reconfigures when HEAD or its tags change, instead of silently
+# reusing the previous version. An environment override still needs a manual
+# configuration step because CMake cannot observe arbitrary environment changes.
+if(LANCEDB_GIT_EXECUTABLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  foreach(git_directory_arg IN ITEMS --git-dir --git-common-dir)
+    execute_process(
+      COMMAND "${LANCEDB_GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}"
+              rev-parse "${git_directory_arg}"
+      RESULT_VARIABLE git_directory_result
+      OUTPUT_VARIABLE git_directory
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT git_directory_result EQUAL 0 OR git_directory STREQUAL "")
+      continue()
+    endif()
+    if(NOT IS_ABSOLUTE "${git_directory}")
+      set(git_directory "${CMAKE_CURRENT_SOURCE_DIR}/${git_directory}")
+    endif()
+    foreach(relative IN ITEMS HEAD packed-refs refs refs/tags)
+      if(EXISTS "${git_directory}/${relative}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+          "${git_directory}/${relative}")
+      endif()
+    endforeach()
+  endforeach()
+endif()

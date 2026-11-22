@@ -24,6 +24,24 @@ int main(int argc, char** argv) {
 
   const char* uri = argv[1];
 
+  const char* runtime_version = lancedb_version();
+  if (runtime_version == NULL || runtime_version[0] == '\0') {
+    return fail("lancedb_version() must return a non-empty string");
+  }
+  if (strcmp(runtime_version, LANCEDB_VERSION_STRING) != 0) {
+    fprintf(stderr, "header version %s does not match runtime version %s\n",
+            LANCEDB_VERSION_STRING, runtime_version);
+    return fail("the public header and runtime library report different versions");
+  }
+  int major = 0;
+  int minor = 0;
+  int patch = 0;
+  if (sscanf(runtime_version, "%d.%d.%d", &major, &minor, &patch) != 3 ||
+      major != LANCEDB_VERSION_MAJOR || minor != LANCEDB_VERSION_MINOR ||
+      patch != LANCEDB_VERSION_PATCH) {
+    return fail("the version macros do not match the runtime version string");
+  }
+
   if (lancedb_connect(NULL) != NULL) {
     return fail("lancedb_connect(NULL) must return NULL");
   }
@@ -69,6 +87,6 @@ int main(int argc, char** argv) {
 
   lancedb_free_table_names(names, count);
   lancedb_connection_free(connection);
-  printf("C17 consumer: OK\n");
+  printf("C17 consumer: OK (version %s)\n", runtime_version);
   return 0;
 }

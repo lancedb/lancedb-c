@@ -94,6 +94,18 @@ the pinned SDK. The Cargo package version is fixed at `0.0.0`; the release
 version comes from the Git tag. Pull-request and untagged local builds report
 `0.0.0-dev` in CMake, pkg-config, documentation and `manifest.json`.
 
+The public header exposes `LANCEDB_VERSION_MAJOR`, `LANCEDB_VERSION_MINOR`,
+`LANCEDB_VERSION_PATCH` and `LANCEDB_VERSION_STRING` (`LANCEDB_VERSION` is an
+alias for the string). The checked-in header reports `0.0.0-dev` so it remains
+usable directly without a generated file.
+CMake renders the installed header with the configure-time version, and the
+package builder renders the same block for release archives. `lancedb_version()`
+returns the built version from the loaded library as a static, NUL-terminated
+string owned by the library; the caller must not free it. Header, runtime string
+and package manifest therefore agree for a package built from the same source.
+A direct `cargo build` follows the same `LANCEDB_VERSION` override or exact-tag
+resolution for the runtime string, with `0.0.0-dev` when no tag is present.
+
 Tags use strict SemVer with a `v` prefix. If several valid tags point at the
 same commit, local builds prefer the last stable tag in Git's version sort,
 otherwise the last prerelease; a tag dispatch always uses the explicitly
@@ -104,11 +116,12 @@ To prepare a release, create an annotated or lightweight tag such as
 on that tag. The workflow fetches the tag, requires its peeled commit to be the
 checked-out commit, and uses the tag version for the build, package manifest and
 consumer verification. A tag on a parent or another branch is rejected. CMake
-reads the tag when it configures, so after creating or moving a tag in an
-existing build directory, rerun the CMake configuration step before building.
-CMake passes its configure-time version to the docs target through a private
-variable, so a different build-time `LANCEDB_VERSION` does not change an already
-configured docs build.
+reads the tag when it configures and records HEAD and tag refs as configure-time
+dependencies, so existing build directories reconfigure when they change. An
+environment override is not a file input; rerun the CMake configuration step
+after changing `LANCEDB_VERSION`. CMake passes its configure-time version to
+the docs target through a private variable, so a different build-time
+`LANCEDB_VERSION` does not change an already configured docs build.
 
 Tag pushes and dispatches without `publish_release` only build the CI
 artifacts. To publish, dispatch on the exact preview tag with the
