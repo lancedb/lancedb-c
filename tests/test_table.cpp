@@ -4427,7 +4427,7 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Blob Array Reading", "[table][bl
         {row_1, 0, 2},
     };
     auto ranges = fetch_blob_range_array(table, "image", requests, std::size(requests));
-    REQUIRE(ranges->length() == std::size(requests));
+    REQUIRE(ranges->length() == static_cast<int64_t>(std::size(requests)));
     REQUIRE(ranges->GetView(0) == std::string_view("\0loa", 4));
     REQUIRE(ranges->GetView(1) == std::string_view("lph"));
     REQUIRE_FALSE(ranges->IsNull(2));
