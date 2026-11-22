@@ -10,6 +10,7 @@ The package layout is the contract the later pure-Go loader consumes:
       include/lancedb.h
       lib/<shared library>
       lib/<import library>       (Windows only)
+      lib/<soname>               (Linux; lib/liblancedb.so is the link)
       manifest.json
       SHA256SUMS
 
@@ -34,7 +35,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from version import DEV_VERSION, parse_resolved, resolve_version
+from version import DEV_VERSION, parse_resolved, resolve_version, soversion
 
 
 SCHEMA_VERSION = 1
@@ -166,6 +167,26 @@ def copy_file(source: Path, destination: Path, mode: int) -> None:
     destination.chmod(mode)
 
 
+def library_members(target: Target, version: str) -> set[str]:
+    """Return the package-relative library members for a target.
+
+    Linux carries a versioned SONAME beside the unversioned linker name. The
+    unversioned path stays in the manifest because that is what package
+    consumers open.
+    """
+    members = {f"lib/{target.library}"}
+    if target.os == "linux":
+        members.add(f"lib/{target.library}.{soversion(version)}")
+    if target.import_library:
+        members.add(f"lib/{target.import_library}")
+    return members
+
+
+def create_symlink(link_target: str, link_path: Path) -> None:
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(link_target, link_path)
+
+
 def write_deterministic_tar(
     source_root: Path, archive: Path, file_modes: dict[str, int]
 ) -> None:
@@ -184,7 +205,15 @@ def write_deterministic_tar(
                     info.uname = ""
                     info.gname = ""
                     info.mtime = 0
-                    if path.is_dir():
+                    if path.is_symlink():
+                        if relative not in file_modes:
+                            raise SystemExit(f"no deterministic mode for package member: {relative}")
+                        if os.path.isabs(info.linkname):
+                            raise SystemExit(f"package symlink must be relative: {relative}")
+                        info.size = 0
+                        info.mode = file_modes[relative]
+                        tar.addfile(info)
+                    elif path.is_dir():
                         # Do not take directory modes from the caller's umask.
                         info.mode = 0o755
                         tar.addfile(info)
@@ -198,14 +227,37 @@ def write_deterministic_tar(
 
 def extract_tar(archive: Path, destination: Path) -> None:
     destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar.getmembers():
-            if not (member.isfile() or member.isdir()):
-                raise SystemExit(f"unsupported archive member: {member.name}")
             target = (destination / member.name).resolve()
             if target != destination and destination not in target.parents:
                 raise SystemExit(f"archive member escapes destination: {member.name}")
-            tar.extract(member, destination)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                target.chmod(member.mode & 0o777)
+            elif member.issym():
+                if os.path.isabs(member.linkname):
+                    raise SystemExit(
+                        f"archive symlink is absolute: {member.name} -> {member.linkname}"
+                    )
+                link_target = (target.parent / member.linkname).resolve()
+                if link_target != destination and destination not in link_target.parents:
+                    raise SystemExit(
+                        f"archive symlink escapes destination: {member.name} -> {member.linkname}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(member.linkname, target)
+            elif member.isfile():
+                source = tar.extractfile(member)
+                if source is None:
+                    raise SystemExit(f"cannot read archive member: {member.name}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                target.chmod(member.mode & 0o777)
+            else:
+                raise SystemExit(f"unsupported archive member: {member.name}")
 
 
 def package_manifest(target: Target, commit: str, version: str) -> dict:
@@ -252,6 +304,12 @@ def create_package(args: argparse.Namespace) -> None:
         (package_root / "include").mkdir(parents=True, exist_ok=True)
         (package_root / "include" / "lancedb.h").write_bytes(header)
         copy_file(required_libraries[0], package_root / "lib" / target.library, 0o755)
+        if target.os == "linux":
+            versioned_library = f"{target.library}.{soversion(version)}"
+            (package_root / "lib" / target.library).rename(
+                package_root / "lib" / versioned_library
+            )
+            create_symlink(versioned_library, package_root / "lib" / target.library)
         if target.import_library:
             copy_file(
                 required_libraries[1],
@@ -280,6 +338,9 @@ def create_package(args: argparse.Namespace) -> None:
             "SHA256SUMS": 0o644,
             manifest["library"]: 0o755,
         }
+        if target.os == "linux":
+            file_modes[f"lib/{target.library}.{soversion(version)}"] = 0o755
+            file_modes[manifest["library"]] = 0o777
         if manifest["importLibrary"]:
             file_modes[manifest["importLibrary"]] = 0o644
 
@@ -382,8 +443,28 @@ def read_macho_install_name(library: Path) -> str:
     return install_name
 
 
-def print_runtime_dependencies(target: Target, library: Path) -> None:
+def parse_elf_soname(readelf_output: str) -> str | None:
+    match = re.search(r"\(SONAME\).*\[([^]]+)\]", readelf_output)
+    return match.group(1) if match else None
+
+
+def read_elf_soname(library: Path) -> str:
+    output = run(["readelf", "-d", str(library)], show=False).stdout
+    soname = parse_elf_soname(output)
+    if not soname:
+        raise SystemExit(f"could not read SONAME from {library}")
+    return soname
+
+
+def print_runtime_dependencies(target: Target, library: Path, version: str) -> None:
     if target.os == "linux":
+        expected_soname = f"{target.library}.{soversion(version)}"
+        soname = read_elf_soname(library)
+        print("SONAME: " + soname)
+        if soname != expected_soname:
+            raise SystemExit(
+                f"{library} has SONAME {soname!r}, expected {expected_soname!r}"
+            )
         run(["file", str(library)])
         run(["readelf", "-d", str(library)])
         ldd = run(["ldd", str(library)]).stdout
@@ -457,6 +538,19 @@ def verify_checksums(package_root: Path) -> None:
             raise SystemExit(f"checksum mismatch for {relative}: {actual} != {expected}")
 
 
+def consumer_environment(target: Target, package_root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    if target.os == "linux":
+        env["LD_LIBRARY_PATH"] = (
+            f"{package_root / 'lib'}{os.pathsep}{env.get('LD_LIBRARY_PATH', '')}"
+        )
+    elif target.os == "darwin":
+        # The consumer records -rpath and the dylib records @rpath. Keep the
+        # check honest by not letting an inherited override find the library.
+        env.pop("DYLD_LIBRARY_PATH", None)
+    return env
+
+
 def build_and_run_consumer(
     target: Target,
     package_root: Path,
@@ -488,10 +582,10 @@ def build_and_run_consumer(
             consumer_ldd = run(["ldd", str(executable)]).stdout
             if str(package_root / "lib") not in consumer_ldd:
                 raise SystemExit("the consumer does not resolve liblancedb from the package")
-        env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('LD_LIBRARY_PATH', '')}"
-        env["DYLD_LIBRARY_PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('DYLD_LIBRARY_PATH', '')}"
-        run([str(executable), str(uri), version], env=env)
+        run(
+            [str(executable), str(uri), version],
+            env=consumer_environment(target, package_root),
+        )
     else:
         executable = work_dir / "package-consumer.exe"
         command = [
@@ -557,6 +651,19 @@ def verify_package(args: argparse.Namespace) -> None:
         for relative in [manifest["library"], manifest["include"], manifest["license"]]:
             if not (package_root / relative).is_file():
                 raise SystemExit(f"manifest entry is missing: {relative}")
+        if target.os == "linux":
+            library_path = package_root / manifest["library"]
+            expected_alias = f"{target.library}.{soversion(manifest['version'])}"
+            if not library_path.is_symlink():
+                raise SystemExit(f"packaged library is not a link: {manifest['library']}")
+            link_target = os.readlink(library_path)
+            if os.path.isabs(link_target) or link_target != expected_alias:
+                raise SystemExit(
+                    f"packaged library link {link_target!r} does not match "
+                    f"the relative SONAME name {expected_alias!r}"
+                )
+            if not (library_path.parent / link_target).is_file():
+                raise SystemExit(f"packaged library link target is missing: {link_target}")
         if manifest["importLibrary"] and not (package_root / manifest["importLibrary"]).is_file():
             raise SystemExit(f"manifest import library is missing: {manifest['importLibrary']}")
 
@@ -577,7 +684,7 @@ def verify_package(args: argparse.Namespace) -> None:
             raise SystemExit(f"library architecture is {actual_arch}, expected {target.arch}")
         print(f"Library architecture: {actual_arch}")
 
-        print_runtime_dependencies(target, library)
+        print_runtime_dependencies(target, library, manifest["version"])
         consumer_source = Path(args.consumer_source)
         if not consumer_source.is_absolute():
             consumer_source = repo_root / consumer_source

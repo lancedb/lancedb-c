@@ -106,6 +106,13 @@ class VersionPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 version.parse_resolved(value)
 
+    def test_soversion_tracks_the_semver_compatibility_boundary(self) -> None:
+        self.assertEqual(version.soversion("0.1.0"), "0.1")
+        self.assertEqual(version.soversion("0.1.0-preview.1"), "0.1")
+        self.assertEqual(version.soversion("0.2.0"), "0.2")
+        self.assertEqual(version.soversion("1.4.2"), "1")
+        self.assertEqual(version.soversion("2.0.0-rc.1"), "2")
+
 
 class HeaderRenderTests(unittest.TestCase):
     def test_renders_resolved_release_values(self) -> None:
@@ -297,9 +304,20 @@ class PackageArchiveTests(PackageFixture):
         self.assertEqual(modes["lib"], 0o755)
         self.assertEqual(modes["LICENSE"], 0o644)
         self.assertEqual(modes["include/lancedb.h"], 0o644)
-        self.assertEqual(modes["lib/liblancedb.so"], 0o755)
+        self.assertEqual(modes["lib/liblancedb.so.0.1"], 0o755)
+        self.assertEqual(modes["lib/liblancedb.so"], 0o777)
         self.assertEqual(modes["manifest.json"], 0o644)
         self.assertEqual(modes["SHA256SUMS"], 0o644)
+
+    def test_linux_package_uses_versioned_soname_and_unversioned_link(self) -> None:
+        archive, _ = self.create("package")
+        with tempfile.TemporaryDirectory(prefix="lancedb-c-extract-") as temp:
+            package.extract_tar(archive, Path(temp))
+            package_root = Path(temp) / "lancedb-c-abc123-linux-amd64"
+            link = package_root / "lib" / "liblancedb.so"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(os.readlink(link), "liblancedb.so.0.1")
+            self.assertTrue((package_root / "lib" / "liblancedb.so.0.1").is_file())
 
     def test_manifest_records_package_version(self) -> None:
         archive, _ = self.create("package")
@@ -366,6 +384,7 @@ class PackageArchiveTests(PackageFixture):
                     "LICENSE",
                     "include/lancedb.h",
                     "lib/liblancedb.so",
+                    "lib/liblancedb.so.0.1",
                     "manifest.json",
                 },
             )
@@ -496,7 +515,33 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertNotIn("darwin-amd64", {target.name for target in package.TARGETS.values()})
 
 
+class ConsumerEnvironmentTests(unittest.TestCase):
+    def test_macos_does_not_inject_dyld_library_path(self) -> None:
+        with mock.patch.dict(os.environ, {"DYLD_LIBRARY_PATH": "/inherited"}):
+            env = package.consumer_environment(
+                package.target_for("darwin-arm64"), Path("/tmp/package")
+            )
+        self.assertNotIn("DYLD_LIBRARY_PATH", env)
+
+    def test_linux_prepends_the_package_library_path(self) -> None:
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": "/inherited"}):
+            env = package.consumer_environment(
+                package.target_for("x86_64-unknown-linux-gnu"), Path("/tmp/package")
+            )
+        self.assertEqual(
+            env["LD_LIBRARY_PATH"],
+            f"/tmp/package/lib{os.pathsep}/inherited",
+        )
+
+
 class ParserTests(unittest.TestCase):
+    def test_parse_elf_soname(self) -> None:
+        output = """\
+ 0x000000000000000e (SONAME)             Library soname: [liblancedb.so.0.1]
+"""
+        self.assertEqual(package.parse_elf_soname(output), "liblancedb.so.0.1")
+        self.assertIsNone(package.parse_elf_soname("no soname here\n"))
+
     def test_parse_macho_install_name(self) -> None:
         output = """\
 liblancedb.dylib:
