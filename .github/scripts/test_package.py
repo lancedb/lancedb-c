@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_exports
 import package
-import test_install
 import version
 
 
@@ -87,48 +86,6 @@ Dump of file lancedb.dll
         ):
             with self.assertRaises(SystemExit):
                 check_exports._pe_exports(Path("lancedb.dll"))
-
-
-class SharedExportGateTests(unittest.TestCase):
-    def cache(self, **values: str) -> Path:
-        directory = tempfile.TemporaryDirectory(prefix="lancedb-c-cache-")
-        self.addCleanup(directory.cleanup)
-        path = Path(directory.name) / "CMakeCache.txt"
-        lines = [f"{name}:STRING={value}" for name, value in values.items()]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return path.parent
-
-    def test_native_msvc_is_checked(self) -> None:
-        build = self.cache(
-            BUILD_SHARED_LIBS="ON",
-            CMAKE_C_COMPILER=r"C:\VS\cl.exe",
-        )
-        with mock.patch.object(test_install.os, "name", "nt"):
-            self.assertEqual(test_install.shared_export_target(build), "windows")
-
-    def test_windows_gnu_is_not_checked(self) -> None:
-        build = self.cache(
-            BUILD_SHARED_LIBS="ON",
-            CMAKE_C_COMPILER=r"C:\mingw64\bin\gcc.exe",
-        )
-        with mock.patch.object(test_install.os, "name", "nt"):
-            self.assertIsNone(test_install.shared_export_target(build))
-        cross = self.cache(
-            BUILD_SHARED_LIBS="ON",
-            CMAKE_SYSTEM_NAME="Windows",
-            CMAKE_C_COMPILER=r"C:\mingw64\bin\gcc.exe",
-        )
-        self.assertIsNone(test_install.shared_export_target(cross))
-
-    def test_elf_and_macho_are_checked_and_static_is_not(self) -> None:
-        linux = self.cache(BUILD_SHARED_LIBS="ON", CMAKE_C_COMPILER="/usr/bin/cc")
-        with mock.patch.object(test_install.sys, "platform", "linux"):
-            self.assertEqual(test_install.shared_export_target(linux), "linux")
-        darwin = self.cache(BUILD_SHARED_LIBS="ON", CMAKE_C_COMPILER="/usr/bin/clang")
-        with mock.patch.object(test_install.sys, "platform", "darwin"):
-            self.assertEqual(test_install.shared_export_target(darwin), "darwin")
-        static = self.cache(BUILD_SHARED_LIBS="OFF", CMAKE_C_COMPILER="/usr/bin/cc")
-        self.assertIsNone(test_install.shared_export_target(static))
 
 
 class PackageFixture(unittest.TestCase):

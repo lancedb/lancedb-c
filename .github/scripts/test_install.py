@@ -51,30 +51,6 @@ def prepend(env: dict[str, str], name: str, directory: Path) -> None:
     env[name] = f"{directory}{os.pathsep}{env.get(name, '')}"
 
 
-def shared_export_target(build_dir: Path) -> str | None:
-    """Return the implemented export-check platform, or None when unsupported.
-
-    The export policy covers Linux ELF, Darwin Mach-O and native MSVC PE. A
-    Windows GNU shared build and its installed .dll.a are still valid build
-    products, but they do not use the MSVC export controls or verifier.
-    """
-    if cache_value(build_dir, "BUILD_SHARED_LIBS").upper() not in ("ON", "TRUE", "1"):
-        return None
-    system_name = cache_value(build_dir, "CMAKE_SYSTEM_NAME")
-    compiler_name = (
-        cache_value(build_dir, "CMAKE_C_COMPILER").replace("\\", "/").rsplit("/", 1)[-1].lower()
-    )
-    if os.name == "nt":
-        return "windows" if compiler_name in ("cl", "cl.exe") else None
-    if system_name == "Windows":
-        return None
-    if system_name == "Darwin" or (not system_name and sys.platform == "darwin"):
-        return "darwin"
-    if system_name in ("", "Linux") and sys.platform.startswith("linux"):
-        return "linux"
-    return None
-
-
 def installed_version(prefix: Path) -> str:
     header = (prefix / "include" / "lancedb.h").read_text(encoding="utf-8")
     match = re.search(r'^#define LANCEDB_VERSION_STRING "([^"]+)"$', header, re.MULTILINE)
@@ -130,6 +106,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-dir", required=True)
     parser.add_argument("--source-dir", required=True)
     parser.add_argument("--config", default="")
+    parser.add_argument(
+        "--export-target",
+        default="",
+        choices=("", "linux", "darwin", "windows"),
+        help="CMake-selected export verifier target; empty disables the check",
+    )
     return parser.parse_args()
 
 
@@ -205,7 +187,7 @@ def main() -> int:
     run([str(cxx_consumer), str(work_dir / "cxx-consumer-db")], env=env)
 
     version = installed_version(prefix)
-    target_os = shared_export_target(build_dir)
+    target_os = args.export_target or None
     if target_os is not None:
         header_path = prefix / "include" / "lancedb.h"
         if target_os == "windows":

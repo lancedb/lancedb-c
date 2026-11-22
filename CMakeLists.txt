@@ -240,11 +240,18 @@ configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 # workflow. Linux records the versioned SONAME and macOS records an @rpath
 # install name so local installs and prebuilt packages resolve the same way.
 set(LANCEDB_RUST_LINK_ARGS)
+set(LANCEDB_EXPORT_VERIFY_TARGET "")
 if(BUILD_SHARED_LIBS)
   if(WIN32 AND MSVC AND CMAKE_HOST_WIN32)
+    set(LANCEDB_EXPORT_VERIFY_TARGET "windows")
     list(APPEND LANCEDB_RUST_LINK_ARGS
       "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.cmd")
-  elseif(NOT WIN32)
+  elseif(APPLE)
+    set(LANCEDB_EXPORT_VERIFY_TARGET "darwin")
+    list(APPEND LANCEDB_RUST_LINK_ARGS
+      "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
+  elseif(UNIX)
+    set(LANCEDB_EXPORT_VERIFY_TARGET "linux")
     list(APPEND LANCEDB_RUST_LINK_ARGS
       "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
   endif()
@@ -1153,6 +1160,7 @@ add_custom_target(check-install
     --build-dir "${CMAKE_BINARY_DIR}"
     --source-dir "${CMAKE_CURRENT_SOURCE_DIR}"
     --config "$<CONFIG>"
+    --export-target "${LANCEDB_EXPORT_VERIFY_TARGET}"
   DEPENDS lancedb
   COMMENT "Checking find_package(lancedb) with installed C and C++ consumers..."
   VERBATIM
