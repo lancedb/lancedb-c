@@ -970,20 +970,20 @@ LanceDBError lancedb_connection_open_table_with_options(
  * target already exists, and perform a shallow clone.
  *
  * source_version is read only when has_source_version is non-zero. source_tag
- * is read only when non-NULL. Both may be set; the SDK rejects that combination
- * when it has to read the source. If the target already exists and exist_ok is
- * non-zero, the SDK preserves it without reading the source, so that validation
- * does not run.
+ * is read only when non-NULL. An embedded directory connection rejects setting
+ * both when it reads the source. If exist_ok is non-zero and the target already
+ * exists, it opens the existing target without reading the source. On remote
+ * connections, the server determines how to handle the source selectors and
+ * exist_ok.
  *
  * target_namespace is an array of namespace components; a zero length accepts
  * NULL and selects the root namespace. A positive length requires a non-NULL
  * array whose entries are non-NULL, NUL-terminated UTF-8 strings.
  *
- * is_shallow is read only when has_is_shallow is non-zero. Embedded directory
- * connections support shallow clones only and reject a non-zero shallow flag
- * value of 0 with LANCEDB_NOT_SUPPORTED. They also reject a non-empty target
- * namespace with LANCEDB_NOT_SUPPORTED. Remote connections forward both
- * settings to the server. A namespace connection rejects every clone.
+ * Setting has_is_shallow to a non-zero value and is_shallow to 0 requests a
+ * deep clone. Embedded directory connections return LANCEDB_NOT_SUPPORTED for
+ * a deep clone or a non-empty target namespace. Remote connections forward
+ * both settings to the server. A namespace connection rejects every clone.
  *
  * The strings and array are borrowed for the duration of the call. The struct
  * is borrowed and is not consumed.
