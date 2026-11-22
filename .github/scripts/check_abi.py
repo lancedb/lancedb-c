@@ -303,6 +303,7 @@ ENUM_PREFIXES = {
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
     "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
+    "LanceDBBranchSourceKind": "LANCEDB_BRANCH_SOURCE_",
     "LanceDBDeltaRefType": "LANCEDB_DELTA_REF_",
 }
 ENUM_MEMBER_RENAMES = {
@@ -315,8 +316,15 @@ ENUM_MEMBER_RENAMES = {
 
 def canonical_enum_members(name: str, members: Dict[str, int]) -> Dict[str, int]:
     prefix = ENUM_PREFIXES[name]
+    generated_prefix = name + "_"
     canonical: Dict[str, int] = {}
     for member, value in members.items():
+        # cbindgen prefixes generated enumerators with the enum name so that
+        # enums sharing variant names can be emitted into one C header. Strip
+        # that probe-only prefix before applying the public header's naming
+        # rule.
+        if member.startswith(generated_prefix):
+            member = member[len(generated_prefix):]
         suffix = ENUM_MEMBER_RENAMES.get((name, member))
         if suffix is None:
             suffix = re.sub(r"(?<!^)(?=[A-Z])", "_", member).upper()
@@ -353,6 +361,7 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     # Rust stores the raw integer and validates it before converting to an
     # enum, avoiding undefined behavior for an out-of-range C value.
     ("LanceDBVectorIndexConfig", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
+    ("LanceDBBranchSource", "kind"): Allow(enum_int="LanceDBBranchSourceKind"),
     ("LanceDBDeltaRef", "kind"): Allow(enum_int="LanceDBDeltaRefType"),
 }
 
@@ -664,6 +673,9 @@ def generate_bindings(cbindgen: str, repo: Path, output: Path, header_text: str)
 include_guard = "LANCEDB_CBINDGEN_H"
 style = "type"
 documentation = false
+
+[enum]
+prefix_with_name = true
 
 [export]
 item_types = ["enums", "structs", "opaque", "functions"]
