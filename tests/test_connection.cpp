@@ -110,6 +110,11 @@ class ClientConfigHttpServer {
   }
 
   void handle(int client) {
+    timeval io_timeout{};
+    io_timeout.tv_sec = 2;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+
     std::string request;
     char buffer[4096];
     while (request.find("\r\n\r\n") == std::string::npos) {
@@ -351,6 +356,19 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
 
 TEST_CASE("LanceDB Remote Client Configuration", "[connection]") {
 #ifndef _WIN32
+  struct Outputs {
+    LanceDBConnection* connection = nullptr;
+    char** names = nullptr;
+    size_t count = 0;
+    char* error_message = nullptr;
+
+    ~Outputs() {
+      lancedb_free_table_names(names, count);
+      lancedb_free_string(error_message);
+      lancedb_connection_free(connection);
+    }
+  };
+
   auto make_builder = [](const std::string& host,
                          const LanceDBClientConfig* config) {
     LanceDBConnectBuilder* builder = lancedb_connect("db://test");
@@ -379,21 +397,20 @@ TEST_CASE("LanceDB Remote Client Configuration", "[connection]") {
     config.extra_header_count = 1;
 
     LanceDBConnectBuilder* builder = make_builder(server.url(), &config);
-    LanceDBConnection* connection = nullptr;
-    char* error_message = nullptr;
-    REQUIRE(lancedb_connect_builder_execute(builder, &connection, &error_message)
+    Outputs outputs;
+    REQUIRE(lancedb_connect_builder_execute(
+                builder, &outputs.connection, &outputs.error_message)
             == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-    REQUIRE(connection != nullptr);
+    REQUIRE(outputs.error_message == nullptr);
+    REQUIRE(outputs.connection != nullptr);
 
-    char** names = nullptr;
-    size_t count = 0;
-    REQUIRE(lancedb_connection_table_names(connection, &names, &count,
-                                           &error_message) == LANCEDB_SUCCESS);
-    REQUIRE(error_message == nullptr);
-    REQUIRE(count == 0);
-    REQUIRE(names == nullptr);
-    lancedb_free_table_names(names, count);
+    REQUIRE(lancedb_connection_table_names(outputs.connection, &outputs.names,
+                                           &outputs.count,
+                                           &outputs.error_message)
+            == LANCEDB_SUCCESS);
+    REQUIRE(outputs.error_message == nullptr);
+    REQUIRE(outputs.count == 0);
+    REQUIRE(outputs.names == nullptr);
 
     const auto requests = server.requests();
     REQUIRE(requests.size() == 1);
@@ -403,8 +420,6 @@ TEST_CASE("LanceDB Remote Client Configuration", "[connection]") {
             "lancedb-c-client-config-test/1.0");
     REQUIRE(header_value(requests[0], "x-lancedb-client-config-test") ==
             "forwarded");
-
-    lancedb_connection_free(connection);
   }
 
   SECTION("SDK validation keeps its execute-time error") {
@@ -416,15 +431,14 @@ TEST_CASE("LanceDB Remote Client Configuration", "[connection]") {
 
     LanceDBConnectBuilder* builder =
         make_builder("http://127.0.0.1:1", &config);
-    LanceDBConnection* connection = nullptr;
-    char* error_message = nullptr;
-    REQUIRE(lancedb_connect_builder_execute(builder, &connection, &error_message)
+    Outputs outputs;
+    REQUIRE(lancedb_connect_builder_execute(
+                builder, &outputs.connection, &outputs.error_message)
             == LANCEDB_INVALID_INPUT);
-    REQUIRE(connection == nullptr);
-    REQUIRE(error_message != nullptr);
-    REQUIRE(std::string(error_message).find("invalid HTTP status code") !=
+    REQUIRE(outputs.connection == nullptr);
+    REQUIRE(outputs.error_message != nullptr);
+    REQUIRE(std::string(outputs.error_message).find("invalid HTTP status code") !=
             std::string::npos);
-    lancedb_free_string(error_message);
   }
 #else
   SUCCEED("the client configuration loopback check requires POSIX sockets");

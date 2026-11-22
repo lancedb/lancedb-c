@@ -1087,17 +1087,20 @@ typedef enum {
  * that bit selects an empty list and disables status retries; a non-zero count
  * requires a non-NULL array. extra_header_count greater than zero requires both
  * parallel header arrays and every entry to be non-NULL and valid UTF-8. Static
- * extra headers replace the same SDK defaults when names collide.
+ * extra headers replace the same SDK default headers when names collide. The
+ * SDK user agent and a configured or environment-derived user_id are applied
+ * afterward, so they take precedence over a static header with the same name.
  *
- * TLS strings are file paths read by the SDK when the builder executes. A TLS
- * configuration exists when any TLS path is non-NULL or
+ * A TLS configuration exists when any TLS path is non-NULL or
  * LANCEDB_CLIENT_CONFIG_TLS_ASSERT_HOSTNAME is set. The SDK TlsConfig default
  * asserts the server hostname, so leaving the bit unset keeps verification on;
  * setting it with 0 explicitly disables it and with 1 keeps it on. Any other
- * value makes the setter return NULL. Missing or unreadable TLS files, invalid
- * certificate contents, invalid header names or values, an unsupported
- * id_delimiter, a zero blob request concurrency and invalid retry status codes
- * are reported by lancedb_connect_builder_execute().
+ * value makes the setter return NULL. tls_cert_file and tls_key_file are read
+ * only when both are configured; a lone client certificate or key path is not
+ * read. tls_ssl_ca_cert is read when configured. Missing or unreadable configured
+ * files, invalid certificate contents, invalid header names or values, an
+ * unsupported id_delimiter, a zero blob request concurrency and invalid retry
+ * status codes are reported by lancedb_connect_builder_execute().
  *
  * Callback-based header providers are not part of this plain-data structure.
  * Native (non-db://) connections ignore the configuration, matching the other
