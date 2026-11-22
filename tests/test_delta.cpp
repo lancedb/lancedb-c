@@ -234,6 +234,29 @@ std::map<int64_t, uint64_t> id_row_ids(const IpcFileContents& file) {
   return result;
 }
 
+std::map<int64_t, int64_t> id_int64_values(const IpcFileContents& file,
+                                           const std::string& column) {
+  int id_index = file.schema->GetFieldIndex("id");
+  int value_index = file.schema->GetFieldIndex(column);
+  REQUIRE(id_index >= 0);
+  REQUIRE(value_index >= 0);
+
+  std::map<int64_t, int64_t> result;
+  for (const auto& batch : file.batches) {
+    auto ids =
+        std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(id_index));
+    auto values = std::dynamic_pointer_cast<arrow::Int64Array>(
+        batch->column(value_index));
+    REQUIRE(ids != nullptr);
+    REQUIRE(values != nullptr);
+    REQUIRE(ids->length() == values->length());
+    for (int64_t i = 0; i < ids->length(); ++i) {
+      result[ids->Value(i)] = values->Value(i);
+    }
+  }
+  return result;
+}
+
 void require_int64_set(const IpcFileContents& file, const std::string& column,
                        std::vector<int64_t> expected) {
   auto actual = int64_values(file, column);
@@ -328,6 +351,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delta streams row changes",
     require_row_change_schema(updated);
     require_int64_set(updated, "id", {0, 1});
     require_int64_set(updated, "value", {100, 200});
+    auto updated_values = id_int64_values(updated, "value");
+    REQUIRE(updated_values.size() == 2);
+    REQUIRE(updated_values.at(0) == 100);
+    REQUIRE(updated_values.at(1) == 200);
     auto updated_ids = id_row_ids(updated);
     REQUIRE(updated_ids.size() == 2);
     row_id_0 = updated_ids.at(0);
@@ -344,6 +371,11 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delta streams row changes",
     require_row_change_schema(upserted);
     require_int64_set(upserted, "id", {0, 1, 2});
     require_int64_set(upserted, "value", {100, 200, 30});
+    auto upserted_values = id_int64_values(upserted, "value");
+    REQUIRE(upserted_values.size() == 3);
+    REQUIRE(upserted_values.at(0) == 100);
+    REQUIRE(upserted_values.at(1) == 200);
+    REQUIRE(upserted_values.at(2) == 30);
     auto upserted_ids = id_row_ids(upserted);
     REQUIRE(upserted_ids.size() == 3);
     REQUIRE(upserted_ids.at(0) == row_id_0);
@@ -387,6 +419,10 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Delta streams row changes",
     IpcFileContents updated = into_ipc(result);
     require_int64_set(updated, "id", {0, 1});
     require_int64_set(updated, "value", {100, 200});
+    auto updated_values = id_int64_values(updated, "value");
+    REQUIRE(updated_values.size() == 2);
+    REQUIRE(updated_values.at(0) == 100);
+    REQUIRE(updated_values.at(1) == 200);
   }
 
   {

@@ -3202,10 +3202,22 @@ uint64_t lancedb_table_delta_end_version(const LanceDBTableDelta* delta);
  * table columns plus _rowid, _row_created_at_version and
  * _row_last_updated_at_version, read as of the end version.
  *
- * On entry, *result_out and the error message are cleared. The result is
- * independent of the delta and the source table; consume it with
- * lancedb_query_result_to_arrow() or lancedb_query_result_to_ipc_file() and
- * free it with lancedb_query_result_free().
+ * On entry, *result_out and the error message are cleared. The returned result
+ * is one owning handle, independent of the delta and the source table. Dispose
+ * of it exactly once: call lancedb_query_result_free() without consuming it, or
+ * pass it to exactly one conversion. lancedb_query_result_to_ipc_file()
+ * consumes a non-NULL result on success or failure.
+ * lancedb_query_result_to_arrow() consumes the result when all required
+ * out-pointers are non-NULL, on success or failure; with a NULL required
+ * out-pointer it returns LANCEDB_INVALID_ARGUMENT and leaves the result with
+ * the caller. Do not free a result after a conversion consumed it. The
+ * conversion docs name the frees for returned arrays/schema and IPC bytes.
+ *
+ * Equal endpoints return a successful empty stream that keeps this reader's
+ * schema without requiring stable row ids. Use
+ * lancedb_query_result_to_ipc_file() to read that schema; the Arrow C Data
+ * conversion reports an empty result as NULL arrays, NULL schema and a zero
+ * count.
  */
 LanceDBError lancedb_table_delta_inserted_rows(
     const LanceDBTableDelta* delta,
@@ -3227,8 +3239,22 @@ LanceDBError lancedb_table_delta_inserted_rows(
  * batch carries the table columns plus _rowid, _row_created_at_version and
  * _row_last_updated_at_version, read as of the end version.
  *
- * On entry, *result_out and the error message are cleared. The result is
- * independent of the delta and the source table.
+ * On entry, *result_out and the error message are cleared. The returned result
+ * is one owning handle, independent of the delta and the source table. Dispose
+ * of it exactly once: call lancedb_query_result_free() without consuming it, or
+ * pass it to exactly one conversion. lancedb_query_result_to_ipc_file()
+ * consumes a non-NULL result on success or failure.
+ * lancedb_query_result_to_arrow() consumes the result when all required
+ * out-pointers are non-NULL, on success or failure; with a NULL required
+ * out-pointer it returns LANCEDB_INVALID_ARGUMENT and leaves the result with
+ * the caller. Do not free a result after a conversion consumed it. The
+ * conversion docs name the frees for returned arrays/schema and IPC bytes.
+ *
+ * Equal endpoints return a successful empty stream that keeps this reader's
+ * schema without requiring stable row ids. Use
+ * lancedb_query_result_to_ipc_file() to read that schema; the Arrow C Data
+ * conversion reports an empty result as NULL arrays, NULL schema and a zero
+ * count.
  */
 LanceDBError lancedb_table_delta_updated_rows(
     const LanceDBTableDelta* delta,
@@ -3249,8 +3275,22 @@ LanceDBError lancedb_table_delta_updated_rows(
  * plus _rowid, _row_created_at_version and _row_last_updated_at_version, read
  * as of the end version.
  *
- * On entry, *result_out and the error message are cleared. The result is
- * independent of the delta and the source table.
+ * On entry, *result_out and the error message are cleared. The returned result
+ * is one owning handle, independent of the delta and the source table. Dispose
+ * of it exactly once: call lancedb_query_result_free() without consuming it, or
+ * pass it to exactly one conversion. lancedb_query_result_to_ipc_file()
+ * consumes a non-NULL result on success or failure.
+ * lancedb_query_result_to_arrow() consumes the result when all required
+ * out-pointers are non-NULL, on success or failure; with a NULL required
+ * out-pointer it returns LANCEDB_INVALID_ARGUMENT and leaves the result with
+ * the caller. Do not free a result after a conversion consumed it. The
+ * conversion docs name the frees for returned arrays/schema and IPC bytes.
+ *
+ * Equal endpoints return a successful empty stream that keeps this reader's
+ * schema without requiring stable row ids. Use
+ * lancedb_query_result_to_ipc_file() to read that schema; the Arrow C Data
+ * conversion reports an empty result as NULL arrays, NULL schema and a zero
+ * count.
  */
 LanceDBError lancedb_table_delta_upserted_rows(
     const LanceDBTableDelta* delta,
@@ -3270,8 +3310,22 @@ LanceDBError lancedb_table_delta_upserted_rows(
  * lancedb_table_delta_inserted_rows(). Each batch carries one _rowid column of
  * type UInt64; deleted rows are not reconstructed from earlier versions.
  *
- * On entry, *result_out and the error message are cleared. The result is
- * independent of the delta and the source table.
+ * On entry, *result_out and the error message are cleared. The returned result
+ * is one owning handle, independent of the delta and the source table. Dispose
+ * of it exactly once: call lancedb_query_result_free() without consuming it, or
+ * pass it to exactly one conversion. lancedb_query_result_to_ipc_file()
+ * consumes a non-NULL result on success or failure.
+ * lancedb_query_result_to_arrow() consumes the result when all required
+ * out-pointers are non-NULL, on success or failure; with a NULL required
+ * out-pointer it returns LANCEDB_INVALID_ARGUMENT and leaves the result with
+ * the caller. Do not free a result after a conversion consumed it. The
+ * conversion docs name the frees for returned arrays/schema and IPC bytes.
+ *
+ * Equal endpoints return a successful empty stream that keeps this reader's
+ * schema without requiring stable row ids. Use
+ * lancedb_query_result_to_ipc_file() to read that schema; the Arrow C Data
+ * conversion reports an empty result as NULL arrays, NULL schema and a zero
+ * count.
  */
 LanceDBError lancedb_table_delta_deleted_row_ids(
     const LanceDBTableDelta* delta,

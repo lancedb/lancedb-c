@@ -214,8 +214,22 @@ pub unsafe extern "C" fn lancedb_table_delta_end_version(delta: *const LanceDBTa
 ///
 /// Each batch carries the table columns plus `_rowid`,
 /// `_row_created_at_version` and `_row_last_updated_at_version`, read as of the
-/// end version. The result is independent of this handle and the source table;
-/// free it with `lancedb_query_result_free()`.
+/// end version. On entry, `*result_out` and the error message are cleared. The
+/// returned result is one owning handle, independent of the delta and the
+/// source table. Dispose of it exactly once: call
+/// `lancedb_query_result_free()` without consuming it, or pass it to exactly
+/// one conversion. `lancedb_query_result_to_ipc_file()` consumes a non-NULL
+/// result on success or failure. `lancedb_query_result_to_arrow()` consumes the
+/// result when all required out-pointers are non-NULL, on success or failure;
+/// with a NULL required out-pointer it returns InvalidArgument and leaves the
+/// result with the caller. Do not free a result after a conversion consumed it;
+/// the conversion docs name the frees for returned arrays/schema and IPC bytes.
+///
+/// Equal endpoints return a successful empty stream that keeps this reader's
+/// schema without requiring stable row ids. Use
+/// `lancedb_query_result_to_ipc_file()` to read that schema; the Arrow C Data
+/// conversion reports an empty result as NULL arrays, NULL schema and a zero
+/// count.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_delta_inserted_rows(
     delta: *const LanceDBTableDelta,
@@ -239,8 +253,22 @@ pub unsafe extern "C" fn lancedb_table_delta_inserted_rows(
 /// Newly inserted rows are excluded; see `lancedb_table_delta_upserted_rows()`
 /// for both. Each batch carries the table columns plus `_rowid`,
 /// `_row_created_at_version` and `_row_last_updated_at_version`, read as of the
-/// end version. The result is independent of this handle and the source table;
-/// free it with `lancedb_query_result_free()`.
+/// end version. On entry, `*result_out` and the error message are cleared. The
+/// returned result is one owning handle, independent of the delta and the
+/// source table. Dispose of it exactly once: call
+/// `lancedb_query_result_free()` without consuming it, or pass it to exactly
+/// one conversion. `lancedb_query_result_to_ipc_file()` consumes a non-NULL
+/// result on success or failure. `lancedb_query_result_to_arrow()` consumes the
+/// result when all required out-pointers are non-NULL, on success or failure;
+/// with a NULL required out-pointer it returns InvalidArgument and leaves the
+/// result with the caller. Do not free a result after a conversion consumed it;
+/// the conversion docs name the frees for returned arrays/schema and IPC bytes.
+///
+/// Equal endpoints return a successful empty stream that keeps this reader's
+/// schema without requiring stable row ids. Use
+/// `lancedb_query_result_to_ipc_file()` to read that schema; the Arrow C Data
+/// conversion reports an empty result as NULL arrays, NULL schema and a zero
+/// count.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_delta_updated_rows(
     delta: *const LanceDBTableDelta,
@@ -263,8 +291,22 @@ pub unsafe extern "C" fn lancedb_table_delta_updated_rows(
 ///
 /// Each batch carries the table columns plus `_rowid`,
 /// `_row_created_at_version` and `_row_last_updated_at_version`, read as of the
-/// end version. The result is independent of this handle and the source table;
-/// free it with `lancedb_query_result_free()`.
+/// end version. On entry, `*result_out` and the error message are cleared. The
+/// returned result is one owning handle, independent of the delta and the
+/// source table. Dispose of it exactly once: call
+/// `lancedb_query_result_free()` without consuming it, or pass it to exactly
+/// one conversion. `lancedb_query_result_to_ipc_file()` consumes a non-NULL
+/// result on success or failure. `lancedb_query_result_to_arrow()` consumes the
+/// result when all required out-pointers are non-NULL, on success or failure;
+/// with a NULL required out-pointer it returns InvalidArgument and leaves the
+/// result with the caller. Do not free a result after a conversion consumed it;
+/// the conversion docs name the frees for returned arrays/schema and IPC bytes.
+///
+/// Equal endpoints return a successful empty stream that keeps this reader's
+/// schema without requiring stable row ids. Use
+/// `lancedb_query_result_to_ipc_file()` to read that schema; the Arrow C Data
+/// conversion reports an empty result as NULL arrays, NULL schema and a zero
+/// count.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_delta_upserted_rows(
     delta: *const LanceDBTableDelta,
@@ -286,8 +328,23 @@ pub unsafe extern "C" fn lancedb_table_delta_upserted_rows(
 ///   code that rejected the reader
 ///
 /// Each batch carries one `_rowid` column of type `UInt64`. Deleted rows are
-/// not reconstructed from earlier versions. The result is independent of this
-/// handle and the source table; free it with `lancedb_query_result_free()`.
+/// not reconstructed from earlier versions. On entry, `*result_out` and the
+/// error message are cleared. The returned result is one owning handle,
+/// independent of the delta and the source table. Dispose of it exactly once:
+/// call `lancedb_query_result_free()` without consuming it, or pass it to
+/// exactly one conversion. `lancedb_query_result_to_ipc_file()` consumes a
+/// non-NULL result on success or failure. `lancedb_query_result_to_arrow()`
+/// consumes the result when all required out-pointers are non-NULL, on success
+/// or failure; with a NULL required out-pointer it returns InvalidArgument and
+/// leaves the result with the caller. Do not free a result after a conversion
+/// consumed it; the conversion docs name the frees for returned arrays/schema
+/// and IPC bytes.
+///
+/// Equal endpoints return a successful empty stream that keeps this reader's
+/// schema without requiring stable row ids. Use
+/// `lancedb_query_result_to_ipc_file()` to read that schema; the Arrow C Data
+/// conversion reports an empty result as NULL arrays, NULL schema and a zero
+/// count.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_delta_deleted_row_ids(
     delta: *const LanceDBTableDelta,
