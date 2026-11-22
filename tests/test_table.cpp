@@ -3249,6 +3249,70 @@ static size_t count_matching_rows(LanceDBTable* table, const std::string& filter
   return rows;
 }
 
+// Return one user metadata value from a field, or an empty string when the
+// key is absent.
+static std::string field_metadata_value(
+    const std::shared_ptr<arrow::Field>& field, const std::string& key) {
+  if (field == nullptr || field->metadata() == nullptr) {
+    return {};
+  }
+  auto value = field->metadata()->Get(key);
+  return value.ok() ? *value : std::string();
+}
+
+static bool field_metadata_has_key(
+    const std::shared_ptr<arrow::Field>& field, const std::string& key) {
+  return field != nullptr && field->metadata() != nullptr &&
+         field->metadata()->Get(key).ok();
+}
+
+// Read every non-null value of an int64 column matching a SQL predicate through
+// the public query API. The type check makes a cast that only changes the table
+// schema, without rewriting the stored data, fail here.
+static std::vector<int64_t> query_int64_values(
+    LanceDBTable* table, const std::string& filter, const std::string& column) {
+  LanceDBQuery* query = lancedb_query_new(table);
+  REQUIRE(query != nullptr);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_where_filter(query, filter.c_str(), &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  LanceDBQueryResult* query_result = lancedb_query_execute(query);
+  REQUIRE(query_result != nullptr);
+
+  FFI_ArrowArray** result_arrays = nullptr;
+  FFI_ArrowSchema* result_schema = nullptr;
+  size_t count = 0;
+  REQUIRE(lancedb_query_result_to_arrow(
+      query_result, &result_arrays, &result_schema, &count, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(count > 0);
+
+  auto imported_schema = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(result_schema));
+  REQUIRE(imported_schema.ok());
+  auto column_index = imported_schema.ValueUnsafe()->GetFieldIndex(column);
+  REQUIRE(column_index >= 0);
+
+  std::vector<int64_t> values;
+  for (size_t i = 0; i < count; i++) {
+    auto imported_batch = arrow::ImportRecordBatch(
+        reinterpret_cast<ArrowArray*>(result_arrays[i]), imported_schema.ValueUnsafe());
+    REQUIRE(imported_batch.ok());
+    auto array = imported_batch.ValueUnsafe()->column(column_index);
+    REQUIRE(array->type_id() == arrow::Type::INT64);
+    auto int64_array = std::static_pointer_cast<arrow::Int64Array>(array);
+    for (int64_t row = 0; row < int64_array->length(); row++) {
+      REQUIRE_FALSE(int64_array->IsNull(row));
+      values.push_back(int64_array->Value(row));
+    }
+  }
+
+  lancedb_free_arrow_arrays(result_arrays, count);
+  lancedb_free_arrow_schema(result_schema);
+  return values;
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
   const std::string table_name = "schema_evolution_test";
   auto schema = create_schema_evolution_schema();
@@ -3543,5 +3607,679 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     REQUIRE(lancedb_table_count_rows(table) == 5);
   }
 
+
+  SECTION("Add all-null typed columns from an Arrow schema") {
+    auto all_nulls_schema = arrow::schema({
+        arrow::field("all_null_tags", arrow::utf8(), /*nullable=*/true,
+                     arrow::key_value_metadata({"unit"}, {"label"})),
+        arrow::field("all_null_scores", arrow::list(arrow::int32()), /*nullable=*/true),
+        arrow::field("all_null_embedding",
+                     arrow::fixed_size_list(arrow::float32(), 4), /*nullable=*/true),
+    });
+    struct ArrowSchema c_all_nulls_schema;
+    REQUIRE(arrow::ExportSchema(*all_nulls_schema, &c_all_nulls_schema).ok());
+
+    uint64_t version = 0;
+    REQUIRE(lancedb_table_add_columns_all_nulls(
+        table, reinterpret_cast<FFI_ArrowSchema*>(&c_all_nulls_schema),
+        &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == initial_version + 1);
+    REQUIRE(version == lancedb_table_version(table));
+    REQUIRE(c_all_nulls_schema.release != nullptr);
+    if (c_all_nulls_schema.release) {
+      c_all_nulls_schema.release(&c_all_nulls_schema);
+    }
+
+    auto updated_schema = read_table_schema(table);
+    auto tags_field = schema_field(updated_schema, "all_null_tags");
+    REQUIRE(tags_field != nullptr);
+    REQUIRE(tags_field->type()->Equals(arrow::utf8()));
+    REQUIRE(tags_field->nullable());
+    REQUIRE(field_metadata_value(tags_field, "unit") == "label");
+    auto scores_field = schema_field(updated_schema, "all_null_scores");
+    REQUIRE(scores_field != nullptr);
+    REQUIRE(scores_field->type()->Equals(arrow::list(arrow::int32())));
+    REQUIRE(scores_field->nullable());
+    auto embedding_field = schema_field(updated_schema, "all_null_embedding");
+    REQUIRE(embedding_field != nullptr);
+    REQUIRE(embedding_field->type()->Equals(arrow::fixed_size_list(arrow::float32(), 4)));
+    REQUIRE(embedding_field->nullable());
+
+    // The metadata-only commit must make every existing row read NULL.
+    REQUIRE(count_matching_rows(table, "all_null_tags IS NULL") == 5);
+    REQUIRE(count_matching_rows(table, "all_null_scores IS NULL") == 5);
+    REQUIRE(count_matching_rows(table, "all_null_embedding IS NULL") == 5);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+  }
+
+  SECTION("Add all-null columns rejects invalid schemas without committing") {
+    uint64_t version = 42;
+    REQUIRE(lancedb_table_add_columns_all_nulls(
+        nullptr, nullptr, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_add_columns_all_nulls(
+        table, nullptr, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(version == 42);
+
+    auto empty_schema = arrow::schema({});
+    struct ArrowSchema c_empty_schema;
+    REQUIRE(arrow::ExportSchema(*empty_schema, &c_empty_schema).ok());
+    REQUIRE(lancedb_table_add_columns_all_nulls(
+        table, reinterpret_cast<FFI_ArrowSchema*>(&c_empty_schema), &version,
+        &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(c_empty_schema.release != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_table_add_columns_all_nulls(
+        table, reinterpret_cast<FFI_ArrowSchema*>(&c_empty_schema), nullptr,
+        nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(c_empty_schema.release != nullptr);
+    if (c_empty_schema.release) {
+      c_empty_schema.release(&c_empty_schema);
+    }
+
+    auto non_nullable_schema = arrow::schema({
+        arrow::field("not_nullable", arrow::int32(), /*nullable=*/false),
+    });
+    struct ArrowSchema c_non_nullable_schema;
+    REQUIRE(arrow::ExportSchema(*non_nullable_schema, &c_non_nullable_schema).ok());
+    REQUIRE(lancedb_table_add_columns_all_nulls(
+        table, reinterpret_cast<FFI_ArrowSchema*>(&c_non_nullable_schema), &version,
+        &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(c_non_nullable_schema.release != nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("nullable") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    if (c_non_nullable_schema.release) {
+      c_non_nullable_schema.release(&c_non_nullable_schema);
+    }
+
+    REQUIRE(version == 42);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    REQUIRE(schema_field(read_table_schema(table), "not_nullable") == nullptr);
+  }
+
+  SECTION("Alter columns casts a column type with the commit version") {
+    auto unsupported_cast = arrow::schema({
+        arrow::field("score", arrow::float64()),
+    });
+    struct ArrowSchema c_unsupported_cast;
+    REQUIRE(arrow::ExportSchema(*unsupported_cast, &c_unsupported_cast).ok());
+    LanceDBColumnAlterationWithCast unsupported[] = {
+        {"score", nullptr, /*set_nullable=*/0, /*nullable=*/0,
+         reinterpret_cast<FFI_ArrowSchema*>(&c_unsupported_cast)},
+    };
+    uint64_t version = 42;
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, unsupported, 1, &version, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(c_unsupported_cast.release != nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("Cannot cast column") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    if (c_unsupported_cast.release) {
+      c_unsupported_cast.release(&c_unsupported_cast);
+    }
+    REQUIRE(version == 42);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+
+    auto int64_cast = arrow::schema({
+        arrow::field("score", arrow::int64(), /*nullable=*/false),
+    });
+    struct ArrowSchema c_int64_cast;
+    REQUIRE(arrow::ExportSchema(*int64_cast, &c_int64_cast).ok());
+    LanceDBColumnAlterationWithCast alterations[] = {
+        {"score", "score64", /*set_nullable=*/1, /*nullable=*/1,
+         reinterpret_cast<FFI_ArrowSchema*>(&c_int64_cast)},
+    };
+    version = 0;
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, alterations, 1, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == initial_version + 1);
+    REQUIRE(version == lancedb_table_version(table));
+    REQUIRE(c_int64_cast.release != nullptr);
+    if (c_int64_cast.release) {
+      c_int64_cast.release(&c_int64_cast);
+    }
+
+    auto updated_schema = read_table_schema(table);
+    REQUIRE(schema_field(updated_schema, "score") == nullptr);
+    auto score64_field = schema_field(updated_schema, "score64");
+    REQUIRE(score64_field != nullptr);
+    REQUIRE(score64_field->type()->Equals(arrow::int64()));
+    REQUIRE(score64_field->nullable());
+
+    // The cast must rewrite the stored values, not only the schema.
+    REQUIRE(query_int64_values(table, "key = 'key_1'", "score64") ==
+            std::vector<int64_t>{20});
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+
+    // Embedded Lance rejects a cast combined with tightening a nullable field
+    // even when the data has no NULLs. Add a nullable column whose values are
+    // all non-null, then ask for the cast and NOT NULL in one operation.
+    const char* nullable_name[] = {"cast_tighten"};
+    const char* nullable_expression[] = {"score64"};
+    uint64_t add_version = 0;
+    REQUIRE(lancedb_table_add_columns(
+        table, nullable_name, nullable_expression, 1, &add_version, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(add_version == lancedb_table_version(table));
+    auto nullable_schema = read_table_schema(table);
+    auto tighten_field = schema_field(nullable_schema, "cast_tighten");
+    REQUIRE(tighten_field != nullptr);
+    REQUIRE(tighten_field->nullable());
+
+    auto int32_cast = arrow::schema({
+        arrow::field("cast_tighten", arrow::int32(), /*nullable=*/false),
+    });
+    struct ArrowSchema c_int32_cast;
+    REQUIRE(arrow::ExportSchema(*int32_cast, &c_int32_cast).ok());
+    LanceDBColumnAlterationWithCast tighten[] = {
+        {"cast_tighten", nullptr, /*set_nullable=*/1, /*nullable=*/0,
+         reinterpret_cast<FFI_ArrowSchema*>(&c_int32_cast)},
+    };
+    uint64_t failed_version = 42;
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, tighten, 1, &failed_version, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(c_int32_cast.release != nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("non-nullable and cast") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    if (c_int32_cast.release) {
+      c_int32_cast.release(&c_int32_cast);
+    }
+    REQUIRE(failed_version == 42);
+    REQUIRE(lancedb_table_version(table) == add_version);
+  }
+
+  SECTION("Alter columns with cast rejects invalid input and preserves state") {
+    auto int64_cast = arrow::schema({
+        arrow::field("score", arrow::int64(), /*nullable=*/false),
+    });
+    struct ArrowSchema c_int64_cast;
+    REQUIRE(arrow::ExportSchema(*int64_cast, &c_int64_cast).ok());
+    LanceDBColumnAlterationWithCast valid[] = {
+        {"score", nullptr, /*set_nullable=*/0, /*nullable=*/0,
+         reinterpret_cast<FFI_ArrowSchema*>(&c_int64_cast)},
+    };
+    LanceDBColumnAlterationWithCast no_change[] = {
+        {"score", nullptr, /*set_nullable=*/0, /*nullable=*/0, nullptr},
+    };
+
+    auto two_fields = arrow::schema({
+        arrow::field("first", arrow::int64()),
+        arrow::field("second", arrow::int64()),
+    });
+    struct ArrowSchema c_two_fields;
+    REQUIRE(arrow::ExportSchema(*two_fields, &c_two_fields).ok());
+    LanceDBColumnAlterationWithCast two_field_cast[] = {
+        {"score", nullptr, /*set_nullable=*/0, /*nullable=*/0,
+         reinterpret_cast<FFI_ArrowSchema*>(&c_two_fields)},
+    };
+
+    uint64_t version = 42;
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        nullptr, valid, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, nullptr, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, valid, 0, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, valid, 1, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, no_change, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_alter_columns_with_cast(
+        table, two_field_cast, 1, &version, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(c_int64_cast.release != nullptr);
+    REQUIRE(c_two_fields.release != nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("exactly one field") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(version == 42);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    if (c_int64_cast.release) {
+      c_int64_cast.release(&c_int64_cast);
+    }
+    if (c_two_fields.release) {
+      c_two_fields.release(&c_two_fields);
+    }
+  }
+
+  SECTION("Update field metadata merges, replaces, and clears committed state") {
+    const LanceDBFieldMetadataEntry set_entries[] = {
+        {"unit", "label"},
+        {"pii", "false"},
+    };
+    LanceDBFieldMetadataUpdate set_update = {"note", set_entries, 2, /*replace=*/0};
+    uint64_t version = 0;
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &set_update, 1, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == initial_version + 1);
+    REQUIRE(version == lancedb_table_version(table));
+
+    auto updated_schema = read_table_schema(table);
+    auto note_field = schema_field(updated_schema, "note");
+    REQUIRE(note_field != nullptr);
+    REQUIRE(field_metadata_value(note_field, "unit") == "label");
+    REQUIRE(field_metadata_value(note_field, "pii") == "false");
+
+    const LanceDBFieldMetadataEntry merge_entries[] = {
+        {"source", "import"},
+        {"pii", nullptr},
+    };
+    LanceDBFieldMetadataUpdate merge_update = {"note", merge_entries, 2, /*replace=*/0};
+    auto version_before_merge = lancedb_table_version(table);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &merge_update, 1, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == version_before_merge + 1);
+    REQUIRE(version == lancedb_table_version(table));
+
+    updated_schema = read_table_schema(table);
+    note_field = schema_field(updated_schema, "note");
+    REQUIRE(field_metadata_value(note_field, "unit") == "label");
+    REQUIRE(field_metadata_value(note_field, "source") == "import");
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "pii"));
+
+    const LanceDBFieldMetadataEntry replace_entries[] = {
+        {"unit", "display"},
+    };
+    LanceDBFieldMetadataUpdate replace_update = {
+        "note", replace_entries, 1, /*replace=*/1};
+    auto version_before_replace = lancedb_table_version(table);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &replace_update, 1, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == version_before_replace + 1);
+    REQUIRE(version == lancedb_table_version(table));
+
+    updated_schema = read_table_schema(table);
+    note_field = schema_field(updated_schema, "note");
+    REQUIRE(field_metadata_value(note_field, "unit") == "display");
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "source"));
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "pii"));
+
+    // Read the replacement back from a newly opened table rather than the
+    // handle that issued the commit.
+    LanceDBTable* reopened = open_table(table_name);
+    auto persisted_schema = read_table_schema(reopened);
+    auto persisted_note = schema_field(persisted_schema, "note");
+    REQUIRE(field_metadata_value(persisted_note, "unit") == "display");
+    REQUIRE_FALSE(field_metadata_has_key(persisted_note, "source"));
+    lancedb_table_free(reopened);
+
+    LanceDBFieldMetadataUpdate clear_update = {"note", nullptr, 0, /*replace=*/1};
+    auto version_before_clear = lancedb_table_version(table);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &clear_update, 1, &version, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(version == version_before_clear + 1);
+    REQUIRE(version == lancedb_table_version(table));
+
+    updated_schema = read_table_schema(table);
+    note_field = schema_field(updated_schema, "note");
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "unit"));
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "source"));
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "pii"));
+
+    reopened = open_table(table_name);
+    persisted_schema = read_table_schema(reopened);
+    persisted_note = schema_field(persisted_schema, "note");
+    REQUIRE_FALSE(field_metadata_has_key(persisted_note, "unit"));
+    lancedb_table_free(reopened);
+  }
+
+  SECTION("Update field metadata rejects invalid input and backend errors") {
+    const LanceDBFieldMetadataEntry valid_entries[] = {
+        {"unit", "label"},
+    };
+    LanceDBFieldMetadataUpdate valid = {"note", valid_entries, 1, /*replace=*/0};
+    const LanceDBFieldMetadataEntry duplicate_entries[] = {
+        {"unit", "label"},
+        {"unit", "other"},
+    };
+    LanceDBFieldMetadataUpdate duplicate = {
+        "note", duplicate_entries, 2, /*replace=*/0};
+    LanceDBFieldMetadataUpdate merge_empty = {
+        "note", nullptr, 0, /*replace=*/0};
+    LanceDBFieldMetadataUpdate entries_missing = {
+        "note", nullptr, 1, /*replace=*/0};
+    LanceDBFieldMetadataUpdate null_path = {
+        nullptr, valid_entries, 1, /*replace=*/0};
+    LanceDBFieldMetadataUpdate empty_path = {
+        "", valid_entries, 1, /*replace=*/0};
+    LanceDBFieldMetadataUpdate whitespace_path = {
+        "   ", valid_entries, 1, /*replace=*/0};
+    const char* invalid_path_text = "\xff\xfe";
+    LanceDBFieldMetadataUpdate invalid_path = {
+        invalid_path_text, valid_entries, 1, /*replace=*/0};
+    const LanceDBFieldMetadataEntry null_key_entries[] = {
+        {nullptr, "label"},
+    };
+    LanceDBFieldMetadataUpdate null_key = {
+        "note", null_key_entries, 1, /*replace=*/0};
+    const LanceDBFieldMetadataEntry empty_key_entries[] = {
+        {"", "label"},
+    };
+    LanceDBFieldMetadataUpdate empty_key = {
+        "note", empty_key_entries, 1, /*replace=*/0};
+    const LanceDBFieldMetadataEntry invalid_key_entries[] = {
+        {"\xff\xfe", "label"},
+    };
+    LanceDBFieldMetadataUpdate invalid_key = {
+        "note", invalid_key_entries, 1, /*replace=*/0};
+    const LanceDBFieldMetadataEntry invalid_value_entries[] = {
+        {"unit", "\xff\xfe"},
+    };
+    LanceDBFieldMetadataUpdate invalid_value = {
+        "note", invalid_value_entries, 1, /*replace=*/0};
+    const LanceDBFieldMetadataEntry ghost_entries[] = {
+        {"unit", "label"},
+    };
+    LanceDBFieldMetadataUpdate ghost = {
+        "ghost", ghost_entries, 1, /*replace=*/0};
+
+    uint64_t version = 42;
+    REQUIRE(lancedb_table_update_field_metadata(
+        nullptr, &valid, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, nullptr, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &valid, 0, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &valid, 1, nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &null_path, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &empty_path, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &whitespace_path, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &invalid_path, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &merge_empty, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &entries_missing, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &null_key, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &empty_key, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &invalid_key, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &invalid_value, 1, &version, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &duplicate, 1, &version, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("unique") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_table_update_field_metadata(
+        table, &ghost, 1, &version, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(version == 42);
+    REQUIRE(lancedb_table_version(table) == initial_version);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    auto note_field = schema_field(read_table_schema(table), "note");
+    REQUIRE_FALSE(field_metadata_has_key(note_field, "unit"));
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - branch lifecycle", "[table][branch]") {
+  const std::string table_name = "test_branch_lifecycle";
+  constexpr int main_rows = 3;
+  LanceDBTable* main_table = create_table_with_data(table_name, main_rows, 0);
+  const uint64_t main_version = lancedb_table_version(main_table);
+
+  char* error_message = nullptr;
+  char* current_branch = nullptr;
+  REQUIRE(lancedb_table_current_branch(main_table, &current_branch, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(current_branch == nullptr);
+
+  const LanceDBBranchSource source = {
+      .kind = LANCEDB_BRANCH_SOURCE_VERSION,
+      .name = nullptr,
+      .has_version = 1,
+      .version = main_version};
+  LanceDBTable* branch = nullptr;
+  REQUIRE(lancedb_table_create_branch(main_table, "exp", &source, &branch, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch != nullptr);
+
+  REQUIRE(lancedb_table_current_branch(branch, &current_branch, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(current_branch != nullptr);
+  REQUIRE(std::string(current_branch) == "exp");
+  lancedb_free_string(current_branch);
+  current_branch = nullptr;
+
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows);
+  const uint64_t branch_fork_version = lancedb_table_version(branch);
+
+  // A write on the branch must not leak into main.
+  auto branch_batch = create_test_record_batch(2, main_rows);
+  auto branch_reader = create_reader_from_batch(branch_batch);
+  REQUIRE(lancedb_table_add(branch, branch_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows + 2);
+  REQUIRE(lancedb_table_count_rows(main_table) == main_rows);
+  REQUIRE(first_data_value(branch, "key_3") == 30.0F);
+  REQUIRE(count_matching_rows(main_table, "key = 'key_3'") == 0);
+
+  // The source handle keeps its own branch and stays writable.
+  auto main_batch = create_test_record_batch(1, 100);
+  auto main_reader = create_reader_from_batch(main_batch);
+  REQUIRE(lancedb_table_add(main_table, main_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_version(main_table) == main_version + 1);
+  REQUIRE(lancedb_table_count_rows(main_table) == main_rows + 1);
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows + 2);
+  REQUIRE(first_data_value(main_table, "key_100") == 1000.0F);
+  REQUIRE(count_matching_rows(branch, "key = 'key_100'") == 0);
+
+  // A pinned checkout sees the branch at the fork version and is read-only.
+  const LanceDBBranchCheckoutOptions pinned_options = {
+      .has_version = 1,
+      .version = branch_fork_version};
+  LanceDBTable* pinned = nullptr;
+  REQUIRE(lancedb_table_checkout_branch(main_table, "exp", &pinned_options, &pinned, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(pinned != nullptr);
+  REQUIRE(lancedb_table_count_rows(pinned) == main_rows);
+  REQUIRE(count_matching_rows(pinned, "key = 'key_3'") == 0);
+
+  REQUIRE(lancedb_table_current_branch(pinned, &current_branch, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(current_branch != nullptr);
+  REQUIRE(std::string(current_branch) == "exp");
+  lancedb_free_string(current_branch);
+  current_branch = nullptr;
+
+  auto pinned_batch = create_test_record_batch(1, 200);
+  auto pinned_reader = create_reader_from_batch(pinned_batch);
+  REQUIRE(lancedb_table_add(pinned, pinned_reader, &error_message) != LANCEDB_SUCCESS);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+  REQUIRE(lancedb_table_count_rows(branch) == main_rows + 2);
+
+  // Without a version the checkout follows the branch head.
+  const LanceDBBranchCheckoutOptions head_options = {.has_version = 0, .version = 0};
+  LanceDBTable* branch_head = nullptr;
+  REQUIRE(lancedb_table_checkout_branch(main_table, "exp", &head_options, &branch_head, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch_head != nullptr);
+  REQUIRE(lancedb_table_count_rows(branch_head) == main_rows + 2);
+  REQUIRE(first_data_value(branch_head, "key_3") == 30.0F);
+
+  const LanceDBBranch* branches = nullptr;
+  size_t branch_count = 0;
+  REQUIRE(lancedb_table_list_branches(main_table, &branches, &branch_count, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch_count == 1);
+  REQUIRE(branches != nullptr);
+  REQUIRE(std::string(branches[0].name) == "exp");
+  REQUIRE(branches[0].parent_branch == nullptr);
+  REQUIRE(branches[0].parent_version == main_version);
+  REQUIRE(branches[0].created_at > 0);
+  REQUIRE(branches[0].manifest_size > 0);
+  REQUIRE(branches[0].metadata_count == 0);
+  REQUIRE(branches[0].metadata_keys == nullptr);
+  REQUIRE(branches[0].metadata_values == nullptr);
+  lancedb_free_branches(branches, branch_count);
+
+  REQUIRE(lancedb_table_delete_branch(main_table, "exp", &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  branches = nullptr;
+  branch_count = 0;
+  REQUIRE(lancedb_table_list_branches(main_table, &branches, &branch_count, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(branch_count == 0);
+  REQUIRE(branches == nullptr);
+  lancedb_free_branches(branches, branch_count);
+
+  LanceDBTable* missing = nullptr;
+  REQUIRE(lancedb_table_checkout_branch(main_table, "exp", &head_options, &missing, &error_message)
+      != LANCEDB_SUCCESS);
+  REQUIRE(missing == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  lancedb_table_free(branch_head);
+  lancedb_table_free(pinned);
+  lancedb_table_free(branch);
+  lancedb_table_free(main_table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - branch sources", "[table][branch]") {
+  const std::string table_name = "test_branch_sources";
+  constexpr int tagged_rows = 2;
+  LanceDBTable* table = create_table_with_data(table_name, tagged_rows, 0);
+  const uint64_t tagged_version = lancedb_table_version(table);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create_tag(table, "v1", tagged_version, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  // Advance main after the tag so a tag source is observably older than the head.
+  auto later_batch = create_test_record_batch(2, tagged_rows);
+  auto later_reader = create_reader_from_batch(later_batch);
+  REQUIRE(lancedb_table_add(table, later_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(table) == tagged_rows + 2);
+
+  const LanceDBBranchSource tag_source = {
+      .kind = LANCEDB_BRANCH_SOURCE_TAG,
+      .name = "v1",
+      .has_version = 0,
+      .version = 0};
+  LanceDBTable* tagged = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "tagged", &tag_source, &tagged, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(tagged != nullptr);
+  REQUIRE(lancedb_table_count_rows(tagged) == tagged_rows);
+  REQUIRE(count_matching_rows(tagged, "key = 'key_2'") == 0);
+
+  const uint64_t tagged_fork_version = lancedb_table_version(tagged);
+  auto tagged_batch = create_test_record_batch(1, 10);
+  auto tagged_reader = create_reader_from_batch(tagged_batch);
+  REQUIRE(lancedb_table_add(tagged, tagged_reader, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(tagged) == tagged_rows + 1);
+  REQUIRE(first_data_value(tagged, "key_10") == 100.0F);
+
+  // A branch source without a version follows its head.
+  const LanceDBBranchSource head_source = {
+      .kind = LANCEDB_BRANCH_SOURCE_BRANCH,
+      .name = "tagged",
+      .has_version = 0,
+      .version = 0};
+  LanceDBTable* head_copy = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "head_copy", &head_source, &head_copy, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(head_copy != nullptr);
+  REQUIRE(lancedb_table_count_rows(head_copy) == tagged_rows + 1);
+  REQUIRE(first_data_value(head_copy, "key_10") == 100.0F);
+
+  // A branch source with a version pins the fork point.
+  const LanceDBBranchSource pinned_source = {
+      .kind = LANCEDB_BRANCH_SOURCE_BRANCH,
+      .name = "tagged",
+      .has_version = 1,
+      .version = tagged_fork_version};
+  LanceDBTable* pinned_copy = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "pinned_copy", &pinned_source, &pinned_copy, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(pinned_copy != nullptr);
+  REQUIRE(lancedb_table_count_rows(pinned_copy) == tagged_rows);
+  REQUIRE(count_matching_rows(pinned_copy, "key = 'key_10'") == 0);
+
+  // Raw values outside the public enum are rejected before reaching the SDK.
+  // The other source fields are valid, so only the kind can cause the failure.
+  LanceDBTable* invalid = nullptr;
+  REQUIRE(lancedb_test_create_branch_with_source_kind(
+      table, "invalid", 999, "v1", 1, tagged_version, &invalid, &error_message)
+      == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(invalid == nullptr);
+  REQUIRE(error_message != nullptr);
+  REQUIRE(std::string(error_message).find("branch source kind") != std::string::npos);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  const LanceDBBranchSource missing_tag_name = {
+      .kind = LANCEDB_BRANCH_SOURCE_TAG,
+      .name = nullptr,
+      .has_version = 0,
+      .version = 0};
+  invalid = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "invalid", &missing_tag_name, &invalid, &error_message)
+      == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(invalid == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  const LanceDBBranchSource missing_source_version = {
+      .kind = LANCEDB_BRANCH_SOURCE_VERSION,
+      .name = nullptr,
+      .has_version = 0,
+      .version = 0};
+  invalid = nullptr;
+  REQUIRE(lancedb_table_create_branch(table, "invalid", &missing_source_version, &invalid, &error_message)
+      == LANCEDB_INVALID_ARGUMENT);
+  REQUIRE(invalid == nullptr);
+  REQUIRE(error_message != nullptr);
+  lancedb_free_string(error_message);
+  error_message = nullptr;
+
+  lancedb_table_free(pinned_copy);
+  lancedb_table_free(head_copy);
+  lancedb_table_free(tagged);
   lancedb_table_free(table);
 }
