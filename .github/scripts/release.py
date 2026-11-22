@@ -382,6 +382,11 @@ def render_notes(
         )
     lines.extend(
         [
+            "## Shared-library exports",
+            "",
+            "The shared library exports only functions declared in `include/lancedb.h`.",
+            "Earlier preview packages also exposed incidental symbols from statically linked dependencies (CRC, BLAKE3, and AWS-LC jitterentropy). Those symbols were not part of the C API and are no longer exported. No documented C function or header declaration was removed.",
+            "",
             "## Release provenance",
             "",
             "| Field | Value |",

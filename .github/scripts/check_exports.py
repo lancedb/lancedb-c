@@ -171,11 +171,10 @@ def _elf_exports(library: Path) -> set[str]:
         fields = line.split()
         if len(fields) < 8:
             continue
-        _, _, _, symbol_type, binding, visibility, section, name = fields[:8]
+        _, _, _, _symbol_type, binding, visibility, section, name = fields[:8]
         if (
-            symbol_type == "FUNC"
-            and binding in ("GLOBAL", "WEAK")
-            and visibility == "DEFAULT"
+            binding in ("GLOBAL", "WEAK", "UNIQUE")
+            and visibility in ("DEFAULT", "PROTECTED")
             and section != "UND"
         ):
             exports.add(name.split("@", 1)[0])

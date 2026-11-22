@@ -26,11 +26,66 @@ fn main() {
     if root.join(".git").exists() {
         emit_git_rerun_paths(&root);
     }
+    require_export_control_config();
+    emit_export_control_watch(&root);
 
     let version = resolve_version(&root);
     println!("cargo:rustc-env=LANCEDB_BUILD_VERSION={version}");
 
     emit_export_controls(&root);
+}
+
+fn require_export_control_config() {
+    if env::var_os("LANCEDB_EXPORT_CONTROL_CONFIG").is_none() {
+        panic!(
+            "lancedb-c requires the repository .cargo/config.toml export-control linker; \
+             run Cargo from the repository root or use the documented CMake/package entry"
+        );
+    }
+}
+
+fn emit_export_control_watch(root: &Path) {
+    let mut fingerprint = 0xcbf29ce484222325_u64;
+    for relative in [
+        ".cargo/config.toml",
+        "cmake/export-linker.sh",
+        "cmake/export-linker.cmd",
+    ] {
+        let path = root.join(relative);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for byte in bytes {
+            fingerprint ^= u64::from(byte);
+            fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+        }
+    }
+    println!("cargo:rustc-env=LANCEDB_EXPORT_CONTROL_FINGERPRINT={fingerprint:016x}");
+}
+
+fn reject_linker_overrides(target: &str) {
+    let key = format!(
+        "CARGO_TARGET_{}_LINKER",
+        target.replace('-', "_").to_uppercase()
+    );
+    if env::var_os(&key).is_some() {
+        panic!(
+            "{key} would bypass the lancedb-c export-control linker; unset it or use the \
+             documented CMake/package entry"
+        );
+    }
+    for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
+        let Some(value) = env::var_os(name) else {
+            continue;
+        };
+        let value = value.to_string_lossy();
+        if value.contains("linker=") || value.contains("-Clinker") || value.contains("-C linker") {
+            panic!(
+                "{name} would bypass the lancedb-c export-control linker; remove the linker \
+                 override or use the documented CMake/package entry"
+            );
+        }
+    }
 }
 
 fn emit_export_controls(root: &Path) {
@@ -39,6 +94,7 @@ fn emit_export_controls(root: &Path) {
     let target = env::var("TARGET").expect("TARGET is set by Cargo");
     let host = env::var("HOST").expect("HOST is set by Cargo");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    reject_linker_overrides(&target);
     let header = fs::read_to_string(&header_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", header_path.display()));
     let functions = public_functions(&header);
@@ -65,6 +121,10 @@ fn emit_export_controls(root: &Path) {
             "cargo:rustc-env=LANCEDB_EXPORTED_SYMBOLS={}",
             path.display()
         );
+        // This sentinel is only understood by the repository linker wrapper.
+        // If Cargo is told to use another linker, the real linker rejects it
+        // instead of silently producing a library with dependency exports.
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-lancedb-export-control");
     } else if target.contains("-linux-") {
         let mut text = String::from("{\n  global:\n");
         for name in &functions {
@@ -77,6 +137,9 @@ fn emit_export_controls(root: &Path) {
         fs::write(&path, text)
             .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
         println!("cargo:rustc-env=LANCEDB_EXPORT_MAP={}", path.display());
+        // See the Mach-O sentinel above. GNU ld and LLD both reject this
+        // unknown option if the wrapper is bypassed.
+        println!("cargo:rustc-cdylib-link-arg=-Wl,--lancedb-export-control");
     }
 }
 

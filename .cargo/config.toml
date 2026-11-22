@@ -1,5 +1,7 @@
 [env]
 AWS_LC_SYS_CMAKE_BUILDER = "1"
+# build.rs fails closed when Cargo discovers another configuration root.
+LANCEDB_EXPORT_CONTROL_CONFIG = "1"
 
 # The linker wrappers only replace the final liblancedb cdylib's export
 # controls. They forward build-script and external-provider links unchanged.
