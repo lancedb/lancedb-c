@@ -2110,9 +2110,7 @@ unsafe fn parse_column_alteration(
     cast_to: *const arrow_schema::ffi::FFI_ArrowSchema,
     error_message: *mut *mut c_char,
 ) -> Option<ColumnAlteration> {
-    let Some(path) = required_c_string(path, error_message) else {
-        return None;
-    };
+    let path = required_c_string(path, error_message)?;
     if path.trim().is_empty() {
         set_invalid_argument_message(error_message);
         return None;
@@ -2121,9 +2119,7 @@ unsafe fn parse_column_alteration(
     let rename = if rename.is_null() {
         None
     } else {
-        let Some(rename) = required_c_string(rename, error_message) else {
-            return None;
-        };
+        let rename = required_c_string(rename, error_message)?;
         if rename.trim().is_empty() {
             set_invalid_argument_message(error_message);
             return None;
