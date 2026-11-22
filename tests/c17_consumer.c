@@ -263,7 +263,7 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   first = NULL;
 
   /* Invalid constructors clear the output handle and return INVALID_ARGUMENT. */
-  const char invalid_utf8[] = {(char)0xff, '\0'};
+  const char invalid_utf8[] = "\xff";
   fts_query = NULL;
   if (lancedb_fts_query_new_phrase(
           "alpha beta", "text", 0, &fts_query, &error_message) != LANCEDB_SUCCESS ||
