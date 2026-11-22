@@ -443,9 +443,13 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Filter on non-existent column"
   REQUIRE(result == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   // error should be caught at execution time
-  LanceDBQueryResult* query_result = lancedb_query_execute(query);
+  LanceDBQueryResult* query_result = nullptr;
+  result = lancedb_query_execute_with_status(query, &query_result, &error_message);
+  REQUIRE(result == LANCEDB_FIELD_NOT_FOUND);
   REQUIRE(query_result == nullptr);
-  error_message = nullptr;
+  REQUIRE(error_message != nullptr);
+  REQUIRE(std::string(error_message).find("unknown") != std::string::npos);
+  lancedb_free_string(error_message);
 
   lancedb_table_free(table);
 }
