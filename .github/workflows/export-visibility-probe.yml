@@ -77,7 +77,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cl failed" }
 
           New-Item -ItemType Directory -Force direct, paired, both | Out-Null
-          link /nologo /dll /noentry /nodefaultlib /out:direct\lancedb.dll dep.obj api.obj public.def
+          link /nologo /dll /noentry /nodefaultlib /out:direct\lancedb.dll dep.obj api.obj /DEF:public.def
           if ($LASTEXITCODE -ne 0) { throw "direct link failed" }
 
           lib /nologo /def:public.def /out:paired\lancedb.dll.lib /machine:$env:PROBE_MACHINE
@@ -89,7 +89,7 @@ jobs:
 
           link /nologo /dll /noentry /nodefaultlib /out:paired\lancedb.dll dep.obj api.obj paired\lancedb.dll.exp
           if ($LASTEXITCODE -ne 0) { throw "paired export-file link failed" }
-          link /nologo /dll /noentry /nodefaultlib /out:both\lancedb.dll dep.obj api.obj both\public.def both\lancedb.dll.exp
+          link /nologo /dll /noentry /nodefaultlib /out:both\lancedb.dll dep.obj api.obj /DEF:both\public.def both\lancedb.dll.exp
           if ($LASTEXITCODE -ne 0) { throw "export-file plus def link failed" }
 
           cl /nologo /W4 consumer.c /Fe:paired\consumer.exe /link /LIBPATH:paired lancedb.dll.lib
