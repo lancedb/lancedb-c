@@ -1740,6 +1740,23 @@ typedef struct {
 } LanceDBColumnAlteration;
 
 /**
+ * One column alteration for lancedb_table_alter_columns_with_cast
+ *
+ * The first four fields have the same meaning as LanceDBColumnAlteration.
+ * `cast_to`, when non-NULL, points to a borrowed Arrow C ABI schema that holds
+ * exactly one field. Only that field's data type is used; its name, nullability
+ * and metadata are ignored. The caller keeps ownership of the schema and must
+ * still release it with the Arrow C ABI release callback.
+ */
+typedef struct {
+    const char* path;
+    const char* rename;
+    int set_nullable;
+    int nullable;
+    const FFI_ArrowSchema* cast_to;
+} LanceDBColumnAlterationWithCast;
+
+/**
  * Add new columns using SQL expressions
  *
  * @param table - pointer to LanceDBTable
@@ -1764,6 +1781,34 @@ LanceDBError lancedb_table_add_columns(
     const char* const* names,
     const char* const* expressions,
     size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * Add typed columns whose existing rows read as NULL
+ *
+ * @param table - pointer to LanceDBTable
+ * @param schema - pointer to a borrowed Arrow C ABI schema with at least one field
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This binds NewColumnTransform::AllNulls: every field of `schema` is added as
+ * a new column and every existing row reads NULL for it. Each field must be
+ * nullable, as the SDK requires, and its data type is added unchanged. Field
+ * names, types, and field metadata are taken from the Arrow schema.
+ * The schema is only read for the duration of the call and remains owned by the
+ * caller; it is not consumed. On success, version_out is the operation's own
+ * commit version; it may be 0 for legacy remote servers that do not report a
+ * version. On failure, version_out is left unchanged. No separate table version
+ * lookup is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_add_columns_all_nulls(
+    const LanceDBTable* table,
+    const FFI_ArrowSchema* schema,
     uint64_t* version_out,
     char** error_message
 );
@@ -1797,6 +1842,44 @@ LanceDBError lancedb_table_alter_columns(
 );
 
 /**
+ * Alter column names, nullability, and data types
+ *
+ * @param table - pointer to LanceDBTable
+ * @param alterations - array of column alterations that may cast
+ * @param num_alterations - number of entries in alterations (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This is the same operation as lancedb_table_alter_columns, with an optional
+ * cast_to data type per entry. Each entry must set a non-empty path and change
+ * at least the name, the nullability, or the data type. Rename, nullability,
+ * and cast are independent and can be combined in one commit. A non-NULL
+ * cast_to must point to an Arrow C ABI schema with exactly one field; only its
+ * data type is used, and the schema remains owned by the caller. A NULL cast_to
+ * leaves the type unchanged.
+ * The array, its strings, and its cast schemas are borrowed for the duration of
+ * the call. On success, version_out is the operation's own commit version; it
+ * may be 0 for legacy remote servers that do not report a version. On failure,
+ * version_out is left unchanged. No separate table version lookup is performed.
+ *
+ * The pinned embedded Lance backend rejects changing a currently nullable field
+ * to NOT NULL in the same call as a cast, even when the field has no NULL
+ * values. The SDK error is returned unchanged; apply the cast and the
+ * nullability change in separate calls. Renaming a field, or relaxing a NOT
+ * NULL field to NULL, can be combined with a cast.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_alter_columns_with_cast(
+    const LanceDBTable* table,
+    const LanceDBColumnAlterationWithCast* alterations,
+    size_t num_alterations,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
  * Drop columns from a table
  *
  * @param table - pointer to LanceDBTable
@@ -1818,6 +1901,64 @@ LanceDBError lancedb_table_drop_columns(
     const LanceDBTable* table,
     const char* const* columns,
     size_t num_columns,
+    uint64_t* version_out,
+    char** error_message
+);
+
+/**
+ * One field metadata key change for lancedb_table_update_field_metadata
+ *
+ * `key` must be a non-empty string. A non-NULL `value` sets the key to that
+ * value; a NULL value removes the key. Keys must be unique within one update.
+ * The strings are borrowed for the duration of the call.
+ */
+typedef struct {
+    const char* key;
+    const char* value;
+} LanceDBFieldMetadataEntry;
+
+/**
+ * One field metadata update for lancedb_table_update_field_metadata
+ *
+ * `path` addresses the field by its dot-separated path, for example `zip` or
+ * `address.zip`. `entries` holds `num_entries` key changes applied in order and
+ * must be non-NULL when num_entries is greater than zero. When `replace` is 0,
+ * the entries merge into the field's existing metadata; a merge with zero
+ * entries is rejected because it changes nothing. When `replace` is non-zero,
+ * the entries replace the field's entire metadata map, so a replace with zero
+ * entries clears the metadata.
+ */
+typedef struct {
+    const char* path;
+    const LanceDBFieldMetadataEntry* entries;
+    size_t num_entries;
+    int replace;
+} LanceDBFieldMetadataUpdate;
+
+/**
+ * Update per-field metadata through the SDK
+ *
+ * @param table - pointer to LanceDBTable
+ * @param updates - array of field metadata updates
+ * @param num_updates - number of entries in updates (must be > 0)
+ * @param version_out - pointer to receive the commit version returned by the SDK
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This binds lancedb::table::Table::update_field_metadata and works on embedded
+ * and remote tables. Each update is merged into its field's existing metadata
+ * unless replace is set, in which case it swaps the field's whole metadata map.
+ * The array, its entries, and their strings are borrowed for the duration of the
+ * call. On success, version_out is the operation's own commit version; it may be
+ * 0 for legacy remote servers that do not report a version. On failure,
+ * version_out is left unchanged. No separate table version lookup is performed.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_update_field_metadata(
+    const LanceDBTable* table,
+    const LanceDBFieldMetadataUpdate* updates,
+    size_t num_updates,
     uint64_t* version_out,
     char** error_message
 );
@@ -3727,6 +3868,10 @@ void lancedb_table_delta_free(LanceDBTableDelta* delta);
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
+ * This reads the dataset directly and is available only on embedded
+ * (Lance-backed) tables. On a remote table it returns LANCEDB_NOT_SUPPORTED;
+ * use lancedb_table_update_field_metadata for field metadata that goes through
+ * the SDK on both backends.
  * To return all metadata, please set filter_keys to NULL and filter_count to zero.
  * Any other combination of NULL and zero is considered an error.
  * Otherwise, only metadata matching the specified keys is returned.
@@ -3757,6 +3902,10 @@ LanceDBError lancedb_table_get_metadata(
  * @return Error code indicating success or failure
  *
  * Existing keys will be updated with new values. New keys will be added.
+ * This writes the dataset directly and is available only on embedded
+ * (Lance-backed) tables. On a remote table it returns LANCEDB_NOT_SUPPORTED;
+ * use lancedb_table_update_field_metadata for field metadata that goes through
+ * the SDK on both backends.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
@@ -3778,6 +3927,10 @@ LanceDBError lancedb_table_set_metadata(
  * @return Error code indicating success or failure
  *
  * Keys that do not exist are silently ignored.
+ * This writes the dataset directly and is available only on embedded
+ * (Lance-backed) tables. On a remote table it returns LANCEDB_NOT_SUPPORTED;
+ * use lancedb_table_update_field_metadata for field metadata that goes through
+ * the SDK on both backends.
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
