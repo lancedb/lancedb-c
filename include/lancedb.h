@@ -217,6 +217,19 @@ typedef enum {
 } LanceDBDistanceType;
 
 /**
+ * Score normalization method for hybrid-search reranking
+ *
+ * LANCEDB_NORMALIZE_SCORE normalizes the raw vector distance and full-text
+ * score columns. LANCEDB_NORMALIZE_RANK converts them to ranks first. The SDK
+ * always normalizes the two channels before invoking the reranker; this enum
+ * selects what that normalization starts from.
+ */
+typedef enum {
+    LANCEDB_NORMALIZE_SCORE = 0,
+    LANCEDB_NORMALIZE_RANK = 1
+} LanceDBNormalizeMethod;
+
+/**
  * Index type enum
  */
 typedef enum {
@@ -1549,6 +1562,46 @@ LanceDBError lancedb_query_select(
 );
 
 /**
+ * Ask a plain query to return the `_rowid` metadata column
+ *
+ * This applies to ordinary scans and standalone full-text searches built with
+ * lancedb_query_full_text_search(). The UInt64 metadata column is appended to
+ * the projection, even when lancedb_query_select() names specific columns.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_with_row_id(
+    LanceDBQuery* query,
+    char** error_message
+);
+
+/**
+ * Restrict a plain query to data covered by an index
+ *
+ * For an ordinary scan this applies only when the filter plan uses a scalar
+ * index. An unfiltered scan, or a filter without an index, still reads every
+ * selected fragment. A standalone full-text search reads only rows covered by
+ * the text index. Rows appended after the index was built can therefore be
+ * absent. A filter that cannot use an index is not an error.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_fast_search(
+    LanceDBQuery* query,
+    char** error_message
+);
+
+/**
  * Set WHERE filter for query
  *
  * If both a SQL WHERE clause and a DataFusion filters are set, the DataFusion expression
@@ -1683,6 +1736,77 @@ LanceDBError lancedb_vector_query_select(
 );
 
 /**
+ * Ask a vector query to return the `_rowid` metadata column
+ *
+ * This also applies to a hybrid vector plus full-text query. The UInt64
+ * metadata column is appended to the projection, even when
+ * lancedb_vector_query_select() names specific columns.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_with_row_id(
+    LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
+ * Restrict a vector query to rows covered by the vector index
+ *
+ * The SDK turns this into an index-only search: rows appended or updated after
+ * the index was built may be absent, and a query with no usable vector index
+ * returns no rows. A SQL or DataFusion filter keeps its configured pre-filter
+ * or post-filter placement.
+ *
+ * On a hybrid query, fast search is part of the vector query's shared request,
+ * so it applies to both the full-text and vector legs. In contrast,
+ * lancedb_vector_query_bypass_vector_index() only affects the vector leg.
+ * Embedded LanceDB applies fast search after the bypass flag, so fast search
+ * wins when both are set. A remote LanceDB forwards both flags to the server,
+ * which decides their interaction.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_fast_search(
+    LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
+ * Skip the vector index and compare the query vector with every row
+ *
+ * This performs an exhaustive flat search even when a vector index exists. It
+ * is useful as ground truth for recall measurements and returns exact
+ * distances without index quantization. A filter still keeps its configured
+ * pre-filter or post-filter placement.
+ *
+ * On a hybrid query this only affects the vector leg; the full-text leg remains
+ * unchanged. Embedded LanceDB applies fast search after this flag, so a query
+ * with both set behaves as a fast search. A remote LanceDB forwards both flags
+ * to the server, which decides their interaction.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_bypass_vector_index(
+    LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
  * Set WHERE filter for vector query
  *
  * If both a SQL WHERE clause and a DataFusion filters are set, the DataFusion expression
@@ -1772,6 +1896,63 @@ LanceDBError lancedb_vector_query_df_filter(
  */
 LanceDBError lancedb_vector_query_postfilter(
     LanceDBVectorQuery* query,
+    char** error_message
+);
+
+/**
+ * Use reciprocal rank fusion with an explicit `k` for hybrid search
+ *
+ * This installs the SDK's RRFReranker on the vector query. It only changes the
+ * result of a hybrid query built with
+ * lancedb_vector_query_full_text_search(); on a vector-only query the reranker
+ * is stored but unused. Fusion scores each result as 1 / (k + rank) with ranks
+ * starting at 1, summed across the vector and full-text lists, and returns that
+ * sum as `_relevance_score`. When this setter is not called, the SDK uses its
+ * own default k = 60. The value is forwarded unchanged, so a caller that treats
+ * zero as "use the default" must pass 60 here instead.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param k - RRF constant; the SDK default is 60 when no setter is called
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_rerank_rrf(
+    LanceDBVectorQuery* query,
+    float k,
+    char** error_message
+);
+
+/**
+ * Set how hybrid-search scores are normalized before reranking
+ *
+ * This only affects a hybrid query built with
+ * lancedb_vector_query_full_text_search(). LANCEDB_NORMALIZE_SCORE normalizes
+ * the raw vector distance and full-text score columns; LANCEDB_NORMALIZE_RANK
+ * converts them to ranks first. The SDK always normalizes both channels before
+ * invoking the reranker, and this setter selects what that normalization starts
+ * from. When this setter is not called, the SDK's default normalization applies.
+ *
+ * The built-in RRF reranker uses only row identities and list positions, so
+ * this setting does not change its ranking or `_relevance_score`. It does change
+ * the normalized score columns preserved in the result. When this setter is not
+ * called, the SDK's default normalization applies. Out-of-range values are
+ * rejected with LANCEDB_INVALID_ARGUMENT and leave any previously selected
+ * normalization unchanged.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param normalize_method - normalization method to use
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_norm(
+    LanceDBVectorQuery* query,
+    LanceDBNormalizeMethod normalize_method,
     char** error_message
 );
 
@@ -1944,9 +2125,10 @@ LanceDBError lancedb_query_explain_plan(
  * to execute the query. Does NOT consume the query — it can still be
  * executed afterwards.
  *
- * Embedded LanceDB rejects a plan for a query that has both nearest and
- * full-text search because one scanner cannot combine them. Execution of the
- * same hybrid query is supported.
+ * Embedded LanceDB rejects a hybrid query that combines nearest-neighbour and
+ * full-text search at plan time with the SDK's unsupported-shape error because
+ * one scanner cannot combine them. That is an SDK limitation, not a C-side
+ * argument error; execute the query instead.
  *
  * @param query - pointer to LanceDBVectorQuery (NOT consumed)
  * @param verbose - if true, include additional detail in the plan
@@ -2029,16 +2211,28 @@ LanceDBError lancedb_vector_query_execute_with_status(
 /**
  * Convert query result to Arrow RecordBatch arrays
  *
- * @param result - pointer to LanceDBQueryResult (consumed by this function)
+ * @param result - pointer to LanceDBQueryResult. When result, result_arrays,
+ *                 result_schema and count_out are all non-NULL, the result is
+ *                 consumed on every path, including failure. When any of the
+ *                 four is NULL, the call returns LANCEDB_INVALID_ARGUMENT and
+ *                 does not consume a non-NULL result, so the caller can retry
+ *                 it or free it with lancedb_query_result_free().
  * @param result_arrays - pointer to receive array of Arrow C ABI arrays
  * @param result_schema - pointer to receive single Arrow C ABI schema
  * @param count_out - pointer to receive number of result batches
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
- * @return Error code indicating success or failure
- *         Caller must free arrays with lancedb_free_arrow_arrays() and schema with lancedb_free_arrow_schema()
+ * @return LANCEDB_SUCCESS, the SDK error code when the stream fails, or
+ *         LANCEDB_ARROW when the result schema cannot be represented through
+ *         the Arrow C data interface
  *
- * If error_message is provided and an error occurs, the caller must free
- * the error message with lancedb_free_string().
+ * On entry, non-NULL output slots and the error message are cleared. On
+ * success, *count_out is the number of batches, and *result_arrays and
+ * *result_schema hold the batches and their schema. An empty result succeeds
+ * with both pointers NULL and *count_out zero. On failure, all three outputs
+ * stay clear. The caller must free returned arrays with
+ * lancedb_free_arrow_arrays() and the schema with lancedb_free_arrow_schema().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
  */
 LanceDBError lancedb_query_result_to_arrow(
     LanceDBQueryResult* result,
