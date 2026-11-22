@@ -487,12 +487,19 @@ const UPDATE_ALL_FIELDS: u32 = UPDATE_RETRIES;
 ///
 /// `set_fields` selects the overrides; a field whose bit is not set keeps the
 /// SDK default, so an omitted retry stays distinct from an explicit 0.
+///
+/// `retries` is a failed-attempt threshold, not a replay count: the SDK
+/// increments its failure counter before testing it against the budget. With
+/// repeated 409 responses, 1 returns the first retryable failure without
+/// resending, while 3 can resend twice and returns the third failure. A positive
+/// N therefore allows at most N-1 resends after the initial failed attempt.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 pub struct LanceDBUpdateOptions {
     /// Bitmask of `LanceDBUpdateField` values; 0 uses every default
     pub set_fields: u32,
-    /// Per-call remote retry budget; 0 disables retries. Embedded tables ignore it.
+    /// Per-call remote failed-attempt threshold; 0 disables retries. Embedded
+    /// tables ignore it.
     pub retries: u8,
 }
 
@@ -1089,14 +1096,19 @@ pub unsafe extern "C" fn lancedb_table_stats(
 }
 
 /// Result of a delete operation.
+///
+/// Every field is copied unchanged from the SDK's `DeleteResult`; this layer
+/// does not fill in or synthesize a value. The SDK defaults each field missing
+/// from a remote response to zero independently, so a version-only response
+/// leaves `num_deleted_rows` at zero and a count-only response leaves `version`
+/// at zero. Zero therefore means "not reported" for that field, not necessarily
+/// no rows or no commit. An empty legacy response leaves both fields zero.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LanceDBDeleteResult {
-    /// Number of rows deleted. A legacy remote empty response can leave this at
-    /// zero, which then means unknown rather than no rows.
+    /// Rows deleted; 0 may mean not reported by a remote response.
     pub num_deleted_rows: u64,
-    /// Table version committed by the delete. A legacy remote empty response can
-    /// leave this at zero, which then means unknown.
+    /// Commit version; 0 may mean not reported by a remote response.
     pub version: u64,
 }
 

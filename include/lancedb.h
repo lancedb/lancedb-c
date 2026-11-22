@@ -1268,16 +1268,20 @@ typedef enum {
  * default. An unknown set_fields bit is rejected with LANCEDB_INVALID_ARGUMENT
  * before the update starts.
  *
- * retries is the per-call remote retry budget. Embedded tables ignore it. Leave
- * the LANCEDB_UPDATE_RETRIES bit unset to keep the SDK default; set it with 0 to
- * disable retries explicitly, or with a positive value to allow that many.
- * Ambiguous write results are never replayed.
+ * retries is a failed-attempt threshold, not a replay count: the SDK increments
+ * its failure counter before testing it against the budget. With repeated 409
+ * responses, 1 returns the first retryable failure without resending, while 3
+ * can resend twice and returns the third failure. A positive N therefore allows
+ * at most N-1 resends after the initial failed attempt. Embedded tables ignore
+ * it. Leave the LANCEDB_UPDATE_RETRIES bit unset to keep the SDK default; set it
+ * with 0 to disable retries explicitly. Ambiguous write results are never
+ * replayed.
  *
  * The options struct is borrowed for the duration of the call and is not consumed.
  */
 typedef struct {
     uint32_t set_fields;  // Bitmask of LanceDBUpdateField values (0 = defaults)
-    uint8_t retries;      // Per-call remote retry budget; 0 disables retries
+    uint8_t retries;      // Failed-attempt threshold; 0 disables retries
 } LanceDBUpdateOptions;
 
 /**
@@ -1367,13 +1371,16 @@ LanceDBError lancedb_table_update_with_options(
 /**
  * Result of a delete operation
  *
- * Embedded tables report the number of deleted rows and the commit version. A
- * legacy remote server that returns an empty delete response can report zero
- * for either field, which means unknown there rather than a literal zero.
+ * Every field is copied unchanged from the SDK's DeleteResult; this layer does
+ * not fill in or synthesize a value. The SDK defaults each field missing from a
+ * remote response to zero independently, so a version-only response leaves
+ * num_deleted_rows at zero and a count-only response leaves version at zero.
+ * Zero therefore means "not reported" for that field, not necessarily no rows
+ * or no commit. An empty legacy response leaves both fields zero.
  */
 typedef struct {
-    uint64_t num_deleted_rows;  // Rows deleted; 0 may mean unknown on legacy remote responses
-    uint64_t version;           // Committed table version; 0 may mean unknown on legacy remote responses
+    uint64_t num_deleted_rows;  // Rows deleted; 0 may mean not reported
+    uint64_t version;           // Commit version; 0 may mean not reported
 } LanceDBDeleteResult;
 
 /**
