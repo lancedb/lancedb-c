@@ -353,10 +353,18 @@ typedef struct {
  * for an action is only read when that action is enabled, and a condition set for
  * a disabled action is ignored. The strings are borrowed for the call.
  *
- * use_index is -1 to keep the SDK default (use an index when one is available),
- * 0 to force a full table scan even when the join key is indexed, or 1 to request
- * the index. timeout_ms is -1 to keep the SDK default, or a non-negative number of
- * milliseconds that bounds the whole operation, including 0.
+ * use_index is -1 for the SDK default, 0 to disable indexed planning for the
+ * merge, or 1 to allow it. Embedded: 0 disables indexed planning; 1 and -1 leave
+ * the SDK's indexed planning enabled when an index applies. This is not a
+ * guarantee that the join uses an index, and by-source deletion can use a full
+ * scan. Remote: only 0 sends use_index=false; 1 and -1 omit the parameter, so the
+ * server's default applies.
+ *
+ * timeout_ms is -1 for the SDK default, or a non-negative number of milliseconds,
+ * including 0. Embedded: the interval covers the Lance merge execution and its
+ * retries. SDK table checks, schema reads and the post-commit freshness update
+ * run outside it. Remote: the value is sent as the x-request-timeout-ms header on
+ * each request; client retries and backoff run outside that per-request interval.
  *
  * The options struct and its strings are borrowed for the duration of the call
  * and are not consumed.
@@ -1144,18 +1152,21 @@ LanceDBError lancedb_table_merge_insert(
 /**
  * Result of a merge insert operation
  *
- * Every field is present and comes from the SDK's MergeResult. A version of 0
- * means the backend did not return a commit version (a legacy remote server),
- * not necessarily that no commit happened. num_attempts includes the initial
- * attempt and any retries for transaction conflicts; 1 means the first attempt
- * succeeded.
+ * Every field is copied unchanged from the SDK's MergeResult; this layer does not
+ * fill in or synthesize a value. The SDK defaults each field missing from a
+ * remote response to zero, so zero means "not reported" rather than necessarily
+ * no work. num_attempts is the merge attempt count reported by the SDK or server,
+ * not the number of HTTP requests. A legacy remote empty response, or a merge
+ * through the RTE write path, can succeed with all five fields zero. A version of
+ * 0 likewise means the backend did not report a commit version, not necessarily
+ * that no commit happened.
  */
 typedef struct {
-    uint64_t version;           // Committed table version; 0 may mean unknown on legacy remote responses
-    uint64_t num_inserted_rows; // Number of inserted rows
-    uint64_t num_updated_rows;  // Number of updated rows
-    uint64_t num_deleted_rows;  // Number of deleted rows
-    uint32_t num_attempts;      // Attempts performed, including conflict retries
+    uint64_t version;           // Reported commit version; 0 may mean not reported
+    uint64_t num_inserted_rows; // Reported inserted rows; 0 may mean not reported
+    uint64_t num_updated_rows;  // Reported updated rows; 0 may mean not reported
+    uint64_t num_deleted_rows;  // Reported deleted rows; 0 may mean not reported
+    uint32_t num_attempts;      // Reported merge attempts; 0 may mean not reported
 } LanceDBMergeInsertResult;
 
 /**

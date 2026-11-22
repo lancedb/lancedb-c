@@ -89,24 +89,30 @@ pub struct LanceDBMergeInsertOptions {
     pub when_not_matched_by_source_delete: i32,
     /// SQL filter on unmatched target rows, naming target columns directly (NULL for no filter)
     pub when_not_matched_by_source_delete_filter: *const c_char,
-    /// -1 for the SDK default, 0 to skip the join-key index, 1 to use it
+    /// -1 for the SDK default, 0 to disable indexed planning, 1 to allow it.
+    /// The embedded and remote backends interpret this as described in the public header
     pub use_index: i32,
-    /// -1 for the SDK default, otherwise the operation timeout in milliseconds
+    /// -1 for the SDK default, otherwise milliseconds. Embedded covers Lance merge execution
+    /// and retries; remote sends it as a per-request timeout header
     pub timeout_ms: i64,
 }
 
 /// Result of `lancedb_table_merge_insert_with_result`
+///
+/// Fields are copied unchanged from the SDK result. A missing remote field defaults to zero,
+/// so zero can mean that the backend did not report it. RTE and legacy empty responses can
+/// return all fields zero.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LanceDBMergeInsertResult {
-    /// Table version committed by the merge; 0 may mean unknown on legacy remote responses
+    /// Reported commit version; 0 may mean not reported
     pub version: u64,
-    /// Number of inserted rows
+    /// Reported number of inserted rows; 0 may mean not reported
     pub num_inserted_rows: u64,
-    /// Number of updated rows
+    /// Reported number of updated rows; 0 may mean not reported
     pub num_updated_rows: u64,
-    /// Number of deleted rows
+    /// Reported number of deleted rows; 0 may mean not reported
     pub num_deleted_rows: u64,
-    /// Number of attempts, including retries for transaction conflicts
+    /// Reported merge attempts; 0 may mean not reported
     pub num_attempts: u32,
 }
