@@ -314,6 +314,8 @@ ENUM_PREFIXES = {
     "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
     "LanceDBBranchSourceKind": "LANCEDB_BRANCH_SOURCE_",
     "LanceDBDeltaRefType": "LANCEDB_DELTA_REF_",
+    "LanceDBCherryPickStatus": "LANCEDB_CHERRY_PICK_STATUS_",
+    "LanceDBCherryPickErrorCode": "LANCEDB_CHERRY_PICK_ERROR_",
     "LanceDBReadConsistencyType": "LANCEDB_READ_CONSISTENCY_",
 }
 ENUM_MEMBER_RENAMES = {
