@@ -670,6 +670,35 @@ typedef struct {
 } LanceDBDeltaRef;
 
 /**
+ * Read consistency mode reported by a connection
+ *
+ * LANCEDB_READ_CONSISTENCY_MANUAL means reads add no freshness constraint.
+ * LANCEDB_READ_CONSISTENCY_STRONG means reads request the latest data.
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL means reads accept data within the
+ * configured freshness bound. Native tables may refresh in the background
+ * before the interval expires and refresh synchronously after it. Remote
+ * latest-timeline requests use the interval as a per-request minimum
+ * freshness bound; pinned snapshots omit that freshness routing header.
+ */
+typedef enum {
+    LANCEDB_READ_CONSISTENCY_MANUAL = 0,
+    LANCEDB_READ_CONSISTENCY_EVENTUAL = 1,
+    LANCEDB_READ_CONSISTENCY_STRONG = 2
+} LanceDBReadConsistencyType;
+
+/**
+ * Read consistency of a connection
+ *
+ * interval_ms is the configured interval in whole milliseconds for
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL, and 0 for the other modes. A positive
+ * interval set through the connection builder is returned unchanged.
+ */
+typedef struct {
+    LanceDBReadConsistencyType kind;  // Read consistency mode
+    uint64_t interval_ms;             // Eventual consistency interval in milliseconds
+} LanceDBReadConsistency;
+
+/**
  * Create a ConnectBuilder for the given URI
  *
  * @param uri - null-terminated C string containing the database URI
@@ -714,6 +743,130 @@ LanceDBError lancedb_connect_builder_execute( LanceDBConnectBuilder* builder,
 LanceDBConnectBuilder* lancedb_connect_builder_storage_option(LanceDBConnectBuilder* builder, const char* key, const char* value);
 
 /**
+ * Set the API key for a LanceDB Enterprise or LanceDB Cloud connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param api_key - NUL-terminated API key
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. The setter does not add
+ * it to native storage options. Without the remote feature, the setter
+ * validates and returns the builder without applying the value. A NULL or
+ * non-UTF-8 api_key returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_api_key(LanceDBConnectBuilder* builder, const char* api_key);
+
+/**
+ * Set the region for a db:// connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param region - NUL-terminated region name
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The SDK requires a region for both LanceDB Cloud and LanceDB Enterprise
+ * connections, including when a host override is used. This setter is only
+ * applied when the connection dispatches to the SDK remote path, which is
+ * selected by a URI beginning with db. Without the remote feature, the setter
+ * validates and returns the builder without applying the value. A NULL or
+ * non-UTF-8 region returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_region(LanceDBConnectBuilder* builder, const char* region);
+
+/**
+ * Set the host override for a LanceDB Enterprise connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param host_override - NUL-terminated host override
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. Use the URI db:// together
+ * with a host override to connect to LanceDB Enterprise tables stored directly
+ * in the storage root. Without the remote feature, the setter validates and
+ * returns the builder without applying the value. A NULL or non-UTF-8
+ * host_override returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_host_override(LanceDBConnectBuilder* builder, const char* host_override);
+
+/**
+ * Set the SQL service host override for a LanceDB Enterprise connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param sql_host_override - NUL-terminated SQL host override
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * The value is only applied when the connection dispatches to the SDK remote
+ * path, which is selected by a URI beginning with db. The SQL endpoint is
+ * contacted only when the connection executes SQL; setting this option does
+ * not contact it. Without the remote feature, the setter validates and returns
+ * the builder without applying the value. A NULL or non-UTF-8
+ * sql_host_override returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_sql_host_override(LanceDBConnectBuilder* builder, const char* sql_host_override);
+
+/**
+ * Set an additional property for the connection's namespace client
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param key - NUL-terminated property name
+ * @param value - NUL-terminated property value
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL. LanceDB Enterprise connections
+ * reject a non-empty set of namespace client properties when the builder is
+ * executed: lancedb_connect_builder_execute() returns LANCEDB_NOT_SUPPORTED.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_namespace_client_property(LanceDBConnectBuilder* builder, const char* key, const char* value);
+
+/**
+ * Enable or disable manifest-backed directory namespace mode
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param enabled - true to enable manifest-backed directory namespace mode
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * This option applies to local native connections. When enabled, the connection
+ * uses the directory namespace directly for all table operations and forces
+ * dir_listing_to_manifest_migration_enabled=true. LanceDB Enterprise
+ * connections reject enabling this option when the builder is executed:
+ * lancedb_connect_builder_execute() returns LANCEDB_NOT_SUPPORTED. Passing
+ * false keeps the default behavior.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_manifest_enabled(LanceDBConnectBuilder* builder, bool enabled);
+
+/**
+ * Set the read consistency interval
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param interval_ms - read consistency interval in milliseconds
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Leaving this setter unused keeps the SDK default: no freshness constraint is
+ * added to reads. An explicit 0 requests strong consistency. A positive value
+ * requests eventual consistency. The interval only affects reads; writes are
+ * always consistent.
+ *
+ * Native connections use the interval as a refresh target: the SDK may refresh
+ * in the background before it expires and refreshes synchronously on the next
+ * read after it. Remote latest-timeline requests send the interval as a
+ * per-request minimum freshness bound; pinned snapshots omit that freshness
+ * routing header. Reading the configured mode back through
+ * lancedb_connection_read_consistency() is supported for native connections;
+ * the SDK reports LANCEDB_NOT_SUPPORTED for remote connections.
+ *
+ * A NULL builder returns NULL.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_read_consistency_interval_ms(LanceDBConnectBuilder* builder, uint64_t interval_ms);
+
+/**
  * Set session for the connection builder
  *
  * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
@@ -749,6 +902,36 @@ void lancedb_connect_builder_free(LanceDBConnectBuilder* builder);
  * The caller must not free the returned string.
  */
 const char* lancedb_connection_uri(const LanceDBConnection* connection);
+
+/**
+ * Get the read consistency of the connection
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param consistency_out - pointer to receive the read consistency
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, consistency_out describes the configured mode. A connection
+ * created without lancedb_connect_builder_read_consistency_interval_ms()
+ * reports LANCEDB_READ_CONSISTENCY_MANUAL. An explicit zero interval reports
+ * LANCEDB_READ_CONSISTENCY_STRONG. A positive interval reports
+ * LANCEDB_READ_CONSISTENCY_EVENTUAL with interval_ms set to that value.
+ *
+ * On failure, consistency_out is left unchanged so a caller can keep its own
+ * sentinel there. LanceDB Enterprise and LanceDB Cloud connections return
+ * LANCEDB_NOT_SUPPORTED because the SDK does not expose their read
+ * consistency, even though the interval still controls their per-request
+ * freshness bound. A non-NULL error_message is cleared on entry and must be
+ * freed with lancedb_free_string() after an error.
+ *
+ * This function does not fall back to a predicted mode when the SDK query
+ * fails.
+ */
+LanceDBError lancedb_connection_read_consistency(
+    const LanceDBConnection* connection,
+    LanceDBReadConsistency* consistency_out,
+    char** error_message
+);
 
 /**
  * Get table names from the connection
