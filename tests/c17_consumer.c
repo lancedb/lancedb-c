@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define LANCEDB_STRINGIFY_IMPL(value) #value
 #define LANCEDB_STRINGIFY(value) LANCEDB_STRINGIFY_IMPL(value)
@@ -21,6 +22,320 @@
 static int fail(const char* message) {
   fprintf(stderr, "FAIL: %s\n", message);
   return 1;
+}
+
+static void order_by_release_schema(struct ArrowSchema* schema) {
+  schema->release = NULL;
+}
+
+static void order_by_release_array(struct ArrowArray* array) {
+  array->release = NULL;
+}
+
+/* Build a four-row int32 table. The rows are deliberately not in sorted order
+ * so an ordering check cannot pass by accident. */
+static int create_order_by_table(
+    LanceDBConnection* connection, const char* table_name, LanceDBTable** table_out) {
+  static const int32_t values[] = {3, 1, 4, 2};
+  struct ArrowSchema id_schema = {
+      .format = "i",
+      .name = "id",
+      .metadata = NULL,
+      .flags = 0,
+      .n_children = 0,
+      .children = NULL,
+      .dictionary = NULL,
+      .release = order_by_release_schema,
+      .private_data = NULL,
+  };
+  struct ArrowSchema* fields[] = {&id_schema};
+  struct ArrowSchema schema = {
+      .format = "+s",
+      .name = "",
+      .metadata = NULL,
+      .flags = 0,
+      .n_children = 1,
+      .children = fields,
+      .dictionary = NULL,
+      .release = order_by_release_schema,
+      .private_data = NULL,
+  };
+
+  const void* id_buffers[] = {NULL, values};
+  struct ArrowArray id_array = {
+      .length = 4,
+      .null_count = 0,
+      .offset = 0,
+      .n_buffers = 2,
+      .n_children = 0,
+      .buffers = id_buffers,
+      .children = NULL,
+      .dictionary = NULL,
+      .release = order_by_release_array,
+      .private_data = NULL,
+  };
+  struct ArrowArray* children[] = {&id_array};
+  const void* struct_buffers[] = {NULL};
+  struct ArrowArray batch = {
+      .length = 4,
+      .null_count = 0,
+      .offset = 0,
+      .n_buffers = 1,
+      .n_children = 1,
+      .buffers = struct_buffers,
+      .children = children,
+      .dictionary = NULL,
+      .release = order_by_release_array,
+      .private_data = NULL,
+  };
+
+  LanceDBRecordBatchReader* reader = NULL;
+  char* error_message = NULL;
+  LanceDBError status = lancedb_record_batch_reader_from_arrow(
+      (const FFI_ArrowArray*)&batch, (const FFI_ArrowSchema*)&schema,
+      &reader, &error_message);
+  if (status != LANCEDB_SUCCESS || reader == NULL || error_message != NULL) {
+    lancedb_free_string(error_message);
+    lancedb_record_batch_reader_free(reader);
+    return fail("creating the C17 ordering table reader failed");
+  }
+
+  status = lancedb_table_create(connection, table_name,
+                                (const FFI_ArrowSchema*)&schema, reader,
+                                table_out, &error_message);
+  if (status != LANCEDB_SUCCESS || *table_out == NULL || error_message != NULL) {
+    lancedb_free_string(error_message);
+    if (*table_out != NULL) {
+      lancedb_table_free(*table_out);
+      *table_out = NULL;
+    }
+    return fail("creating the C17 ordering table failed");
+  }
+  return 0;
+}
+
+/* Execute a configured query and copy its int32 id column into ids. */
+static int execute_order_by_ids(
+    LanceDBQuery* query, int32_t* ids, size_t capacity, size_t* count_out) {
+  LanceDBQueryResult* result = NULL;
+  char* error_message = NULL;
+  LanceDBError status = lancedb_query_execute_with_status(query, &result, &error_message);
+  if (status != LANCEDB_SUCCESS || result == NULL || error_message != NULL) {
+    lancedb_free_string(error_message);
+    lancedb_query_result_free(result);
+    return fail("executing the C17 ordering query failed");
+  }
+
+  struct FFI_ArrowArray** arrays = NULL;
+  struct FFI_ArrowSchema* schema = NULL;
+  size_t batch_count = 0;
+  status = lancedb_query_result_to_arrow(result, &arrays, &schema, &batch_count, &error_message);
+  if (status != LANCEDB_SUCCESS || error_message != NULL) {
+    lancedb_free_string(error_message);
+    lancedb_free_arrow_arrays(arrays, batch_count);
+    lancedb_free_arrow_schema(schema);
+    return fail("reading the C17 ordering result failed");
+  }
+
+  size_t count = 0;
+  for (size_t i = 0; i < batch_count; i++) {
+    const struct ArrowArray* batch = (const struct ArrowArray*)arrays[i];
+    if (batch->n_children != 1 || batch->children[0]->n_buffers < 2) {
+      lancedb_free_arrow_arrays(arrays, batch_count);
+      lancedb_free_arrow_schema(schema);
+      return fail("the C17 ordering result has an unexpected shape");
+    }
+    const struct ArrowArray* id_array = batch->children[0];
+    const int32_t* values = (const int32_t*)id_array->buffers[1];
+    for (int64_t row = 0; row < id_array->length; row++) {
+      if (count >= capacity) {
+        lancedb_free_arrow_arrays(arrays, batch_count);
+        lancedb_free_arrow_schema(schema);
+        return fail("the C17 ordering result exceeded the test buffer");
+      }
+      ids[count++] = values[id_array->offset + row];
+    }
+  }
+
+  lancedb_free_arrow_arrays(arrays, batch_count);
+  lancedb_free_arrow_schema(schema);
+  *count_out = count;
+  return 0;
+}
+
+static LanceDBQuery* make_order_by_query(
+    LanceDBTable* table, size_t limit, size_t offset, char** error_message) {
+  LanceDBQuery* query = lancedb_query_new(table);
+  if (query == NULL) {
+    return NULL;
+  }
+  const char* columns[] = {"id"};
+  if (lancedb_query_select(query, columns, 1, error_message) != LANCEDB_SUCCESS ||
+      lancedb_query_limit(query, limit, error_message) != LANCEDB_SUCCESS ||
+      lancedb_query_offset(query, offset, error_message) != LANCEDB_SUCCESS) {
+    lancedb_query_free(query);
+    return NULL;
+  }
+  return query;
+}
+
+static int run_order_by_cases(LanceDBConnection* connection) {
+  char table_name[64];
+  const int table_name_len = snprintf(
+      table_name, sizeof(table_name), "order_by_c17_test_%lld", (long long)time(NULL));
+  if (table_name_len < 0 || (size_t)table_name_len >= sizeof(table_name)) {
+    return fail("the C17 ordering table name does not fit its buffer");
+  }
+
+  LanceDBTable* table = NULL;
+  LanceDBQuery* query = NULL;
+  int result = 0;
+  char* error_message = NULL;
+  if (create_order_by_table(connection, table_name, &table) != 0) {
+    return 1;
+  }
+
+  LanceDBColumnOrdering descending[] = {{"id", /*ascending=*/0, /*nulls_first=*/0}};
+  LanceDBColumnOrdering ascending[] = {{"id", /*ascending=*/1, /*nulls_first=*/0}};
+  LanceDBColumnOrdering invalid_ordering[] = {
+      {"id", /*ascending=*/1, /*nulls_first=*/0},
+      {NULL, /*ascending=*/0, /*nulls_first=*/1},
+  };
+  const char invalid_utf8[] = "\xff";
+  LanceDBColumnOrdering invalid_utf8_ordering[] = {{"id", /*ascending=*/1, /*nulls_first=*/0},
+                                                    {invalid_utf8, /*ascending=*/0,
+                                                     /*nulls_first=*/1}};
+  int32_t ids[8];
+  int32_t reset_ids[8];
+  int32_t fresh_ids[8];
+  size_t count = 0;
+  size_t reset_count = 0;
+  size_t fresh_count = 0;
+
+  if (lancedb_query_order_by(NULL, descending, 1, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a NULL C17 plain query handle must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  if (lancedb_vector_query_order_by(NULL, descending, 1, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a NULL C17 vector query handle must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
+  query = make_order_by_query(table, 2, 1, &error_message);
+  if (query == NULL || error_message != NULL) {
+    result = fail("creating the C17 descending ordering query failed");
+    goto cleanup;
+  }
+  if (lancedb_query_order_by(query, descending, 1, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("setting the C17 descending ordering failed");
+    goto cleanup;
+  }
+  if (execute_order_by_ids(query, ids, 8, &count) != 0) {
+    query = NULL;
+    result = 1;
+    goto cleanup;
+  }
+  query = NULL;
+  if (count != 2 || ids[0] != 3 || ids[1] != 2) {
+    result = fail("the C17 descending ordering returned the wrong rows");
+    goto cleanup;
+  }
+
+  query = make_order_by_query(table, 2, 1, &error_message);
+  if (query == NULL || error_message != NULL ||
+      lancedb_query_order_by(query, ascending, 1, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("creating the C17 preservation query failed");
+    goto cleanup;
+  }
+  if (lancedb_query_order_by(query, invalid_ordering, 2, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a NULL C17 ordering column must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  if (lancedb_query_order_by(query, invalid_utf8_ordering, 2, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("an invalid UTF-8 C17 ordering column must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  if (execute_order_by_ids(query, ids, 8, &count) != 0) {
+    query = NULL;
+    result = 1;
+    goto cleanup;
+  }
+  query = NULL;
+  if (count != 2 || ids[0] != 2 || ids[1] != 3) {
+    result = fail("a rejected C17 ordering changed the previous setting");
+    goto cleanup;
+  }
+
+  query = make_order_by_query(table, 2, 1, &error_message);
+  if (query == NULL || error_message != NULL ||
+      lancedb_query_order_by(query, descending, 1, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL ||
+      lancedb_query_order_by(query, NULL, 0, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("resetting the C17 ordering failed");
+    goto cleanup;
+  }
+  if (execute_order_by_ids(query, reset_ids, 8, &reset_count) != 0) {
+    query = NULL;
+    result = 1;
+    goto cleanup;
+  }
+  query = NULL;
+
+  query = make_order_by_query(table, 2, 1, &error_message);
+  if (query == NULL || error_message != NULL) {
+    result = fail("creating the C17 fresh query failed");
+    goto cleanup;
+  }
+  if (execute_order_by_ids(query, fresh_ids, 8, &fresh_count) != 0) {
+    query = NULL;
+    result = 1;
+    goto cleanup;
+  }
+  query = NULL;
+  if (reset_count != fresh_count) {
+    result = fail("resetting the C17 ordering did not restore the default rows");
+    goto cleanup;
+  }
+  for (size_t i = 0; i < reset_count; i++) {
+    if (reset_ids[i] != fresh_ids[i]) {
+      result = fail("resetting the C17 ordering did not restore the default order");
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  lancedb_query_free(query);
+  lancedb_free_string(error_message);
+  if (table != NULL) {
+    lancedb_table_free(table);
+    char* drop_error = NULL;
+    const LanceDBError drop_status =
+        lancedb_connection_drop_table(connection, table_name, NULL, &drop_error);
+    if (result == 0 && (drop_status != LANCEDB_SUCCESS || drop_error != NULL)) {
+      result = fail("dropping the C17 ordering table failed");
+    }
+    lancedb_free_string(drop_error);
+  }
+  return result;
 }
 
 int main(int argc, char** argv) {
@@ -177,6 +492,11 @@ int main(int argc, char** argv) {
       consistency.interval_ms != 0) {
     lancedb_connection_free(connection);
     return fail("an explicit zero interval must report strong consistency");
+  }
+
+  if (run_order_by_cases(connection) != 0) {
+    lancedb_connection_free(connection);
+    return 1;
   }
 
   lancedb_connection_free(connection);

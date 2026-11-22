@@ -3354,6 +3354,21 @@ LanceDBError lancedb_table_update_field_metadata(
 );
 
 /**
+ * One column ordering for lancedb_query_order_by() and
+ * lancedb_vector_query_order_by()
+ *
+ * `column` is a NUL-terminated UTF-8 column name. `ascending` is non-zero for
+ * ascending order and 0 for descending. `nulls_first` is non-zero to place NULL
+ * values first, regardless of direction. Entries are applied in array order, so
+ * the first entry is the primary sort key.
+ */
+typedef struct {
+    const char* column;
+    int ascending;
+    int nulls_first;
+} LanceDBColumnOrdering;
+
+/**
  * Create a new query for the given table
  *
  * @param table - pointer to LanceDBTable
@@ -3480,6 +3495,45 @@ LanceDBError lancedb_query_select_dynamic(
     const char* const* names,
     const char* const* expressions,
     size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Set the column ordering for query
+ *
+ * The first entry is the primary sort key. A nonempty ordering sorts an
+ * ordinary scan before limit and offset are applied. On a standalone full-text
+ * search it sorts all matches before the search page is selected. On a hybrid
+ * vector plus full-text query it applies to both search legs, and the reranker
+ * still determines the final fused order. Execution, EXPLAIN, output-schema
+ * inspection and ANALYZE use the same configured ordering.
+ *
+ * A zero num_orderings clears the ordering, restoring the query's default
+ * order; orderings may be NULL in that case. A positive count requires a
+ * non-NULL array whose entries and column names are non-NULL, NUL-terminated
+ * UTF-8 strings. Invalid input returns LANCEDB_INVALID_ARGUMENT and leaves the
+ * previous ordering unchanged. The array and its strings are borrowed for the
+ * duration of the call and are copied into the query.
+ *
+ * A native namespace connection with QueryTable pushdown executes a nonempty
+ * ordering locally, so it needs client access to table storage. A table routed
+ * through the MemWAL LSM scanner rejects a nonempty ordering with
+ * LANCEDB_NOT_SUPPORTED; clear the ordering to return to the default route. A
+ * remote LanceDB forwards the ordering to the server.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param orderings - array of column orderings, or NULL when num_orderings is 0
+ * @param num_orderings - number of entries in orderings; 0 clears the ordering
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_order_by(
+    LanceDBQuery* query,
+    const LanceDBColumnOrdering* orderings,
+    size_t num_orderings,
     char** error_message
 );
 
@@ -3708,6 +3762,47 @@ LanceDBError lancedb_vector_query_select_dynamic(
     const char* const* names,
     const char* const* expressions,
     size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Set the column ordering for vector query
+ *
+ * The first entry is the primary sort key. A vector search first selects its
+ * nearest-neighbour candidates using the configured limit and offset, or the
+ * SDK's default top-K when no limit is set, and then orders those candidates.
+ * It does not sort the whole table. On a hybrid vector plus full-text query it
+ * applies to both search legs, and the reranker still determines the final
+ * fused order. EXPLAIN, output-schema inspection and ANALYZE use the same
+ * configured ordering, subject to the hybrid inspection limits documented
+ * below.
+ *
+ * A zero num_orderings clears the ordering, restoring the query's default
+ * order; orderings may be NULL in that case. A positive count requires a
+ * non-NULL array whose entries and column names are non-NULL, NUL-terminated
+ * UTF-8 strings. Invalid input returns LANCEDB_INVALID_ARGUMENT and leaves the
+ * previous ordering unchanged. The array and its strings are borrowed for the
+ * duration of the call and are copied into the query.
+ *
+ * A native namespace connection with QueryTable pushdown executes a nonempty
+ * ordering locally, so it needs client access to table storage. A table routed
+ * through the MemWAL LSM scanner rejects a nonempty ordering with
+ * LANCEDB_NOT_SUPPORTED; clear the ordering to return to the default route. A
+ * remote LanceDB forwards the ordering to the server.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param orderings - array of column orderings, or NULL when num_orderings is 0
+ * @param num_orderings - number of entries in orderings; 0 clears the ordering
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_order_by(
+    LanceDBVectorQuery* query,
+    const LanceDBColumnOrdering* orderings,
+    size_t num_orderings,
     char** error_message
 );
 

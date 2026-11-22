@@ -159,6 +159,71 @@ CollectedQueryRows execute_take_query(LanceDBTakeQuery* take) {
   return collect_query_rows(result);
 }
 
+// Create a small table with duplicate groups, a nullable string and a
+// nullable integer so column ordering can exercise multiple keys and both
+// NULL placements.
+LanceDBTable* create_order_by_table(LanceDBConnection* db, const std::string& table_name) {
+  auto schema = arrow::schema({
+      arrow::field("id", arrow::int32()),
+      arrow::field("bucket", arrow::utf8()),
+      arrow::field("rank", arrow::int32()),
+  });
+
+  arrow::Int32Builder id_builder;
+  arrow::StringBuilder bucket_builder;
+  arrow::Int32Builder rank_builder;
+  const char* buckets[] = {"b", "a", nullptr, "b", "a", "b"};
+  const int32_t ranks[] = {3, 1, 0, 5, 2, 4};
+  for (int32_t id = 0; id < 6; id++) {
+    REQUIRE(id_builder.Append(id).ok());
+    if (buckets[id] == nullptr) {
+      REQUIRE(bucket_builder.AppendNull().ok());
+    } else {
+      REQUIRE(bucket_builder.Append(buckets[id]).ok());
+    }
+    if (id == 2) {
+      REQUIRE(rank_builder.AppendNull().ok());
+    } else {
+      REQUIRE(rank_builder.Append(ranks[id]).ok());
+    }
+  }
+
+  std::shared_ptr<arrow::Array> id_array, bucket_array, rank_array;
+  REQUIRE(id_builder.Finish(&id_array).ok());
+  REQUIRE(bucket_builder.Finish(&bucket_array).ok());
+  REQUIRE(rank_builder.Finish(&rank_array).ok());
+  auto batch = arrow::RecordBatch::Make(schema, 6, {id_array, bucket_array, rank_array});
+  auto reader = create_reader_from_batch(batch);
+  REQUIRE(reader != nullptr);
+
+  struct ArrowSchema c_schema;
+  REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+  LanceDBTable* table = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_create(
+      db, table_name.c_str(), reinterpret_cast<FFI_ArrowSchema*>(&c_schema), reader,
+      &table, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(table != nullptr);
+  if (c_schema.release) {
+    c_schema.release(&c_schema);
+  }
+  return table;
+}
+
+std::vector<int32_t> ids_of(const CollectedQueryRows& rows) {
+  std::vector<int32_t> ids;
+  for (const auto& batch : rows.batches) {
+    auto id_column = batch->GetColumnByName("id");
+    REQUIRE(id_column != nullptr);
+    auto id_array = std::static_pointer_cast<arrow::Int32Array>(id_column);
+    for (int64_t i = 0; i < id_array->length(); i++) {
+      ids.push_back(id_array->Value(i));
+    }
+  }
+  return ids;
+}
+
 void create_key_index(LanceDBTable* table) {
   // Create BTREE index on "key" column
   const char* index_columns[] = {"key"};
@@ -242,6 +307,184 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - all entries", "[query]") {
 
       offset += limit;
     }
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - column ordering", "[query][order_by]") {
+  const std::string table_name = "query_order_by_test";
+  constexpr int total_rows = 10;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  SECTION("orders an ordinary scan before limit and offset") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_offset(query, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_order_by(query, orderings, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto rows = collect_query_rows(lancedb_query_execute(query));
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_7", "key_6", "key_5"});
+  }
+
+  SECTION("uses multiple keys and distinct NULL placement") {
+    LanceDBTable* ordered_table = create_order_by_table(db, "query_order_by_nulls_test");
+    REQUIRE(ordered_table != nullptr);
+
+    auto execute_ids = [&](const LanceDBColumnOrdering* orderings, size_t count,
+                           size_t limit, size_t offset) {
+      LanceDBQuery* query = lancedb_query_new(ordered_table);
+      REQUIRE(query != nullptr);
+      char* error_message = nullptr;
+      REQUIRE(lancedb_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(lancedb_query_offset(query, offset, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      REQUIRE(lancedb_query_order_by(query, orderings, count, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      return ids_of(collect_query_rows(lancedb_query_execute(query)));
+    };
+
+    LanceDBColumnOrdering bucket_first[] = {
+        {"bucket", /*ascending=*/1, /*nulls_first=*/1},
+        {"rank", /*ascending=*/0, /*nulls_first=*/0},
+    };
+    REQUIRE(execute_ids(bucket_first, 2, 6, 0)
+        == std::vector<int32_t>{2, 4, 1, 3, 5, 0});
+    REQUIRE(execute_ids(bucket_first, 2, 3, 2) == std::vector<int32_t>{1, 3, 5});
+
+    LanceDBColumnOrdering bucket_last[] = {
+        {"bucket", /*ascending=*/0, /*nulls_first=*/0},
+        {"rank", /*ascending=*/0, /*nulls_first=*/0},
+    };
+    REQUIRE(execute_ids(bucket_last, 2, 6, 0)
+        == std::vector<int32_t>{3, 5, 0, 4, 1, 2});
+
+    LanceDBColumnOrdering rank_null_first[] = {{"rank", /*ascending=*/1, /*nulls_first=*/1}};
+    REQUIRE(execute_ids(rank_null_first, 1, 6, 0)
+        == std::vector<int32_t>{2, 1, 4, 0, 5, 3});
+
+    LanceDBColumnOrdering rank_null_last[] = {{"rank", /*ascending=*/0, /*nulls_first=*/0}};
+    REQUIRE(execute_ids(rank_null_last, 1, 6, 0)
+        == std::vector<int32_t>{3, 5, 0, 4, 1, 2});
+
+    lancedb_table_free(ordered_table);
+  }
+
+  SECTION("inspection and analysis use the configured ordering") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_order_by(query, orderings, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    FFI_ArrowSchema* schema = nullptr;
+    REQUIRE(lancedb_query_output_schema(query, &schema, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(schema != nullptr);
+    auto imported = arrow::ImportSchema(reinterpret_cast<ArrowSchema*>(schema));
+    REQUIRE(imported.ok());
+    lancedb_free_arrow_schema(schema);
+    REQUIRE(imported.ValueOrDie()->num_fields() == 1);
+
+    char* plan = nullptr;
+    REQUIRE(lancedb_query_explain_plan(query, true, &plan, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).find("SortExec") != std::string::npos);
+    lancedb_free_string(plan);
+
+    plan = nullptr;
+    REQUIRE(lancedb_query_analyze_plan(query, &plan, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).find("SortExec") != std::string::npos);
+    REQUIRE(std::string(plan).find("metrics=[output_rows=") != std::string::npos);
+    lancedb_free_string(plan);
+
+    auto rows = collect_query_rows(lancedb_query_execute(query));
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_9", "key_8", "key_7"});
+  }
+
+  SECTION("invalid input preserves the ordering and zero entries reset it") {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_order_by(query, orderings, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const char* invalid_utf8 = "\xff\xfe";
+    LanceDBColumnOrdering invalid_second[] = {
+        {"key", /*ascending=*/1, /*nulls_first=*/0},
+        {invalid_utf8, /*ascending=*/0, /*nulls_first=*/1},
+    };
+    REQUIRE(lancedb_query_order_by(query, invalid_second, 2, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    LanceDBColumnOrdering null_column[] = {{"key", /*ascending=*/1, /*nulls_first=*/0},
+                                           {nullptr, /*ascending=*/0, /*nulls_first=*/1}};
+    REQUIRE(lancedb_query_order_by(query, null_column, 2, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_query_order_by(query, nullptr, 1, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    // The rejected calls left the descending ordering in place.
+    auto ordered = collect_query_rows(lancedb_query_execute(query));
+    REQUIRE(keys_of(ordered) == std::vector<std::string>{"key_9", "key_8", "key_7"});
+
+    LanceDBQuery* reset = lancedb_query_new(table);
+    REQUIRE(reset != nullptr);
+    REQUIRE(lancedb_query_select(reset, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(reset, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_order_by(reset, orderings, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_order_by(reset, nullptr, 0, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    auto reset_rows = collect_query_rows(lancedb_query_execute(reset));
+
+    LanceDBQuery* fresh = lancedb_query_new(table);
+    REQUIRE(fresh != nullptr);
+    REQUIRE(lancedb_query_select(fresh, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(fresh, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    auto fresh_rows = collect_query_rows(lancedb_query_execute(fresh));
+    REQUIRE(keys_of(reset_rows) == keys_of(fresh_rows));
+  }
+
+  SECTION("setters reject null handles") {
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/1, /*nulls_first=*/0}};
+    REQUIRE(lancedb_query_order_by(nullptr, orderings, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
   }
 
   lancedb_table_free(table);

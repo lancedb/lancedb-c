@@ -321,6 +321,124 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - paged query with limit 
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - column ordering", "[vector_query][order_by]") {
+  const std::string table_name = "vector_query_order_by_test";
+  constexpr size_t total_rows = 10;
+  LanceDBTable* table = create_table_with_data(table_name, total_rows, 0);
+  REQUIRE(table != nullptr);
+
+  const auto query_vector = vector_for_row(0);
+  const char* columns[] = {"key"};
+
+  auto make_query = [&]() {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table, query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_offset(query, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    return query;
+  };
+
+  SECTION("orders the nearest candidates before limit and offset") {
+    LanceDBVectorQuery* query = make_query();
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_order_by(query, orderings, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto rows = collect_query_rows(lancedb_vector_query_execute(query));
+    // The candidate set is rows 0..4 because limit + offset is 5. Ordering sorts
+    // those candidates, then offset skips the first two. A whole-table sort
+    // would return key_7, key_6, key_5 instead.
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_2", "key_1", "key_0"});
+  }
+
+  SECTION("explain and analyze use the configured ordering") {
+    LanceDBVectorQuery* query = make_query();
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_order_by(query, orderings, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    REQUIRE(lancedb_vector_query_explain_plan(query, true, &plan, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).find("SortExec") != std::string::npos);
+    lancedb_free_string(plan);
+
+    plan = nullptr;
+    REQUIRE(lancedb_vector_query_analyze_plan(query, &plan, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    REQUIRE(std::string(plan).find("SortExec") != std::string::npos);
+    REQUIRE(std::string(plan).find("metrics=[output_rows=") != std::string::npos);
+    lancedb_free_string(plan);
+
+    lancedb_vector_query_free(query);
+  }
+
+  SECTION("invalid input preserves the ordering and zero entries reset it") {
+    LanceDBVectorQuery* query = make_query();
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_order_by(query, orderings, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const char* invalid_utf8 = "\xff\xfe";
+    LanceDBColumnOrdering invalid_second[] = {
+        {"key", /*ascending=*/1, /*nulls_first=*/0},
+        {invalid_utf8, /*ascending=*/0, /*nulls_first=*/1},
+    };
+    REQUIRE(lancedb_vector_query_order_by(query, invalid_second, 2, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_vector_query_order_by(query, nullptr, 1, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    auto ordered = collect_query_rows(lancedb_vector_query_execute(query));
+    REQUIRE(keys_of(ordered) == std::vector<std::string>{"key_2", "key_1", "key_0"});
+
+    LanceDBVectorQuery* reset = make_query();
+    REQUIRE(lancedb_vector_query_order_by(reset, orderings, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_order_by(reset, nullptr, 0, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    auto reset_rows = collect_query_rows(lancedb_vector_query_execute(reset));
+
+    LanceDBVectorQuery* fresh = make_query();
+    auto fresh_rows = collect_query_rows(lancedb_vector_query_execute(fresh));
+    REQUIRE(keys_of(reset_rows) == keys_of(fresh_rows));
+  }
+
+  SECTION("setters reject null handles") {
+    LanceDBColumnOrdering orderings[] = {{"key", /*ascending=*/1, /*nulls_first=*/0}};
+    REQUIRE(lancedb_vector_query_order_by(nullptr, orderings, 1, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+  }
+
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Vector Query - nearest_to with IVF_FLAT index", "[vector_query]") {
   const std::string table_name = "vector_query_indexed_test";
   constexpr size_t total_rows = 256;

@@ -542,6 +542,61 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text search invalid input", "
   }
 }
 
+TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text ordering", "[fts][order_by]") {
+  const auto query_vector = vector_for_row(0);
+
+  SECTION("orders all matches before selecting the search page") {
+    LanceDBQuery* query = lancedb_query_new(table());
+    REQUIRE(query != nullptr);
+
+    LanceDBColumnOrdering orderings[] = {{"id", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_offset(query, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_full_text_search(query, "common", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_order_by(query, orderings, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = collect_query_result(lancedb_query_execute(query));
+    // All 24 rows match. The ordering sorts every match before limit and offset
+    // select the page, so the result is 22, 21, 20 rather than a sorted top-K.
+    REQUIRE(ordered_ids_of(result) == std::vector<int32_t>{22, 21, 20});
+  }
+
+  SECTION("applies the ordering to both hybrid search legs") {
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+
+    LanceDBColumnOrdering orderings[] = {{"id", /*ascending=*/0, /*nulls_first=*/0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 48, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_full_text_search(query, "common", "text", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_order_by(query, orderings, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = collect_query_result(lancedb_vector_query_execute(query));
+    // The limit covers every row, so both legs contribute all 24 rows. Applying
+    // the same descending ordering to both legs makes row 23 the strongest
+    // result and row 0 the weakest; ordering only one leg would interleave them.
+    std::vector<int32_t> expected_ids;
+    for (int32_t id = kRowCount - 1; id >= 0; id--) {
+      expected_ids.push_back(id);
+    }
+    REQUIRE(ordered_ids_of(result) == expected_ids);
+  }
+}
+
 TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - hybrid search", "[fts][vector_query]") {
   const auto query_vector = vector_for_row(0);
 
