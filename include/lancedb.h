@@ -87,6 +87,18 @@ typedef struct FFI_ArrowSchema FFI_ArrowSchema;
 typedef struct FFI_ArrowArray FFI_ArrowArray;
 
 /**
+ * Bytes of an Arrow IPC file owned by LanceDB
+ *
+ * A buffer that holds no file has both fields zeroed. `data` stays valid until
+ * lancedb_ipc_buffer_free() is called. The caller must not write to or free it,
+ * and keeps both fields unchanged until then.
+ */
+typedef struct {
+    const uint8_t* data;  /* Start of the file bytes, NULL when no file is held */
+    size_t len;           /* Length of the file bytes */
+} LanceDBIpcBuffer;
+
+/**
  * Error codes for LanceDB C API
  */
 typedef enum {
@@ -906,6 +918,28 @@ LanceDBError lancedb_table_create(
 LanceDBError lancedb_table_arrow_schema(
     const LanceDBTable* table,
     FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
+ * Write the table schema as an Arrow IPC file that holds no batch
+ *
+ * @param table - pointer to LanceDBTable (borrowed, not consumed)
+ * @param buffer_out - pointer to receive the file bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * On success, the buffer holds a readable Arrow IPC file with the full table
+ * schema and no record batch. Its schema can create a table of the same shape
+ * through lancedb_record_batch_reader_from_ipc_file() without any row.
+ * On entry, both outputs and the error message are cleared.
+ * The caller must free the bytes with lancedb_ipc_buffer_free(). If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_schema_ipc_file(
+    const LanceDBTable* table,
+    LanceDBIpcBuffer* buffer_out,
     char** error_message
 );
 
@@ -1768,6 +1802,49 @@ LanceDBQueryResult* lancedb_query_execute(LanceDBQuery* query);
 LanceDBQueryResult* lancedb_vector_query_execute(LanceDBVectorQuery* query);
 
 /**
+ * Execute query and report why it could not start
+ *
+ * @param query - pointer to LanceDBQuery (consumed by this function on every path
+ *                with a non-NULL pointer, including a rejected result pointer)
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The SDK only hands over a result once it started the query, so a failure
+ * carries the SDK status and its message instead of a NULL pointer.
+ * On entry, *result_out and the error message are cleared.
+ * Caller must free a returned result with lancedb_query_result_free().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_execute_with_status(
+    LanceDBQuery* query,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Execute vector query and report why it could not start
+ *
+ * @param query - pointer to LanceDBVectorQuery (consumed by this function on every
+ *                path with a non-NULL pointer, including a rejected result pointer)
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * Same contract as lancedb_query_execute_with_status().
+ * On entry, *result_out and the error message are cleared.
+ * Caller must free a returned result with lancedb_query_result_free().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_execute_with_status(
+    LanceDBVectorQuery* query,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
  * Convert query result to Arrow RecordBatch arrays
  *
  * @param result - pointer to LanceDBQueryResult (consumed by this function)
@@ -1786,6 +1863,31 @@ LanceDBError lancedb_query_result_to_arrow(
     struct FFI_ArrowArray*** result_arrays,
     struct FFI_ArrowSchema** result_schema,
     size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Convert a query result into an Arrow IPC file
+ *
+ * @param result - pointer to LanceDBQueryResult (consumed by this function on every
+ *                 path with a non-NULL pointer, including a rejected buffer pointer)
+ * @param buffer_out - pointer to receive the file bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *buffer_out holding one complete IPC file, the SDK
+ *         error code of a stream that failed, or LANCEDB_ARROW when encoding failed
+ *
+ * The file carries the projected schema and one record batch per batch the
+ * result yielded, in order, including zero-row batches. A result without any
+ * batch keeps the projected schema and holds no batch. The bytes are handed over
+ * only after the file footer is written, so a failure leaves the buffer empty.
+ * On entry, *buffer_out and the error message are cleared.
+ * The caller must free the bytes with lancedb_ipc_buffer_free(). If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_result_to_ipc_file(
+    LanceDBQueryResult* result,
+    LanceDBIpcBuffer* buffer_out,
     char** error_message
 );
 
@@ -1864,6 +1966,41 @@ LanceDBError lancedb_record_batch_reader_from_arrow(
 );
 
 /**
+ * Create a RecordBatchReader and/or an Arrow schema from an Arrow IPC file
+ *
+ * @param data - borrowed bytes of an Arrow IPC file (NULL only when len is 0)
+ * @param len - number of bytes in data
+ * @param reader_out - optional pointer to receive a reader over every batch (NULL to skip)
+ * @param schema_out - optional pointer to receive the Arrow C ABI schema (NULL to skip)
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * At least one of reader_out and schema_out must not be NULL. The reader holds
+ * every batch of the file, so several batches can be added with a single
+ * lancedb_table_add() or merged with a single lancedb_table_merge_insert().
+ * The schema alone is enough to create an empty table of the same shape.
+ * The bytes are only borrowed: the caller may release them as soon as this
+ * function returns. Every batch is decoded before returning, so zero bytes (also
+ * a NULL pointer with len 0), an IPC stream, a truncated file or a corrupt batch
+ * fail with LANCEDB_INVALID_INPUT and a decoding message before any table is
+ * changed. A size that cannot describe the buffer, a file whose announced footer
+ * does not fit in it, or a footer whose batches point outside it, are rejected
+ * before the decoder allocates from those numbers.
+ * On entry, both outputs and the error message are cleared.
+ * The caller must free a returned reader with lancedb_record_batch_reader_free()
+ * and a returned schema with lancedb_free_arrow_schema(). If error_message is
+ * provided and an error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_record_batch_reader_from_ipc_file(
+    const uint8_t* data,
+    size_t len,
+    LanceDBRecordBatchReader** reader_out,
+    struct FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Free RecordBatchReader
  *
  * @param reader - pointer to LanceDBRecordBatchReader
@@ -1876,6 +2013,17 @@ void lancedb_record_batch_reader_free(LanceDBRecordBatchReader* reader);
  * @param schema - pointer to Arrow schema
  */
 void lancedb_free_arrow_schema(FFI_ArrowSchema* schema);
+
+/**
+ * Free the bytes of an Arrow IPC file and reset the buffer
+ *
+ * @param buffer - pointer to LanceDBIpcBuffer, or NULL
+ *
+ * The buffer keeps both fields unchanged until this call. It reads them as they
+ * are, frees the file bytes and zeroes the struct, so freeing an already freed or
+ * empty buffer is a no-op.
+ */
+void lancedb_ipc_buffer_free(LanceDBIpcBuffer* buffer);
 
 /**
  * Create a vector index on table columns
