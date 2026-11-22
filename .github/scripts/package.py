@@ -34,11 +34,18 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from version import DEV_VERSION, resolve_version
+from version import DEV_VERSION, parse_resolved, resolve_version
 
 
 SCHEMA_VERSION = 1
 PACKAGE_NAME = "lancedb-c"
+HEADER_VERSION_DEFAULT = (
+    "#define LANCEDB_VERSION_MAJOR 0\n"
+    "#define LANCEDB_VERSION_MINOR 0\n"
+    "#define LANCEDB_VERSION_PATCH 0\n"
+    '#define LANCEDB_VERSION_STRING "0.0.0-dev"'
+)
+_HEADER_VERSION_CORE = re.compile(r"^([0-9]+)[.]([0-9]+)[.]([0-9]+)")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -107,6 +114,39 @@ def package_version(repo_root: Path) -> str:
         return resolve_version(repo_root)
     except ValueError as error:
         raise SystemExit(str(error)) from error
+
+
+def render_header(source: bytes, version: str) -> bytes:
+    """Return the public header rendered with a resolved build version."""
+    try:
+        resolved = parse_resolved(version)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    match = _HEADER_VERSION_CORE.match(resolved)
+    if not match:
+        raise SystemExit(f"cannot render lancedb-c version {resolved!r} without a numeric core")
+    if b"\r" in source:
+        raise SystemExit("the public header must use LF line endings")
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SystemExit(f"the public header is not UTF-8: {error}") from error
+    occurrences = text.count(HEADER_VERSION_DEFAULT)
+    if occurrences != 1:
+        raise SystemExit(
+            "the public header must contain exactly one default LANCEDB_VERSION block, "
+            f"found {occurrences}"
+        )
+    rendered = (
+        f"#define LANCEDB_VERSION_MAJOR {match.group(1)}\n"
+        f"#define LANCEDB_VERSION_MINOR {match.group(2)}\n"
+        f"#define LANCEDB_VERSION_PATCH {match.group(3)}\n"
+        f'#define LANCEDB_VERSION_STRING "{resolved}"'
+    )
+    output = text.replace(HEADER_VERSION_DEFAULT, rendered).encode("utf-8")
+    if b"\r" in output:
+        raise SystemExit("the rendered public header must use LF line endings")
+    return output
 
 
 def set_github_output(**values: str) -> None:
@@ -206,7 +246,11 @@ def create_package(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="lancedb-c-package-") as temp:
         package_root = Path(temp) / package_root_name
         copy_file(repo_root / "LICENSE", package_root / "LICENSE", 0o644)
-        copy_file(repo_root / "include" / "lancedb.h", package_root / "include" / "lancedb.h", 0o644)
+        header = render_header(
+            (repo_root / "include" / "lancedb.h").read_bytes(), version
+        )
+        (package_root / "include").mkdir(parents=True, exist_ok=True)
+        (package_root / "include" / "lancedb.h").write_bytes(header)
         copy_file(required_libraries[0], package_root / "lib" / target.library, 0o755)
         if target.import_library:
             copy_file(
@@ -413,7 +457,13 @@ def verify_checksums(package_root: Path) -> None:
             raise SystemExit(f"checksum mismatch for {relative}: {actual} != {expected}")
 
 
-def build_and_run_consumer(target: Target, package_root: Path, source: Path, work_dir: Path) -> None:
+def build_and_run_consumer(
+    target: Target,
+    package_root: Path,
+    source: Path,
+    work_dir: Path,
+    version: str,
+) -> None:
     if not source.is_file():
         raise SystemExit(f"missing consumer source: {source}")
     uri = work_dir / "database"
@@ -441,7 +491,7 @@ def build_and_run_consumer(target: Target, package_root: Path, source: Path, wor
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('LD_LIBRARY_PATH', '')}"
         env["DYLD_LIBRARY_PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('DYLD_LIBRARY_PATH', '')}"
-        run([str(executable), str(uri)], env=env)
+        run([str(executable), str(uri), version], env=env)
     else:
         executable = work_dir / "package-consumer.exe"
         command = [
@@ -460,7 +510,7 @@ def build_and_run_consumer(target: Target, package_root: Path, source: Path, wor
         run(command)
         env = os.environ.copy()
         env["PATH"] = f"{package_root / 'lib'}{os.pathsep}{env.get('PATH', '')}"
-        run([str(executable), str(uri)], env=env)
+        run([str(executable), str(uri), version], env=env)
 
 
 def verify_archive_checksum(archive: Path, checksum_file: Path) -> str:
@@ -511,9 +561,13 @@ def verify_package(args: argparse.Namespace) -> None:
             raise SystemExit(f"manifest import library is missing: {manifest['importLibrary']}")
 
         package_header = package_root / manifest["include"]
-        repository_header = repo_root / "include" / "lancedb.h"
-        if sha256_file(package_header) != sha256_file(repository_header):
-            raise SystemExit("packaged lancedb.h does not match the repository header")
+        expected_header = render_header(
+            (repo_root / "include" / "lancedb.h").read_bytes(), manifest["version"]
+        )
+        if package_header.read_bytes() != expected_header:
+            raise SystemExit(
+                "packaged lancedb.h is not the rendered header for its manifest version"
+            )
 
         verify_checksums(package_root)
 
@@ -527,7 +581,9 @@ def verify_package(args: argparse.Namespace) -> None:
         consumer_source = Path(args.consumer_source)
         if not consumer_source.is_absolute():
             consumer_source = repo_root / consumer_source
-        build_and_run_consumer(target, package_root, consumer_source.resolve(), work_dir)
+        build_and_run_consumer(
+            target, package_root, consumer_source.resolve(), work_dir, manifest["version"]
+        )
 
     print(f"package verification OK: target={target.name}")
 

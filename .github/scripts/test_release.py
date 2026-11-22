@@ -92,7 +92,9 @@ class ReleaseFixture(unittest.TestCase):
         self.repo = self.root / "repo"
         (self.repo / "include").mkdir(parents=True)
         (self.repo / "LICENSE").write_text("license\n", encoding="utf-8")
-        (self.repo / "include" / "lancedb.h").write_text("header\n", encoding="utf-8")
+        (self.repo / "include" / "lancedb.h").write_text(
+            package.HEADER_VERSION_DEFAULT + "\n", encoding="utf-8"
+        )
         (self.repo / "Cargo.lock").write_text(cargo_lock(), encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         git(self.repo, "config", "user.email", "test@example.com")
@@ -292,6 +294,47 @@ class PrepareTests(ReleaseFixture):
             capture_output=True,
             text=True,
         )
+
+    def test_reads_the_public_header_from_the_tagged_commit(self) -> None:
+        (self.repo / "include" / "lancedb.h").write_text(
+            "dirty working tree\n", encoding="utf-8"
+        )
+        output = self.prepare()
+        self.assertTrue((output / "release-metadata.json").is_file())
+
+    def test_rejects_package_header_not_rendered_for_tag(self) -> None:
+        target = package.target_for(release.RELEASE_TARGETS[0])
+        archive = self.artifacts / f"lancedb-c-{self.commit}-{target.name}.tar.gz"
+        with tempfile.TemporaryDirectory(prefix="lancedb-c-header-") as temp:
+            root = Path(temp)
+            package.extract_tar(archive, root)
+            package_root = root / f"lancedb-c-{self.commit}-{target.name}"
+            header = package_root / "include" / "lancedb.h"
+            header.write_bytes(
+                header.read_bytes().replace(
+                    b'"0.1.0-preview.1"', b'"9.9.9"'
+                )
+            )
+            sums_path = package_root / "SHA256SUMS"
+            lines = sums_path.read_text(encoding="utf-8").splitlines()
+            sums_path.write_text(
+                "\n".join(
+                    f"{package.sha256_file(header)}  include/lancedb.h"
+                    if line.endswith("  include/lancedb.h")
+                    else line
+                    for line in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(package_root, arcname=package_root.name)
+        digest = package.sha256_file(archive)
+        (self.artifacts / f"{archive.name}.sha256").write_text(
+            f"{digest}  {archive.name}\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(SystemExit, "rendered header"):
+            self.prepare()
 
     def test_rejects_missing_target(self) -> None:
         target = package.target_for(release.RELEASE_TARGETS[0])

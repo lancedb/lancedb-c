@@ -26,12 +26,26 @@ std::string describe(LanceDBError result) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
-    std::cerr << "usage: " << argv[0] << " <temporary-database-path>" << std::endl;
+  if (argc != 2 && argc != 3) {
+    std::cerr << "usage: " << argv[0]
+              << " <temporary-database-path> [expected-version]" << std::endl;
     return 2;
   }
 
   const std::string uri = argv[1];
+  const std::string expected_version = argc == 3 ? argv[2] : LANCEDB_VERSION_STRING;
+  const char* runtime_version = lancedb_version();
+  if (!check(runtime_version != nullptr && runtime_version[0] != '\0',
+             "lancedb_version() must return a non-empty string") ||
+      !check(expected_version == LANCEDB_VERSION_STRING,
+             "the packaged header version must match the expected version: " +
+                 std::string(LANCEDB_VERSION_STRING) + " != " + expected_version) ||
+      !check(expected_version == runtime_version,
+             "the loaded library version must match the expected version: " +
+                 std::string(runtime_version) + " != " + expected_version)) {
+    return 1;
+  }
+  std::cout << "version: " << runtime_version << std::endl;
   char* error_message = nullptr;
   LanceDBTable* table = nullptr;
 

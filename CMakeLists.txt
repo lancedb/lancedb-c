@@ -5,6 +5,16 @@ cmake_minimum_required(VERSION 3.22)
 include(cmake/LanceDBVersion.cmake)
 project(lancedb-c VERSION ${LANCEDB_PROJECT_VERSION})
 
+set(LANCEDB_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
+set(LANCEDB_GENERATED_HEADER "${LANCEDB_GENERATED_INCLUDE_DIR}/lancedb.h")
+lancedb_render_header(
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/lancedb.h"
+  "${LANCEDB_GENERATED_HEADER}"
+  "${LANCEDB_VERSION}"
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/lancedb.h")
+
 # macOS support is Apple Silicon only. Require exactly one arm64 architecture
 # when CMAKE_OSX_ARCHITECTURES is explicit so a universal build cannot produce
 # two Cargo artifacts.
@@ -167,6 +177,9 @@ configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
 # rust-lib target
   set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --target-dir "${CMAKE_BINARY_DIR}/target")
+# The resolved version changes the embedded runtime string. Pass it as a
+# private build variable so a cached Cargo build rebuilds when it changes.
+set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env "LANCEDB_BUILD_VERSION=${LANCEDB_VERSION}" ${CARGO_BUILD_COMMAND})
 add_custom_target(rust-lib ALL
   COMMAND ${CARGO_BUILD_COMMAND}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -202,7 +215,7 @@ if(BUILD_EXAMPLES)
   )
   target_include_directories(simple
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
   )
   target_compile_options(simple PRIVATE ${ARROW_CFLAGS_OTHER})
   set_target_properties(simple PROPERTIES
@@ -218,7 +231,7 @@ if(BUILD_EXAMPLES)
   )
   target_include_directories(full
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
   )
   target_compile_options(full PRIVATE ${ARROW_CFLAGS_OTHER})
   set_target_properties(full PROPERTIES
@@ -234,7 +247,7 @@ if(BUILD_EXAMPLES)
   )
   target_include_directories(s3
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
   )
   target_compile_options(s3 PRIVATE ${ARROW_CFLAGS_OTHER})
   set_target_properties(s3 PROPERTIES
@@ -278,7 +291,7 @@ if(BUILD_EXAMPLES)
   )
   target_include_directories(lancedb_registry
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
   )
   target_compile_options(lancedb_registry PRIVATE ${ARROW_CFLAGS_OTHER})
   set_target_properties(lancedb_registry PROPERTIES
@@ -297,7 +310,7 @@ if(BUILD_EXAMPLES)
   )
   target_include_directories(asio_coroutine
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
   )
   target_compile_options(asio_coroutine PRIVATE ${ARROW_CFLAGS_OTHER})
   set_target_properties(asio_coroutine PROPERTIES
@@ -322,7 +335,7 @@ if(BUILD_DOCS)
   endif()
 
   # Doxygen target - generates XML from header files
-  set(DOXYGEN_INPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/lancedb.h)
+  set(DOXYGEN_INPUT_DIR ${LANCEDB_GENERATED_INCLUDE_DIR}/lancedb.h)
   set(DOXYGEN_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/xml)
   set(DOXYFILE_IN ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile)
   set(DOXYFILE_OUT ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile)
@@ -388,7 +401,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_connection_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_connection_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -411,7 +424,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_table_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_table_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -434,7 +447,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_table_meta_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_table_meta_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -460,7 +473,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_index_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -484,7 +497,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_vector_index_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_vector_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -507,7 +520,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_query_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -531,7 +544,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_df_query_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_df_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -553,7 +566,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_json_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_json_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -577,7 +590,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_vector_query_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_vector_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -600,7 +613,7 @@ if(BUILD_TESTS)
   )
   target_include_directories(lancedb_fts_tests
     PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
   target_compile_options(lancedb_fts_tests PRIVATE ${ARROW_CFLAGS_OTHER})
@@ -751,7 +764,7 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
     Threads::Threads
   )
   target_include_directories(lancedb_c17_consumer
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
   )
   target_compile_options(lancedb_c17_consumer PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Werror;-pedantic>
@@ -762,6 +775,22 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
     C_STANDARD_REQUIRED ON
     C_EXTENSIONS OFF
     BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
+  # Compile the same strict C17 consumer against the checked-in header. The
+  # source header must stay usable directly, without a CMake or packaging step.
+  add_library(lancedb_source_header_c17 OBJECT tests/c17_consumer.c)
+  target_include_directories(lancedb_source_header_c17
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_compile_options(lancedb_source_header_c17 PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Werror;-pedantic>
+    $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+  )
+  set_target_properties(lancedb_source_header_c17 PROPERTIES
+    C_STANDARD 17
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
   )
 
   set(_c17_ctest_config_args)
@@ -776,7 +805,7 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
       -R "^lancedb_c17_consumer$"
       --output-on-failure
       --no-tests=error
-    DEPENDS lancedb_c17_consumer
+    DEPENDS lancedb_c17_consumer lancedb_source_header_c17
     COMMENT "Checking the public header with a strict C17 consumer..."
     VERBATIM
   )
@@ -789,7 +818,7 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
   if(BUILD_CONSUMER_TEST)
     add_executable(package_consumer tests/package_consumer.cpp)
     target_link_libraries(package_consumer PRIVATE lancedb Threads::Threads)
-    target_include_directories(package_consumer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_include_directories(package_consumer PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR})
     set_target_properties(package_consumer PROPERTIES BUILD_RPATH ${RUST_TARGET_DIR})
     add_test(NAME package_consumer
       COMMAND package_consumer "${CMAKE_BINARY_DIR}/package-consumer-db")
@@ -852,7 +881,7 @@ if(BUILD_SHARED_LIBS)
 else()
   install(FILES "${STATIC_LIB_PATH}" DESTINATION lib)
 endif()
-install(DIRECTORY include/ DESTINATION include)
+install(FILES "${LANCEDB_GENERATED_HEADER}" DESTINATION include)
 install(FILES "${CMAKE_BINARY_DIR}/lancedb.pc" DESTINATION lib/pkgconfig)
 
 message(STATUS "=== LanceDB C/C++ Bindings Configuration ===")

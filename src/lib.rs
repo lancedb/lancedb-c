@@ -17,6 +17,7 @@ pub mod optimize;
 pub mod query;
 pub mod table;
 pub mod types;
+pub mod version;
 
 // Re-export all public FFI functions
 pub use connection::*;
@@ -29,3 +30,4 @@ pub use optimize::*;
 pub use query::*;
 pub use table::*;
 pub use types::*;
+pub use version::*;

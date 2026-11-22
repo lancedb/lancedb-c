@@ -35,7 +35,9 @@ class PackageFixture(unittest.TestCase):
         self.repo = self.root / "repo"
         (self.repo / "include").mkdir(parents=True)
         (self.repo / "LICENSE").write_text("license\n", encoding="utf-8")
-        (self.repo / "include" / "lancedb.h").write_text("header\n", encoding="utf-8")
+        (self.repo / "include" / "lancedb.h").write_text(
+            package.HEADER_VERSION_DEFAULT + "\n", encoding="utf-8"
+        )
         self.library_dir = self.root / "library"
         self.library_dir.mkdir()
         (self.library_dir / "liblancedb.so").write_bytes(b"fake shared library")
@@ -103,6 +105,47 @@ class VersionPolicyTests(unittest.TestCase):
         for value in ("v0.1.0", "01.2.3", "0.1.0-preview.01", " 0.1.0"):
             with self.assertRaises(ValueError):
                 version.parse_resolved(value)
+
+
+class HeaderRenderTests(unittest.TestCase):
+    def test_renders_resolved_release_values(self) -> None:
+        source = (package.HEADER_VERSION_DEFAULT + "\ntrailer\n").encode()
+        rendered = package.render_header(source, "0.2.3-preview.4+build.5")
+        text = rendered.decode()
+        self.assertIn("#define LANCEDB_VERSION_MAJOR 0\n", text)
+        self.assertIn("#define LANCEDB_VERSION_MINOR 2\n", text)
+        self.assertIn("#define LANCEDB_VERSION_PATCH 3\n", text)
+        self.assertIn('#define LANCEDB_VERSION_STRING "0.2.3-preview.4+build.5"\n', text)
+        self.assertNotIn("0.0.0-dev", text)
+        self.assertIn("trailer\n", text)
+        self.assertNotIn(b"\r", rendered)
+
+    def test_keeps_development_default(self) -> None:
+        source = (package.HEADER_VERSION_DEFAULT + "\n").encode()
+        self.assertEqual(package.render_header(source, version.DEV_VERSION), source)
+
+    def test_rejects_missing_duplicate_or_crlf_markers(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "exactly one default"):
+            package.render_header(b"header\n", version.DEV_VERSION)
+        duplicated = (package.HEADER_VERSION_DEFAULT + "\n" + package.HEADER_VERSION_DEFAULT).encode()
+        with self.assertRaisesRegex(SystemExit, "found 2"):
+            package.render_header(duplicated, version.DEV_VERSION)
+        crlf = (package.HEADER_VERSION_DEFAULT + "\n").replace("\n", "\r\n").encode()
+        with self.assertRaisesRegex(SystemExit, "LF line endings"):
+            package.render_header(crlf, version.DEV_VERSION)
+
+    def test_checked_in_header_keeps_development_default(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        header = (repo_root / "include" / "lancedb.h").read_text(encoding="utf-8")
+        self.assertEqual(header.count(package.HEADER_VERSION_DEFAULT), 1)
+        self.assertIn(
+            "#define LANCEDB_VERSION LANCEDB_VERSION_STRING\n", header
+        )
+
+    def test_rejects_invalid_version(self) -> None:
+        source = (package.HEADER_VERSION_DEFAULT + "\n").encode()
+        with self.assertRaises(SystemExit):
+            package.render_header(source, "v0.1.0")
 
 
 class VersionTests(PackageFixture):
@@ -269,6 +312,24 @@ class PackageArchiveTests(PackageFixture):
             )
 
         self.assertEqual(manifest["version"], "0.1.0-preview.1")
+        with tempfile.TemporaryDirectory(prefix="lancedb-c-extract-") as temp:
+            package.extract_tar(archive, Path(temp))
+            header = (
+                Path(temp) / "lancedb-c-abc123-linux-amd64" / "include" / "lancedb.h"
+            ).read_bytes()
+        self.assertEqual(
+            header,
+            package.render_header(
+                (self.repo / "include" / "lancedb.h").read_bytes(), manifest["version"]
+            ),
+        )
+        self.assertIn(
+            '#define LANCEDB_VERSION_STRING "0.1.0-preview.1"\n'.encode(), header
+        )
+        self.assertEqual(
+            (self.repo / "include" / "lancedb.h").read_bytes(),
+            (package.HEADER_VERSION_DEFAULT + "\n").encode(),
+        )
 
     def test_package_version_defaults_to_dev_without_git(self) -> None:
         with mock.patch.dict(os.environ):
@@ -396,11 +457,18 @@ class PackageChecksumTests(PackageFixture):
                         capture_output=True,
                         text=True,
                     )
-                    for relative in ("LICENSE", "include/lancedb.h"):
-                        self.assertEqual(
-                            (package_root / relative).read_bytes(),
-                            (self.repo / relative).read_bytes(),
-                        )
+                    self.assertEqual(
+                        (package_root / "LICENSE").read_bytes(),
+                        (self.repo / "LICENSE").read_bytes(),
+                    )
+                    self.assertEqual(
+                        (package_root / "include" / "lancedb.h").read_bytes(),
+                        package.render_header(
+                            (self.repo / "include" / "lancedb.h").read_bytes(),
+                            "0.1.0-preview.1",
+                        ),
+                    )
+
 
 class TargetPolicyTests(unittest.TestCase):
     def workflow(self) -> str:

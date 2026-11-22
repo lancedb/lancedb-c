@@ -11,6 +11,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#define LANCEDB_STRINGIFY_IMPL(value) #value
+#define LANCEDB_STRINGIFY(value) LANCEDB_STRINGIFY_IMPL(value)
+#define LANCEDB_VERSION_CORE                     \
+  LANCEDB_STRINGIFY(LANCEDB_VERSION_MAJOR) "."  \
+  LANCEDB_STRINGIFY(LANCEDB_VERSION_MINOR) "."  \
+  LANCEDB_STRINGIFY(LANCEDB_VERSION_PATCH)
+
 static int fail(const char* message) {
   fprintf(stderr, "FAIL: %s\n", message);
   return 1;
@@ -23,6 +30,24 @@ int main(int argc, char** argv) {
   }
 
   const char* uri = argv[1];
+
+  const char* runtime_version = lancedb_version();
+  if (runtime_version == NULL || runtime_version[0] == '\0') {
+    return fail("lancedb_version() must return a non-empty string");
+  }
+  if (strcmp(runtime_version, LANCEDB_VERSION_STRING) != 0) {
+    fprintf(stderr, "header version %s does not match runtime version %s\n",
+            LANCEDB_VERSION_STRING, runtime_version);
+    return fail("the public header and runtime library report different versions");
+  }
+  const char* version_core = LANCEDB_VERSION_CORE;
+  const size_t version_core_length = strlen(version_core);
+  if (strncmp(runtime_version, version_core, version_core_length) != 0 ||
+      (runtime_version[version_core_length] != '\0' &&
+       runtime_version[version_core_length] != '-' &&
+       runtime_version[version_core_length] != '+')) {
+    return fail("the version macros do not match the runtime version string");
+  }
 
   if (lancedb_connect(NULL) != NULL) {
     return fail("lancedb_connect(NULL) must return NULL");
@@ -69,6 +94,6 @@ int main(int argc, char** argv) {
 
   lancedb_free_table_names(names, count);
   lancedb_connection_free(connection);
-  printf("C17 consumer: OK\n");
+  printf("C17 consumer: OK (version %s)\n", runtime_version);
   return 0;
 }

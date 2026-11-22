@@ -11,9 +11,30 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/*
+ * Binding version. This source header reports the development default so it
+ * stays usable directly without a generated file. CMake renders these values
+ * for the installed header, and the package builder renders the same block for
+ * packaged releases. All values match lancedb_version() in the library.
+ */
+#define LANCEDB_VERSION_MAJOR 0
+#define LANCEDB_VERSION_MINOR 0
+#define LANCEDB_VERSION_PATCH 0
+#define LANCEDB_VERSION_STRING "0.0.0-dev"
+#define LANCEDB_VERSION LANCEDB_VERSION_STRING
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * Return the binding version embedded in this library.
+ *
+ * The returned string is static, NUL-terminated and owned by the library. It
+ * matches LANCEDB_VERSION_STRING when the header and library come from the same
+ * build. The caller must not free the returned string.
+ */
+const char* lancedb_version(void);
 
 /**
  * Opaque handle to a LanceDB ConnectBuilder
