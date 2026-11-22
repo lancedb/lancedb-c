@@ -154,7 +154,7 @@ fn c_array_len_is_valid<T>(count: usize) -> bool {
 /// A zero count accepts a NULL pointer and yields an empty slice. A positive
 /// count requires a non-NULL pointer whose byte length is representable as a
 /// Rust slice.
-unsafe fn borrowed_slice<'a, T>(
+pub(crate) unsafe fn borrowed_slice<'a, T>(
     ptr: *const T,
     count: usize,
     error_message: *mut *mut c_char,
@@ -3272,7 +3272,7 @@ pub struct LanceDBFieldMetadataUpdate {
 }
 
 /// Read a required C string as UTF-8, reporting an invalid argument on failure.
-unsafe fn required_c_string<'a>(
+pub(crate) unsafe fn required_c_string<'a>(
     value: *const c_char,
     error_message: *mut *mut c_char,
 ) -> Option<&'a str> {
