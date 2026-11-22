@@ -11,7 +11,7 @@
 static const char* NON_UTF8 = "\x80\xFF\xFE\xAB";
 
 // the messages are indexed by the error code, so a missing message would go unnoticed
-static_assert(sizeof(LANCEDB_ERROR_MESSAGES)/sizeof(LANCEDB_ERROR_MESSAGES[0]) == LANCEDB_NOT_FOUND + 1,
+static_assert(sizeof(LANCEDB_ERROR_MESSAGES)/sizeof(LANCEDB_ERROR_MESSAGES[0]) == LANCEDB_EXTERNAL + 1,
     "every error code below LANCEDB_UNKNOWN must have a message");
 
 TEST_CASE("LanceDB Error Messages", "[connection]") {
@@ -22,12 +22,27 @@ TEST_CASE("LanceDB Error Messages", "[connection]") {
     REQUIRE(std::string(lancedb_error_to_message(LANCEDB_PERMISSION_DENIED)) == "Permission denied");
     REQUIRE(std::string(lancedb_error_to_message(LANCEDB_NOT_FOUND)) == "Not found");
   }
+  SECTION("SDK error codes added after 0.33 map to their own messages") {
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_TABLE_CORRUPTED)) == "Table corrupted");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_COLUMN_NOT_FOUND)) == "Column not found");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_FIELD_NOT_FOUND)) == "Field not found");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_COLUMN_ALREADY_EXISTS)) == "Column already exists");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_NOT_A_COMPUTED_COLUMN)) == "Not a computed column");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_NOT_A_MATERIALIZED_VIEW)) == "Not a materialized view");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_INVALID_EXPRESSION)) == "Invalid expression");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_SQL)) == "SQL error");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_JOB_FAILED)) == "Job failed");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_JOB_CANCELLED)) == "Job cancelled");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_JOB_NOT_FOUND)) == "Job not found");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_RESPONSE_INTERRUPTED)) == "Response interrupted");
+    REQUIRE(std::string(lancedb_error_to_message(LANCEDB_EXTERNAL)) == "External error");
+  }
   SECTION("The unknown error is kept out of the range of the other codes") {
-    REQUIRE(LANCEDB_UNKNOWN > LANCEDB_NOT_FOUND);
+    REQUIRE(LANCEDB_UNKNOWN > LANCEDB_EXTERNAL);
     REQUIRE(std::string(lancedb_error_to_message(LANCEDB_UNKNOWN)) == "Unknown error");
   }
   SECTION("Codes with no message are reported as invalid") {
-    for (const auto invalid : {LANCEDB_NOT_FOUND + 1, LANCEDB_UNKNOWN - 1, LANCEDB_UNKNOWN + 1}) {
+    for (const auto invalid : {LANCEDB_EXTERNAL + 1, LANCEDB_UNKNOWN - 1, LANCEDB_UNKNOWN + 1}) {
       REQUIRE(std::string(lancedb_error_to_message(static_cast<LanceDBError>(invalid)))
           == "Invalid error code");
     }
