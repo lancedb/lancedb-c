@@ -11,6 +11,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#define LANCEDB_STRINGIFY_IMPL(value) #value
+#define LANCEDB_STRINGIFY(value) LANCEDB_STRINGIFY_IMPL(value)
+#define LANCEDB_VERSION_CORE                     \
+  LANCEDB_STRINGIFY(LANCEDB_VERSION_MAJOR) "."  \
+  LANCEDB_STRINGIFY(LANCEDB_VERSION_MINOR) "."  \
+  LANCEDB_STRINGIFY(LANCEDB_VERSION_PATCH)
+
 static int fail(const char* message) {
   fprintf(stderr, "FAIL: %s\n", message);
   return 1;
@@ -33,12 +40,12 @@ int main(int argc, char** argv) {
             LANCEDB_VERSION_STRING, runtime_version);
     return fail("the public header and runtime library report different versions");
   }
-  int major = 0;
-  int minor = 0;
-  int patch = 0;
-  if (sscanf(runtime_version, "%d.%d.%d", &major, &minor, &patch) != 3 ||
-      major != LANCEDB_VERSION_MAJOR || minor != LANCEDB_VERSION_MINOR ||
-      patch != LANCEDB_VERSION_PATCH) {
+  const char* version_core = LANCEDB_VERSION_CORE;
+  const size_t version_core_length = strlen(version_core);
+  if (strncmp(runtime_version, version_core, version_core_length) != 0 ||
+      (runtime_version[version_core_length] != '\0' &&
+       runtime_version[version_core_length] != '-' &&
+       runtime_version[version_core_length] != '+')) {
     return fail("the version macros do not match the runtime version string");
   }
 
