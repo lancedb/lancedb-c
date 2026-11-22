@@ -58,9 +58,18 @@ pub unsafe extern "C" fn lancedb_table_arrow_schema(
 
     match runtime.block_on(tbl.schema()) {
         Ok(schema) => {
-            // Convert to Arrow C ABI
-            let ffi_schema =
-                Box::new(arrow_schema::ffi::FFI_ArrowSchema::try_from(&*schema).unwrap());
+            // Convert to Arrow C ABI. The C data interface cannot represent every
+            // Arrow schema, so report a conversion failure instead of panicking.
+            let ffi_schema = match arrow_schema::ffi::FFI_ArrowSchema::try_from(&*schema) {
+                Ok(schema) => Box::new(schema),
+                Err(error) => {
+                    set_custom_error_message(
+                        error_message,
+                        &format!("Failed to convert Arrow schema to C ABI: {error}"),
+                    );
+                    return LanceDBError::Arrow;
+                }
+            };
             *schema_out = Box::into_raw(ffi_schema);
             LanceDBError::Success
         }
