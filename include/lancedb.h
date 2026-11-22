@@ -164,6 +164,11 @@ typedef struct LanceDBVectorQuery LanceDBVectorQuery;
 typedef struct LanceDBQueryResult LanceDBQueryResult;
 
 /**
+ * Opaque handle to a LanceDB TakeQuery
+ */
+typedef struct LanceDBTakeQuery LanceDBTakeQuery;
+
+/**
  * Opaque handle to a LanceDB TableDelta
  */
 typedef struct LanceDBTableDelta LanceDBTableDelta;
@@ -1991,6 +1996,120 @@ LanceDBError lancedb_table_schema_ipc_file(
 );
 
 /**
+ * List row-addressable Blob v1 and v2 columns in declaration order
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns_out - pointer to receive the array of column-name strings
+ * @param count_out - pointer to receive the number of names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Struct-nested blobs use dotted paths such as `info.blob`. Blobs inside lists
+ * are omitted because a row id cannot identify an individual list element.
+ * On entry, both outputs and the error message are cleared. An empty list
+ * succeeds with *columns_out NULL and *count_out zero. The caller owns the
+ * strings and array and frees them with lancedb_free_blob_columns(). If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_blob_columns(
+    const LanceDBTable* table,
+    char*** columns_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free the blob column-name array returned by lancedb_table_blob_columns
+ *
+ * @param columns - array of string pointers returned by lancedb_table_blob_columns
+ * @param count - number of strings in the array
+ */
+void lancedb_free_blob_columns(char** columns, size_t count);
+
+/**
+ * One borrowed request for lancedb_table_fetch_blob_ranges
+ *
+ * `row_id` selects the row, `offset` is the byte offset from the beginning of
+ * that row's blob value, and `length` is the number of bytes to read. The
+ * request array is borrowed for the duration of the call.
+ */
+typedef struct {
+    uint64_t row_id;
+    uint64_t offset;
+    uint64_t length;
+} LanceDBBlobRangeRequest;
+
+/**
+ * Materialize blob bytes for borrowed row ids
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param row_ids - borrowed row id array; NULL is allowed only when num_row_ids is 0
+ * @param num_row_ids - number of row ids
+ * @param array_out - pointer to receive one Arrow C Data LargeBinary array
+ * @param schema_out - pointer to receive its Arrow C Data schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The result follows row_ids in length, order and duplicates. NULL blobs stay
+ * NULL and valid empty blobs are empty byte strings. With a valid blob column,
+ * an empty input returns an empty array without reading blob bytes. One missing
+ * or deleted row id rejects the whole request without partial results.
+ * On entry, both outputs and the error message are cleared. On success the
+ * array and schema are independent of the table and of each other; the caller
+ * frees the array with lancedb_free_arrow_array() and the schema with
+ * lancedb_free_arrow_schema(). On failure both outputs stay clear. Blob
+ * availability and errors on remote tables are returned unchanged from the
+ * SDK. If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blobs(
+    const LanceDBTable* table,
+    const char* column,
+    const uint64_t* row_ids,
+    size_t num_row_ids,
+    FFI_ArrowArray** array_out,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
+ * Materialize borrowed blob-local byte ranges
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param requests - borrowed request array; NULL is allowed only when num_requests is 0
+ * @param num_requests - number of requests
+ * @param array_out - pointer to receive one Arrow C Data LargeBinary array
+ * @param schema_out - pointer to receive its Arrow C Data schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The result follows the request order exactly, including duplicate and
+ * reordered requests. NULL blobs stay NULL, empty ranges on non-NULL blobs are
+ * empty byte strings. With a valid blob column, an empty request list returns an
+ * empty array without reading blob bytes. One missing row id or invalid range
+ * rejects the whole request without partial results.
+ * On entry, both outputs and the error message are cleared. On success the
+ * array and schema are independent of the table and of each other; the caller
+ * frees the array with lancedb_free_arrow_array() and the schema with
+ * lancedb_free_arrow_schema(). On failure both outputs stay clear. Blob
+ * availability and errors on remote tables are returned unchanged from the
+ * SDK. If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blob_ranges(
+    const LanceDBTable* table,
+    const char* column,
+    const LanceDBBlobRangeRequest* requests,
+    size_t num_requests,
+    FFI_ArrowArray** array_out,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
  * Get table version
  *
  * @param table - pointer to LanceDBTable
@@ -3489,6 +3608,151 @@ LanceDBError lancedb_vector_query_execute_with_status(
 );
 
 /**
+ * Create a take query that selects rows by dataset offset
+ *
+ * Offsets are 0-indexed and relative to the current table version; they can
+ * change when rows are added or deleted. The requested offsets are copied,
+ * including duplicates. Without lancedb_take_query_preserve_order() the result
+ * order is unspecified. Missing offsets are omitted.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param offsets - borrowed array of dataset offsets, or NULL when count is zero
+ * @param count - number of offsets in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of offsets and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_offsets(
+    const LanceDBTable* table,
+    const uint64_t* offsets,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Create a take query that selects rows by row ID
+ *
+ * Row IDs are relative to the current table version and can change after
+ * compaction or updates. The SDK follows the requested order, including
+ * repeated IDs, and omits missing or deleted IDs.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param row_ids - borrowed array of row IDs, or NULL when count is zero
+ * @param count - number of row IDs in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of row_ids and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_row_ids(
+    const LanceDBTable* table,
+    const uint64_t* row_ids,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Set the column projection of a take query
+ *
+ * Columns are returned in the requested order. A zero num_columns selects no
+ * columns and keeps an empty result schema; columns may then be NULL. The names
+ * are copied and are not borrowed after this call.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param columns - borrowed array of column names, or NULL when num_columns is zero
+ * @param num_columns - number of column names in the array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_select(
+    LanceDBTakeQuery* query,
+    const char* const* columns,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Ask a take query to return the `_rowid` metadata column
+ *
+ * The metadata column is appended to the projection. For an offset take it
+ * carries the row ID, which is not the same as the requested dataset offset.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_with_row_id(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Restore offset-take occurrences in the exact requested order
+ *
+ * Row-ID takes already follow the requested order and ignore this flag. For an
+ * offset take, the result follows the input order, including repeated offsets,
+ * and missing offsets are omitted.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_preserve_order(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Execute a take query and report why it could not start
+ *
+ * @param query - pointer to LanceDBTakeQuery (consumed by this function on every
+ *                path with a non-NULL pointer, including a rejected result pointer)
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The returned result uses the same Arrow C Data and Arrow IPC conversions as
+ * every other query result. On entry, *result_out and the error message are
+ * cleared. Caller must free a returned result with lancedb_query_result_free().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_execute(
+    LanceDBTakeQuery* query,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a TakeQuery
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ */
+void lancedb_take_query_free(LanceDBTakeQuery* query);
+
+/**
  * Convert query result to Arrow RecordBatch arrays
  *
  * @param result - pointer to LanceDBQueryResult. When result, result_arrays,
@@ -4252,6 +4516,14 @@ void lancedb_free_arrow_arrays(
     struct FFI_ArrowArray** arrays,
     size_t count
 );
+
+/**
+ * Free one Arrow C ABI array returned by a blob fetch function
+ *
+ * @param array - Arrow C ABI array pointer returned by lancedb_table_fetch_blobs()
+ *                or lancedb_table_fetch_blob_ranges()
+ */
+void lancedb_free_arrow_array(FFI_ArrowArray* array);
 
 /**
  * Information about one index on a table
