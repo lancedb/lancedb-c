@@ -303,6 +303,8 @@ ENUM_PREFIXES = {
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
     "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
+    "LanceDBCreateTableMode": "LANCEDB_CREATE_TABLE_MODE_",
+    "LanceDBWriteOptionsField": "LANCEDB_WRITE_OPTIONS_",
 }
 ENUM_MEMBER_RENAMES = {
     ("LanceDBIndexType", "BTree"): "BTREE",

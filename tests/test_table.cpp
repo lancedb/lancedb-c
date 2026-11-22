@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <utility>
+#include <filesystem>
 #include "test_common.h"
 
 struct RunOnStackCtx {
@@ -251,6 +252,415 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Creation", "[table]") {
     if (c_schema.release) {
       c_schema.release(&c_schema);
     }
+  }
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Create Options", "[table]") {
+  auto schema = create_test_schema();
+  struct ArrowSchema c_schema;
+  REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+  auto schema_ptr = reinterpret_cast<FFI_ArrowSchema*>(&c_schema);
+
+  auto create_with_options = [&](const std::string& name,
+                                 LanceDBRecordBatchReader* reader,
+                                 const LanceDBCreateTableOptions* options,
+                                 LanceDBTable** table,
+                                 char** error_message) {
+    return lancedb_table_create_with_options(
+        db, name.c_str(), schema_ptr, reader, options, table, error_message);
+  };
+
+  SECTION("Default options create an empty table") {
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(create_with_options("create_options_default", nullptr, nullptr, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 0);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Explicit write options are applied to the initial data") {
+    const std::string table_name = "create_options_write";
+    auto reader = create_reader_from_batch(create_test_record_batch(9, 0));
+
+    LanceDBWriteOptions write_options{};
+    write_options.set_fields = LANCEDB_WRITE_OPTIONS_MAX_ROWS_PER_FILE
+        | LANCEDB_WRITE_OPTIONS_DATA_STORAGE_VERSION
+        | LANCEDB_WRITE_OPTIONS_ENABLE_STABLE_ROW_IDS;
+    write_options.max_rows_per_file = 3;
+    write_options.data_storage_version = "2.0";
+    write_options.enable_stable_row_ids = 0;
+
+    LanceDBCreateTableOptions options{};
+    options.write_options = &write_options;
+    options.allow_external_blob_outside_bases = 1;
+
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 9);
+    lancedb_table_free(table);
+
+    // max_rows_per_file=3 must create more than one data file for these rows.
+    const auto data_dir = std::filesystem::path(uri) / (table_name + ".lance") / "data";
+    size_t data_files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(data_dir)) {
+      if (entry.is_regular_file()) {
+        ++data_files;
+      }
+    }
+    REQUIRE(data_files >= 2);
+  }
+
+  SECTION("ExistOk opens the existing table and ignores new data") {
+    const std::string table_name = "create_options_exist_ok";
+    LanceDBCreateTableOptions options{};
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+
+    auto reader = create_reader_from_batch(create_test_record_batch(5, 0));
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    lancedb_table_free(table);
+
+    options.mode = LANCEDB_CREATE_TABLE_MODE_EXIST_OK;
+    reader = create_reader_from_batch(create_test_record_batch(10, 100));
+    table = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Overwrite replaces the existing table") {
+    const std::string table_name = "create_options_overwrite";
+    LanceDBCreateTableOptions options{};
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+
+    auto reader = create_reader_from_batch(create_test_record_batch(5, 0));
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    lancedb_table_free(table);
+
+    options.mode = LANCEDB_CREATE_TABLE_MODE_OVERWRITE;
+    reader = create_reader_from_batch(create_test_record_batch(10, 100));
+    table = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    // An append would leave 15 rows; overwrite replaces the 5 old rows.
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Create mode keeps the existing table and consumes the reader") {
+    const std::string table_name = "create_options_create_mode";
+    LanceDBCreateTableOptions options{};
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+
+    auto reader = create_reader_from_batch(create_test_record_batch(5, 0));
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    lancedb_table_free(table);
+
+    reader = create_reader_from_batch(create_test_record_batch(3, 100));
+    table = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_TABLE_ALREADY_EXISTS);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    table = open_table(table_name);
+    REQUIRE(lancedb_table_count_rows(table) == 5);
+    lancedb_table_free(table);
+  }
+
+  SECTION("A custom location is used instead of the derived table path") {
+    const std::string table_name = "create_options_location";
+    const std::string custom_location =
+        (std::filesystem::path(uri) / "custom_location_table.lance").string();
+    LanceDBCreateTableOptions options{};
+    options.location = custom_location.c_str();
+
+    auto reader = create_reader_from_batch(create_test_record_batch(4, 0));
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 4);
+    lancedb_table_free(table);
+    REQUIRE(std::filesystem::is_directory(custom_location));
+
+    // The derived name path was not used, so opening by name cannot find it yet.
+    LanceDBTable* opened = nullptr;
+    REQUIRE(lancedb_connection_open_table(db, table_name.c_str(), &opened, &error_message)
+        == LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(opened == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("ExistOk reopens the custom-location table instead of the default one") {
+    const std::string table_name = "create_options_exist_ok_location";
+    const std::string custom_location =
+        (std::filesystem::path(uri) / "exist_ok_custom.lance").string();
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+
+    LanceDBCreateTableOptions custom_options{};
+    custom_options.location = custom_location.c_str();
+    auto reader = create_reader_from_batch(create_batch_with_value(2, 0, 111.0f));
+    REQUIRE(create_with_options(table_name, reader, &custom_options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 2);
+    REQUIRE(first_data_value(table, "key_0") == 111.0f);
+    lancedb_table_free(table);
+
+    LanceDBCreateTableOptions root_options{};
+    reader = create_reader_from_batch(create_batch_with_value(7, 0, 222.0f));
+    table = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &root_options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 7);
+    REQUIRE(first_data_value(table, "key_0") == 222.0f);
+    lancedb_table_free(table);
+
+    const char* keys[] = {"scheduler_error_mode"};
+    const char* values[] = {"best_effort"};
+    LanceDBCreateTableOptions reopen_options{};
+    reopen_options.mode = LANCEDB_CREATE_TABLE_MODE_EXIST_OK;
+    reopen_options.location = custom_location.c_str();
+    reopen_options.storage_keys = keys;
+    reopen_options.storage_values = values;
+    reopen_options.storage_count = 1;
+    reader = create_reader_from_batch(create_batch_with_value(3, 0, 333.0f));
+    table = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &reopen_options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 2);
+    REQUIRE(first_data_value(table, "key_0") == 111.0f);
+    lancedb_table_free(table);
+
+    // The same-name default table was never opened or replaced.
+    table = open_table(table_name);
+    REQUIRE(lancedb_table_count_rows(table) == 7);
+    REQUIRE(first_data_value(table, "key_0") == 222.0f);
+    lancedb_table_free(table);
+  }
+
+  SECTION("Failure clears the new table_out and leaves the legacy one unchanged") {
+    auto sentinel = reinterpret_cast<LanceDBTable*>(static_cast<uintptr_t>(1));
+    char* error_message = nullptr;
+
+    LanceDBCreateTableOptions options{};
+    options.mode = 99;
+    LanceDBTable* table = sentinel;
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(create_with_options("create_options_sentinel", reader, &options, &table, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    table = sentinel;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(lancedb_table_create(
+        db, "invalid table name", schema_ptr, reader, &table, &error_message)
+        == LANCEDB_INVALID_TABLE_NAME);
+    REQUIRE(table == sentinel);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Per-table storage options are passed to the create builder") {
+    const std::string table_name = "create_options_storage";
+    const char* keys[] = {"new_table_data_storage_version"};
+    const char* values[] = {"2.0"};
+    LanceDBCreateTableOptions options{};
+    options.storage_keys = keys;
+    options.storage_values = values;
+    options.storage_count = 1;
+
+    auto reader = create_reader_from_batch(create_test_record_batch(4, 0));
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(create_with_options(table_name, reader, &options, &table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(table != nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 4);
+    lancedb_table_free(table);
+
+    // A malformed storage value is parsed by the SDK after it receives the map.
+    const char* bad_values[] = {"not-a-version"};
+    options.storage_values = bad_values;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    table = nullptr;
+    REQUIRE(create_with_options("create_options_storage_bad", reader, &options, &table, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("Invalid create options are rejected and consume the reader") {
+    LanceDBCreateTableOptions options{};
+    char* error_message = nullptr;
+    LanceDBTable* table = nullptr;
+
+    options.mode = 99;
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(create_with_options("create_options_bad_mode", reader, &options, &table, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.mode = LANCEDB_CREATE_TABLE_MODE_CREATE;
+    options.storage_count = 1;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(create_with_options("create_options_bad_storage", reader, &options, &table, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.storage_count = 0;
+    options.allow_external_blob_outside_bases = 2;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(create_with_options("create_options_bad_bool", reader, &options, &table, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("A namespace path places the table outside the root") {
+    const char* parent_path[] = {"create_options_parent"};
+    const char* child_path[] = {"create_options_parent", "child"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, parent_path, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_connection_create_namespace_path(
+        db, child_path, 2, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    const std::string table_name = "namespaced_create_options_table";
+    LanceDBCreateTableOptions options{};
+    LanceDBTable* root_table = nullptr;
+    auto reader = create_reader_from_batch(create_test_record_batch(7, 0));
+    REQUIRE(create_with_options(table_name, reader, &options, &root_table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(root_table != nullptr);
+    lancedb_table_free(root_table);
+
+    options.namespace_path = child_path;
+    options.namespace_path_len = 2;
+    LanceDBTable* namespaced_table = nullptr;
+    reader = create_reader_from_batch(create_test_record_batch(3, 100));
+    REQUIRE(create_with_options(table_name, reader, &options, &namespaced_table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(namespaced_table != nullptr);
+    REQUIRE(lancedb_table_count_rows(namespaced_table) == 3);
+    lancedb_table_free(namespaced_table);
+
+    // Create enough child tables to exercise pagination, and a root table whose
+    // name sorts between them. A namespace-ignoring builder would return the
+    // root "ns_page_ab"; without start_after it would return "ns_page_a"; and
+    // without the limit it would return both "ns_page_b" and "ns_page_c".
+    for (const auto* child_table : {"ns_page_a", "ns_page_b", "ns_page_c"}) {
+      LanceDBTable* table = nullptr;
+      REQUIRE(create_with_options(child_table, nullptr, &options, &table, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      lancedb_table_free(table);
+    }
+    LanceDBCreateTableOptions root_options{};
+    LanceDBTable* root_page_table = nullptr;
+    REQUIRE(create_with_options("ns_page_ab", nullptr, &root_options, &root_page_table, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_table_free(root_page_table);
+
+    LanceDBTableNamesBuilder* builder = lancedb_connection_table_names_builder(db);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_table_names_builder_limit(builder, 1);
+    REQUIRE(builder != nullptr);
+    builder = lancedb_table_names_builder_start_after(builder, "ns_page_a");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_table_names_builder_namespace(builder, child_path, 2);
+    REQUIRE(builder != nullptr);
+    char** names = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_table_names_builder_execute(
+        builder, &names, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 1);
+    REQUIRE(std::string(names[0]) == "ns_page_b");
+    lancedb_free_table_names(names, count);
+
+    // The root table is a separate table with the same name.
+    root_table = open_table(table_name);
+    REQUIRE(lancedb_table_count_rows(root_table) == 7);
+    lancedb_table_free(root_table);
+  }
+
+  SECTION("A namespace path with a NULL array is rejected and consumes the reader") {
+    LanceDBCreateTableOptions options{};
+    options.namespace_path_len = 1;
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    LanceDBTable* table = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(create_with_options("create_options_bad_namespace", reader, &options, &table, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(table == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("A NULL output pointer consumes the reader") {
+    LanceDBCreateTableOptions options{};
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    char* error_message = nullptr;
+    REQUIRE(create_with_options("create_options_null_out", reader, &options, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  if (c_schema.release) {
+    c_schema.release(&c_schema);
   }
 }
 
