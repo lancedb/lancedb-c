@@ -114,6 +114,51 @@ std::map<std::string, uint64_t> row_ids_by_key(const CollectedQueryRows& rows) {
   return row_ids;
 }
 
+std::vector<uint64_t> row_ids_of(const CollectedQueryRows& rows) {
+  std::vector<uint64_t> row_ids;
+  for (const auto& batch : rows.batches) {
+    auto row_id_column = batch->GetColumnByName("_rowid");
+    REQUIRE(row_id_column != nullptr);
+    auto row_id_array = std::static_pointer_cast<arrow::UInt64Array>(row_id_column);
+    for (int64_t i = 0; i < row_id_array->length(); i++) {
+      REQUIRE(!row_id_array->IsNull(i));
+      row_ids.push_back(row_id_array->Value(i));
+    }
+  }
+  return row_ids;
+}
+
+LanceDBTakeQuery* take_offsets_checked(
+    const LanceDBTable* table, const uint64_t* offsets, size_t count) {
+  LanceDBTakeQuery* take = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_take_offsets(table, offsets, count, &take, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(take != nullptr);
+  return take;
+}
+
+LanceDBTakeQuery* take_row_ids_checked(
+    const LanceDBTable* table, const uint64_t* row_ids, size_t count) {
+  LanceDBTakeQuery* take = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_take_row_ids(table, row_ids, count, &take, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(take != nullptr);
+  return take;
+}
+
+CollectedQueryRows execute_take_query(LanceDBTakeQuery* take) {
+  LanceDBQueryResult* result = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_take_query_execute(take, &result, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(result != nullptr);
+  return collect_query_rows(result);
+}
+
 void create_key_index(LanceDBTable* table) {
   // Create BTREE index on "key" column
   const char* index_columns[] = {"key"};
@@ -990,6 +1035,261 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Arrow IPC output", "[query][ip
         == LANCEDB_INVALID_ARGUMENT);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
+  }
+
+  lancedb_table_free(table);
+}
+
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB TakeQuery - offsets and row IDs", "[query][take]") {
+  const std::string table_name = "take_query_test";
+  constexpr int initial_rows = 8;
+  constexpr int appended_rows = 8;
+
+  LanceDBTable* table = create_table_with_data(table_name, initial_rows, 0);
+  REQUIRE(table != nullptr);
+
+  // A second fragment makes the appended rows' row IDs differ from their
+  // dataset offsets, so the tests can tell the two selectors apart.
+  auto appended = create_test_record_batch(appended_rows, initial_rows);
+  REQUIRE(lancedb_table_add(table, create_reader_from_batch(appended), nullptr)
+      == LANCEDB_SUCCESS);
+
+  auto all_rows = [&] {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_select(query, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_with_row_id(query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    return collect_query_rows(lancedb_query_execute(query));
+  };
+
+  const auto row_ids = row_ids_by_key(all_rows());
+  REQUIRE(row_ids.size() == initial_rows + appended_rows);
+  // key_12 is at dataset offset 12, but its row ID belongs to the second
+  // fragment and must not be mistaken for that offset.
+  REQUIRE(row_ids.at("key_12") != 12);
+
+  SECTION("Offset take copies its input and preserves unsorted duplicate order") {
+    std::vector<uint64_t> offsets = {12, 8, 12, 10};
+    LanceDBTakeQuery* take = take_offsets_checked(table, offsets.data(), offsets.size());
+    char* error_message = nullptr;
+    REQUIRE(lancedb_take_query_preserve_order(take, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The constructor copied the offsets, so changing the caller's array after
+    // the call must not change the rows this take selects.
+    std::fill(offsets.begin(), offsets.end(), 0);
+
+    auto rows = execute_take_query(take);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{
+        "key_12", "key_8", "key_12", "key_10"});
+  }
+
+  SECTION("Offset take keeps duplicate rows without promising request order") {
+    const std::vector<uint64_t> offsets = {12, 8, 12, 10};
+    auto rows = execute_take_query(
+        take_offsets_checked(table, offsets.data(), offsets.size()));
+
+    auto keys = keys_of(rows);
+    std::sort(keys.begin(), keys.end());
+    REQUIRE(keys == std::vector<std::string>{
+        "key_10", "key_12", "key_12", "key_8"});
+  }
+
+  SECTION("Missing offsets and row IDs are omitted") {
+    const std::vector<uint64_t> offsets = {12, 1000};
+    LanceDBTakeQuery* offset_take =
+        take_offsets_checked(table, offsets.data(), offsets.size());
+    char* error_message = nullptr;
+    REQUIRE(lancedb_take_query_preserve_order(offset_take, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(keys_of(execute_take_query(offset_take)) == std::vector<std::string>{"key_12"});
+
+    const std::vector<uint64_t> requested = {
+        row_ids.at("key_12"), UINT64_MAX, row_ids.at("key_8")};
+    auto rows = execute_take_query(
+        take_row_ids_checked(table, requested.data(), requested.size()));
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_12", "key_8"});
+  }
+
+  SECTION("Row ID take follows the requested row ID order") {
+    const std::vector<uint64_t> requested = {
+        row_ids.at("key_13"), row_ids.at("key_1"),
+        row_ids.at("key_13"), row_ids.at("key_9")};
+    LanceDBTakeQuery* take =
+        take_row_ids_checked(table, requested.data(), requested.size());
+    char* error_message = nullptr;
+    REQUIRE(lancedb_take_query_with_row_id(take, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto rows = execute_take_query(take);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{
+        "key_13", "key_1", "key_13", "key_9"});
+    REQUIRE(row_ids_of(rows) == requested);
+  }
+
+  SECTION("Projection and with_row_id apply to take results") {
+    const std::vector<uint64_t> requested = {row_ids.at("key_13"), row_ids.at("key_1")};
+    LanceDBTakeQuery* take =
+        take_row_ids_checked(table, requested.data(), requested.size());
+
+    const char* columns[] = {"key"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_take_query_select(take, columns, 1, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_take_query_with_row_id(take, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto rows = execute_take_query(take);
+    REQUIRE(rows.schema->num_fields() == 2);
+    REQUIRE(rows.schema->field(0)->name() == "key");
+    REQUIRE(rows.schema->field(1)->name() == "_rowid");
+    REQUIRE(rows.schema->GetFieldByName("data") == nullptr);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_13", "key_1"});
+    REQUIRE(row_ids_of(rows) == requested);
+  }
+
+  SECTION("An empty take selection preserves the projected schema") {
+    LanceDBTakeQuery* empty_take = take_offsets_checked(table, nullptr, 0);
+    LanceDBQueryResult* result = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_take_query_execute(empty_take, &result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(result != nullptr);
+
+    // The existing empty-result representation has no batches and no schema.
+    FFI_ArrowArray** arrays = nullptr;
+    FFI_ArrowSchema* schema = nullptr;
+    size_t count = 42;
+    REQUIRE(lancedb_query_result_to_arrow(
+        result, &arrays, &schema, &count, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(count == 0);
+    REQUIRE(arrays == nullptr);
+    REQUIRE(schema == nullptr);
+
+    empty_take = take_offsets_checked(table, nullptr, 0);
+    const char* projected_columns[] = {"key"};
+    REQUIRE(lancedb_take_query_select(empty_take, projected_columns, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    result = nullptr;
+    REQUIRE(lancedb_take_query_execute(empty_take, &result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBIpcBuffer buffer = {};
+    REQUIRE(lancedb_query_result_to_ipc_file(result, &buffer, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto contents = read_ipc_file(buffer.data, buffer.len);
+    lancedb_ipc_buffer_free(&buffer);
+
+    REQUIRE(contents.schema->num_fields() == 1);
+    REQUIRE(contents.schema->field(0)->name() == "key");
+    REQUIRE(contents.batches.empty());
+  }
+
+  SECTION("An empty column selection keeps an empty schema") {
+    const std::vector<uint64_t> requested = {row_ids.at("key_12"), row_ids.at("key_8")};
+    LanceDBTakeQuery* take =
+        take_row_ids_checked(table, requested.data(), requested.size());
+    REQUIRE(lancedb_take_query_select(take, nullptr, 0, nullptr) == LANCEDB_SUCCESS);
+
+    LanceDBQueryResult* result = nullptr;
+    REQUIRE(lancedb_take_query_execute(take, &result, nullptr) == LANCEDB_SUCCESS);
+    REQUIRE(result != nullptr);
+
+    FFI_ArrowArray** arrays = nullptr;
+    FFI_ArrowSchema* schema = nullptr;
+    size_t count = 0;
+    REQUIRE(lancedb_query_result_to_arrow(result, &arrays, &schema, &count, nullptr)
+        == LANCEDB_SUCCESS);
+    REQUIRE(count > 0);
+    REQUIRE(arrays != nullptr);
+    REQUIRE(schema != nullptr);
+    REQUIRE(reinterpret_cast<ArrowSchema*>(schema)->n_children == 0);
+
+    size_t total_rows = 0;
+    for (size_t i = 0; i < count; i++) {
+      auto* array = reinterpret_cast<ArrowArray*>(arrays[i]);
+      REQUIRE(array->n_children == 0);
+      total_rows += static_cast<size_t>(array->length);
+    }
+    REQUIRE(total_rows == requested.size());
+
+    lancedb_free_arrow_arrays(arrays, count);
+    lancedb_free_arrow_schema(schema);
+  }
+
+  SECTION("Invalid arguments are rejected without consuming a valid builder") {
+    const uint64_t offsets[] = {0};
+    LanceDBTakeQuery* take = reinterpret_cast<LanceDBTakeQuery*>(uintptr_t{1});
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_table_take_offsets(nullptr, offsets, 1, &take, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(take == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    take = reinterpret_cast<LanceDBTakeQuery*>(uintptr_t{1});
+    REQUIRE(lancedb_table_take_row_ids(table, nullptr, 1, &take, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(take == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    take = reinterpret_cast<LanceDBTakeQuery*>(uintptr_t{1});
+    REQUIRE(lancedb_table_take_offsets(table, offsets, 1, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    REQUIRE(lancedb_take_query_select(nullptr, nullptr, 0, nullptr)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_take_query_with_row_id(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(lancedb_take_query_preserve_order(nullptr, nullptr) == LANCEDB_INVALID_ARGUMENT);
+
+    take = take_offsets_checked(table, offsets, 1);
+    const char* null_columns[] = {nullptr};
+    error_message = nullptr;
+    REQUIRE(lancedb_take_query_select(take, null_columns, 1, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    lancedb_take_query_free(take);
+
+    take = take_offsets_checked(table, offsets, 1);
+    error_message = nullptr;
+    REQUIRE(lancedb_take_query_execute(take, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(uintptr_t{1});
+    error_message = nullptr;
+    REQUIRE(lancedb_take_query_execute(nullptr, &result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(result == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_take_query_free(nullptr);
+
+    // A zero count accepts a NULL selector array and creates an empty take.
+    take = take_offsets_checked(table, nullptr, 0);
+    lancedb_take_query_free(take);
   }
 
   lancedb_table_free(table);

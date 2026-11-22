@@ -110,7 +110,7 @@ jobs:
           echo "LANCEDB_TAG_COMMIT=${tag_commit}" >> "$GITHUB_ENV"
           echo "commit=${tag_commit}" >> "$GITHUB_OUTPUT"
 
-      # The locked Lance v15.0.0-beta.25 fixture contains a 188-character
+      # The locked Lance v15.0.0-beta.26 fixture contains a 188-character
       # relative test-data path. The default runner Cargo home makes Cargo's
       # git checkout path exceed Windows MAX_PATH; C:\c keeps the longest
       # checkout path at 238 characters, so use it only on Windows.

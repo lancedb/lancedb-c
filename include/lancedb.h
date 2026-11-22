@@ -124,6 +124,11 @@ const char* lancedb_version(void);
 typedef struct LanceDBConnectBuilder LanceDBConnectBuilder;
 
 /**
+ * Opaque handle to a LanceDB ConnectNamespaceBuilder
+ */
+typedef struct LanceDBConnectNamespaceBuilder LanceDBConnectNamespaceBuilder;
+
+/**
  * Opaque handle to a LanceDB Connection
  */
 typedef struct LanceDBConnection LanceDBConnection;
@@ -159,9 +164,19 @@ typedef struct LanceDBVectorQuery LanceDBVectorQuery;
 typedef struct LanceDBQueryResult LanceDBQueryResult;
 
 /**
+ * Opaque handle to a LanceDB TakeQuery
+ */
+typedef struct LanceDBTakeQuery LanceDBTakeQuery;
+
+/**
  * Opaque handle to a LanceDB TableDelta
  */
 typedef struct LanceDBTableDelta LanceDBTableDelta;
+
+/**
+ * Opaque seekable handle to one lazy blob file
+ */
+typedef struct LanceDBBlobFile LanceDBBlobFile;
 
 /**
  * Opaque handle to a LanceDB Session
@@ -648,6 +663,143 @@ typedef struct {
 } LanceDBBranch;
 
 /**
+ * One column description in a branch diff
+ *
+ * The strings are read-only and owned by the result that contains them.
+ */
+typedef struct {
+    const char* name;       // Column name
+    const char* data_type;  // SDK data type description
+    int nullable;           // Non-zero when the column accepts nulls
+} LanceDBColumnSummary;
+
+/**
+ * A column that exists in both branches with different definitions
+ */
+typedef struct {
+    const char* name;              // Column name
+    LanceDBColumnSummary main;     // Definition on main
+    LanceDBColumnSummary branch;   // Definition on the compared branch
+} LanceDBColumnChange;
+
+/**
+ * One index description in a branch diff
+ *
+ * index_type is NULL when the SDK response omitted it. columns is NULL when
+ * column_count is zero.
+ */
+typedef struct {
+    const char* index_name;          // Index name
+    const char* const* columns;      // Read-only column names, NULL when column_count is 0
+    size_t column_count;             // Number of entries in columns
+    const char* index_type;          // Optional index type (NULL when omitted)
+    const char* status;              // Index status reported by the server
+} LanceDBIndexSummary;
+
+/**
+ * Row-count classification from the SDK
+ */
+typedef struct {
+    uint64_t unchanged;        // Rows unchanged on both sides
+    uint64_t new_on_base;      // Rows new on main
+    uint64_t new_on_branch;    // Rows new on the branch
+    uint64_t stale_recompute;  // Rows requiring recomputation
+    uint64_t inputs_changed;   // Rows whose inputs changed
+    int delta_available;       // Non-zero when a delta is available
+} LanceDBRowCountSummary;
+
+/**
+ * Reason the server gave for a blocked cherry-pick
+ *
+ * LANCEDB_CHERRY_PICK_ERROR_UNKNOWN is the SDK's mapping for a code the
+ * pinned SDK does not recognize; the SDK does not expose the raw code.
+ */
+typedef enum {
+    LANCEDB_CHERRY_PICK_ERROR_BASE_MOVED = 0,
+    LANCEDB_CHERRY_PICK_ERROR_ROW_COUNT_MISMATCH = 1,
+    LANCEDB_CHERRY_PICK_ERROR_ROWS_CHANGED = 2,
+    LANCEDB_CHERRY_PICK_ERROR_COLUMN_REMOVED = 3,
+    LANCEDB_CHERRY_PICK_ERROR_COLUMN_CHANGED = 4,
+    LANCEDB_CHERRY_PICK_ERROR_NOTHING_TO_APPLY = 5,
+    LANCEDB_CHERRY_PICK_ERROR_NO_COLUMN_CHANGES = 6,
+    LANCEDB_CHERRY_PICK_ERROR_INPUT_COLUMN_DEPENDENCY = 7,
+    LANCEDB_CHERRY_PICK_ERROR_PARENT_NOT_MAIN = 8,
+    LANCEDB_CHERRY_PICK_ERROR_UNKNOWN = 9
+} LanceDBCherryPickErrorCode;
+
+/**
+ * One error from a branch diff or cherry-pick result
+ */
+typedef struct {
+    LanceDBCherryPickErrorCode code;  // SDK error code, or UNKNOWN for an unrecognized value
+    const char* message;              // Read-only error message
+} LanceDBCherryPickError;
+
+/**
+ * Full branch diff returned by lancedb_table_diff_branch()
+ *
+ * Every array is in the SDK response order and NULL when its count is zero.
+ * The result owns all strings and arrays. The result remains valid until
+ * lancedb_free_branch_diff() is called with the same pointer. Callers must
+ * not modify or free nested strings or arrays individually.
+ */
+typedef struct {
+    const char* from_branch;                  // Branch compared against main
+    uint64_t parent_version;                  // Version the branch started from
+    uint64_t main_version;                    // Version of main in the diff
+    uint64_t branch_version;                  // Version of the compared branch
+    int base_moved;                           // Non-zero when main advanced since the branch started
+    uint64_t row_count_main;                  // Row count on main
+    uint64_t row_count_branch;                // Row count on the branch
+    LanceDBRowCountSummary row_summary;       // Row-count classification
+    const LanceDBColumnSummary* added_columns;      // Added columns, NULL when added_column_count is 0
+    size_t added_column_count;                      // Number of added columns
+    const LanceDBColumnSummary* removed_columns;    // Removed columns, NULL when removed_column_count is 0
+    size_t removed_column_count;                    // Number of removed columns
+    const LanceDBColumnChange* changed_columns;     // Changed columns, NULL when changed_column_count is 0
+    size_t changed_column_count;                    // Number of changed columns
+    const LanceDBIndexSummary* added_indexes;       // Added indexes, NULL when added_index_count is 0
+    size_t added_index_count;                       // Number of added indexes
+    const LanceDBIndexSummary* removed_indexes;     // Removed indexes, NULL when removed_index_count is 0
+    size_t removed_index_count;                     // Number of removed indexes
+    const LanceDBCherryPickError* errors;           // Errors, NULL when error_count is 0
+    size_t error_count;                             // Number of errors
+} LanceDBBranchDiff;
+
+/**
+ * Outcome reported by lancedb_table_cherry_pick()
+ *
+ * LANCEDB_CHERRY_PICK_STATUS_UNKNOWN is the SDK's mapping for a status the
+ * pinned SDK does not recognize; the SDK does not expose the raw status.
+ */
+typedef enum {
+    LANCEDB_CHERRY_PICK_STATUS_READY = 0,
+    LANCEDB_CHERRY_PICK_STATUS_FAILED = 1,
+    LANCEDB_CHERRY_PICK_STATUS_NOT_IMPLEMENTED = 2,
+    LANCEDB_CHERRY_PICK_STATUS_CHERRY_PICKED = 3,
+    LANCEDB_CHERRY_PICK_STATUS_UNKNOWN = 4
+} LanceDBCherryPickStatus;
+
+/**
+ * Result of lancedb_table_cherry_pick()
+ *
+ * diff is an embedded copy of the branch diff; do not pass its address to
+ * lancedb_free_branch_diff(). promoted_columns is NULL when
+ * promoted_column_count is zero. main_version_after is read only when
+ * has_main_version_after is non-zero, because the SDK field is optional.
+ * The result owns all strings and arrays and remains valid until
+ * lancedb_free_cherry_pick_result() is called with the same pointer.
+ */
+typedef struct {
+    LanceDBCherryPickStatus status;            // Outcome reported by the server
+    LanceDBBranchDiff diff;                    // Embedded branch diff
+    const char* const* promoted_columns;       // Promoted column names, NULL when promoted_column_count is 0
+    size_t promoted_column_count;              // Number of promoted columns
+    int has_main_version_after;                // Non-zero when main_version_after is present
+    uint64_t main_version_after;               // Main version after a successful cherry-pick
+} LanceDBCherryPickResult;
+
+/**
  * Kind of endpoint a table delta compares
  */
 typedef enum {
@@ -891,6 +1043,208 @@ LanceDBConnectBuilder* lancedb_connect_builder_session(LanceDBConnectBuilder* bu
  * After calling this function, the builder pointer must not be used.
  */
 void lancedb_connect_builder_free(LanceDBConnectBuilder* builder);
+
+/**
+ * Namespace operations that can be pushed down to the namespace backend
+ *
+ * These values are the SDK's complete set of pushdown operations. They are
+ * explicit so a C caller can pass and be rejected for any other value.
+ */
+typedef enum {
+    LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE = 0,  // Execute queries through the namespace server
+    LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE = 1  // Request the SDK's CreateTable pushdown
+} LanceDBNamespacePushdownOperation;
+
+/**
+ * Create a ConnectNamespaceBuilder for a Lance namespace implementation
+ *
+ * @param ns_impl - NUL-terminated namespace implementation name
+ * @param property_keys - array of property names (NULL when property_count is 0)
+ * @param property_values - array of property values matching property_keys
+ * @param property_count - number of namespace implementation properties
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * "dir" is always available and requires a "root" property. "rest" is
+ * available only when the library is built with the remote feature. The pinned
+ * SDK rejects any other implementation when the builder is executed. Other
+ * properties, their defaults, and required values are defined by the selected
+ * namespace implementation.
+ *
+ * The implementation name, property arrays, and every string they point to are
+ * borrowed only for the duration of this call and copied into the returned
+ * builder. A zero property_count accepts NULL arrays. A positive count requires
+ * both arrays and every entry to be non-NULL, NUL-terminated UTF-8 strings.
+ *
+ * For the "dir" implementation, properties whose names start with "storage."
+ * apply to its own root object store. This is separate from the connection
+ * storage-options map set by
+ * lancedb_connect_namespace_builder_storage_option().
+ *
+ * The returned builder must be freed with
+ * lancedb_connect_namespace_builder_free() if it is not executed.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace(
+    const char* ns_impl,
+    const char* const* property_keys,
+    const char* const* property_values,
+    size_t property_count
+);
+
+/**
+ * Execute the namespace connection and return a Connection handle
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param connection - pointer to receive the LanceDBConnection pointer
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The builder is consumed on every path and must not be used after calling.
+ * connection is written only on success, when it receives a handle that must be
+ * freed with lancedb_connection_free(); on failure it is left unchanged. An
+ * existing *error_message value is preserved on success, consistent with
+ * lancedb_connect_builder_execute(). On error, a non-NULL error_message
+ * receives a message that the caller frees with lancedb_free_string().
+ *
+ * The SDK decides whether the implementation exists in this build, validates
+ * the implementation properties, and performs the connection. The URI of the
+ * returned connection is "namespace://<implementation>".
+ */
+LanceDBError lancedb_connect_namespace_builder_execute(
+    LanceDBConnectNamespaceBuilder* builder,
+    LanceDBConnection** connection,
+    char** error_message
+);
+
+/**
+ * Set an option for the storage layer of a namespace connection
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param key - NUL-terminated option name
+ * @param value - NUL-terminated option value
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL. These options apply to table
+ * access through the namespace connection. They are not the "storage.*"
+ * implementation properties that the "dir" namespace uses for its own root
+ * object store.
+ *
+ * At the pinned SDK, the table creation path falls back to this map only when
+ * the namespace response omits storage_options. An explicit empty
+ * storage_options map prevents that fallback. The selected map overrides
+ * per-write keys with the same name.
+ *
+ * Opening a table uses the describe_table storage options plus the options
+ * supplied on that open request, with namespace values winning on overlaps; it
+ * does not use this connection-level map there.
+ *
+ * The SDK does not validate every option during the namespace connection
+ * itself.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_storage_option(
+    LanceDBConnectNamespaceBuilder* builder,
+    const char* key,
+    const char* value
+);
+
+/**
+ * Set an additional property for the namespace client
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param key - NUL-terminated property name
+ * @param value - NUL-terminated property value
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A NULL or non-UTF-8 key or value returns NULL.
+ *
+ * Namespace client properties are merged into the implementation properties
+ * when the builder is executed. The SDK decides which value wins when the same
+ * key is supplied as an implementation property and as a namespace client
+ * property. For the "dir" implementation, a property whose name starts with
+ * "storage." configures its own root object store even when it is supplied
+ * through this setter; this differs from
+ * lancedb_connect_namespace_builder_storage_option(), which configures table
+ * access for the connection.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_namespace_client_property(
+    LanceDBConnectNamespaceBuilder* builder,
+    const char* key,
+    const char* value
+);
+
+/**
+ * Set the read consistency interval for a namespace connection
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param interval_ms - read consistency interval in milliseconds
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Leaving this setter unused keeps the SDK default: no freshness constraint is
+ * added to reads. An explicit 0 requests strong consistency. A positive value
+ * requests eventual consistency. A NULL builder returns NULL.
+ *
+ * This has the same meaning and defaults as
+ * lancedb_connect_builder_read_consistency_interval_ms() for a URI connection.
+ * The configured mode can be read back with
+ * lancedb_connection_read_consistency().
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_read_consistency_interval_ms(
+    LanceDBConnectNamespaceBuilder* builder,
+    uint64_t interval_ms
+);
+
+/**
+ * Set a session for the namespace connection builder
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param session - pointer to LanceDBSession, or NULL to keep the default session
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Passing NULL session is a no-op. A non-NULL session is borrowed for the call;
+ * the builder keeps it alive through a cloned reference, and the caller still
+ * owns its handle and must free it with lancedb_session_free().
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_session(
+    LanceDBConnectNamespaceBuilder* builder,
+    const LanceDBSession* session
+);
+
+/**
+ * Add an operation to push down to the namespace backend
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ * @param operation - raw integer value of a LanceDBNamespacePushdownOperation enumerator
+ * @return Non-null pointer to LanceDBConnectNamespaceBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * Operations are opt-in; unset means the SDK executes them locally. Call this
+ * setter more than once to add multiple operations. A value outside the
+ * LanceDBNamespacePushdownOperation enumerators returns NULL.
+ *
+ * With LANCEDB_NAMESPACE_PUSHDOWN_QUERY_TABLE, queries execute through the
+ * namespace server; a query with a nonempty order_by still executes locally and
+ * needs client access to table storage. LANCEDB_NAMESPACE_PUSHDOWN_CREATE_TABLE
+ * is the SDK's other pushdown value; at the pinned SDK version the namespace
+ * create path still declares the table and writes locally, so this option is
+ * forwarded without changing that path. The SDK owns whether and how an
+ * implementation applies either operation.
+ */
+LanceDBConnectNamespaceBuilder* lancedb_connect_namespace_builder_pushdown_operation(
+    LanceDBConnectNamespaceBuilder* builder,
+    int operation
+);
+
+/**
+ * Free a ConnectNamespaceBuilder
+ *
+ * @param builder - pointer to LanceDBConnectNamespaceBuilder returned from lancedb_connect_namespace()
+ *
+ * After calling this function, the builder pointer must not be used.
+ */
+void lancedb_connect_namespace_builder_free(LanceDBConnectNamespaceBuilder* builder);
 
 /**
  * Get the URI of the connection
@@ -1937,6 +2291,425 @@ LanceDBError lancedb_table_arrow_schema(
 LanceDBError lancedb_table_schema_ipc_file(
     const LanceDBTable* table,
     LanceDBIpcBuffer* buffer_out,
+    char** error_message
+);
+
+/**
+ * List row-addressable Blob v1 and v2 columns in declaration order
+ *
+ * @param table - pointer to LanceDBTable
+ * @param columns_out - pointer to receive the array of column-name strings
+ * @param count_out - pointer to receive the number of names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Struct-nested blobs use dotted paths such as `info.blob`. Blobs inside lists
+ * are omitted because a row id cannot identify an individual list element.
+ * On entry, both outputs and the error message are cleared. An empty list
+ * succeeds with *columns_out NULL and *count_out zero. The caller owns the
+ * strings and array and frees them with lancedb_free_blob_columns(). If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_blob_columns(
+    const LanceDBTable* table,
+    char*** columns_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free the blob column-name array returned by lancedb_table_blob_columns
+ *
+ * @param columns - array of string pointers returned by lancedb_table_blob_columns
+ * @param count - number of strings in the array
+ */
+void lancedb_free_blob_columns(char** columns, size_t count);
+
+/**
+ * One borrowed request for lancedb_table_fetch_blob_ranges
+ *
+ * `row_id` selects the row, `offset` is the byte offset from the beginning of
+ * that row's blob value, and `length` is the number of bytes to read. The
+ * request array is borrowed for the duration of the call.
+ */
+typedef struct {
+    uint64_t row_id;
+    uint64_t offset;
+    uint64_t length;
+} LanceDBBlobRangeRequest;
+
+/**
+ * Bytes of one blob read owned by LanceDB
+ *
+ * A read that returned no bytes leaves both fields zeroed; a successful read of
+ * non-empty bytes sets `data` to the first byte and `len` to the byte count.
+ * `data` stays valid until lancedb_blob_buffer_free() is called, independently
+ * of the handle and of the table. The caller must not write to or free it, and
+ * keeps both fields unchanged until then.
+ */
+typedef struct {
+    const uint8_t* data;  /* Start of the blob bytes, NULL when the read returned no bytes */
+    size_t len;           /* Number of bytes in the read */
+} LanceDBBlobBuffer;
+
+/**
+ * Physical location of one blob inside its data file
+ *
+ * `has_position` is non-zero for embedded handles. Remote handles do not expose
+ * their storage layout and report it as zero with `position` zeroed. This is not
+ * the read cursor: seek and read move the cursor, while read_range leaves it
+ * unchanged.
+ */
+typedef struct {
+    bool has_position;  /* Non-zero when the handle exposes a physical byte offset */
+    uint64_t position;  /* Physical byte offset when has_position is non-zero */
+} LanceDBBlobFilePosition;
+
+/**
+ * Materialize blob bytes for borrowed row ids
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param row_ids - borrowed row id array; NULL is allowed only when num_row_ids is 0
+ * @param num_row_ids - number of row ids
+ * @param array_out - pointer to receive one Arrow C Data LargeBinary array
+ * @param schema_out - pointer to receive its Arrow C Data schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The result follows row_ids in length, order and duplicates. NULL blobs stay
+ * NULL and valid empty blobs are empty byte strings. With a valid blob column,
+ * an empty input returns an empty array without reading blob bytes. One missing
+ * or deleted row id rejects the whole request without partial results.
+ * On entry, both outputs and the error message are cleared. On success the
+ * array and schema are independent of the table and of each other; the caller
+ * frees the array with lancedb_free_arrow_array() and the schema with
+ * lancedb_free_arrow_schema(). On failure both outputs stay clear. Blob
+ * availability and errors on remote tables are returned unchanged from the
+ * SDK. If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blobs(
+    const LanceDBTable* table,
+    const char* column,
+    const uint64_t* row_ids,
+    size_t num_row_ids,
+    FFI_ArrowArray** array_out,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
+ * Materialize borrowed blob-local byte ranges
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param requests - borrowed request array; NULL is allowed only when num_requests is 0
+ * @param num_requests - number of requests
+ * @param array_out - pointer to receive one Arrow C Data LargeBinary array
+ * @param schema_out - pointer to receive its Arrow C Data schema
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The result follows the request order exactly, including duplicate and
+ * reordered requests. NULL blobs stay NULL, empty ranges on non-NULL blobs are
+ * empty byte strings. With a valid blob column, an empty request list returns an
+ * empty array without reading blob bytes. One missing row id or invalid range
+ * rejects the whole request without partial results.
+ * On entry, both outputs and the error message are cleared. On success the
+ * array and schema are independent of the table and of each other; the caller
+ * frees the array with lancedb_free_arrow_array() and the schema with
+ * lancedb_free_arrow_schema(). On failure both outputs stay clear. Blob
+ * availability and errors on remote tables are returned unchanged from the
+ * SDK. If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blob_ranges(
+    const LanceDBTable* table,
+    const char* column,
+    const LanceDBBlobRangeRequest* requests,
+    size_t num_requests,
+    FFI_ArrowArray** array_out,
+    FFI_ArrowSchema** schema_out,
+    char** error_message
+);
+
+/**
+ * Open lazy blob file handles for borrowed row ids
+ *
+ * @param table - pointer to LanceDBTable
+ * @param column - NUL-terminated UTF-8 blob column name, borrowed for the call
+ * @param row_ids - borrowed row id array; NULL is allowed only when num_row_ids is 0
+ * @param num_row_ids - number of row ids
+ * @param files_out - pointer to receive the array of optional handles
+ * @param count_out - pointer to receive the number of array entries
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The array follows row_ids in length, order and duplicates. A NULL blob leaves
+ * the matching entry NULL; a valid empty blob yields a non-NULL handle whose
+ * size is zero. With a valid blob column, an empty input returns *files_out
+ * NULL and *count_out zero without opening handles. One missing or deleted row
+ * id rejects the whole request without partial handles.
+ *
+ * Fetching opens handles without materializing a blob, but it is not always
+ * free of I/O. An embedded External blob stored without a size queries its
+ * object size during fetch. A remote External blob in that state may issue a
+ * byte-range size probe (HTTP 206 for bytes=0-0). Access and response errors
+ * can therefore fail the fetch before any handle is returned.
+ *
+ * Each handle keeps its own cursor and buffers and does not depend on the C
+ * table handle; it stays usable after lancedb_table_free(). An embedded handle
+ * captures the SDK's selected storage and offset, and a remote handle captures
+ * the selected version and branch. No BlobFile retention lease is acquired for
+ * a handle, so dataset cleanup can remove old data and external storage controls
+ * its content. A remote row-ID handle also carries no descriptor
+ * source-commit identity, so it does not detect same-name recreation; reads
+ * can fail after any of these changes.
+ * On entry, both outputs and the error message are cleared. On success the
+ * caller frees the handles and array with lancedb_free_blob_files(). On failure
+ * both outputs stay clear. Blob availability and errors on remote tables are
+ * returned unchanged from the SDK. If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_fetch_blob_files(
+    const LanceDBTable* table,
+    const char* column,
+    const uint64_t* row_ids,
+    size_t num_row_ids,
+    LanceDBBlobFile*** files_out,
+    size_t* count_out,
+    char** error_message
+);
+
+/**
+ * Free handles and the array returned by lancedb_table_fetch_blob_files
+ *
+ * @param files - array of optional handles returned by lancedb_table_fetch_blob_files
+ * @param count - number of entries in the array
+ *
+ * Frees every non-NULL handle and the array. Passing NULL is a no-op. A handle
+ * freed earlier with lancedb_blob_file_free() must have been set to NULL in the
+ * array before this call.
+ */
+void lancedb_free_blob_files(LanceDBBlobFile** files, size_t count);
+
+/**
+ * Open one lazy blob file from a borrowed Arrow descriptor row
+ *
+ * @param table - table whose source opened the descriptor
+ * @param descriptors - one Arrow C Data struct array of descriptor rows, borrowed for the call
+ * @param descriptor_schema - Arrow C Data schema for `descriptors`, borrowed for the call
+ * @param row_index - zero-based logical row to open
+ * @param file_out - pointer to receive the optional handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The input is the struct column produced by the SDK SQL `blob_descriptor`
+ * function. Fields are identified by name and must have these exact Arrow
+ * types: kind UInt8, position UInt64, size UInt64, blob_id UInt32, blob_uri
+ * Utf8, and source Struct{uri Utf8, version UInt64, committed_at_micros UInt64,
+ * branch Utf8, column Utf8, row_reference UInt64, row_is_address Boolean}.
+ * Field order does not matter and extra fields are ignored. A consumer may pass
+ * a column produced by another SDK or received through Arrow Flight.
+ *
+ * `descriptors` and `descriptor_schema` are borrowed only for this call and
+ * remain owned by the caller. This function does not consume them and does not
+ * call their Arrow C Data release callbacks; the caller releases them normally
+ * after the call returns. `row_index` addresses the logical array, so it
+ * accounts for Arrow slices and offsets. A top-level NULL descriptor succeeds
+ * with *file_out NULL. A valid empty blob succeeds with a non-NULL handle whose
+ * size is zero. For a non-NULL row, `source` and all required fields except
+ * `branch` must be non-NULL; `branch` NULL identifies the main branch.
+ *
+ * The SDK verifies the descriptor's pinned source identity and opens the exact
+ * source version and row; the binding does not reinterpret or repair the
+ * source. On native tables the check happens during open: the branch URI,
+ * source version, commit microseconds, column and row reference are validated,
+ * and the caller's table checkout is not changed. Remote tables require a
+ * server with blob-file support (0.5.0 or newer) and send the source URI,
+ * branch, version, commit microseconds and row reference to the authenticated
+ * byte-range endpoint; the server performs the source check, so a mismatch can
+ * surface at open or on a later read. An External descriptor with a zero stored
+ * size can issue an object metadata/HEAD request during open, so access or
+ * response errors can fail before a handle is returned. As with
+ * lancedb_table_fetch_blob_files(), no BlobFile retention lease is acquired:
+ * dataset cleanup or external object changes can make later reads fail. On
+ * success the returned handle owns its SDK BlobFile and stays usable after this
+ * table and the Arrow input are released; free it with
+ * lancedb_blob_file_free().
+ *
+ * On entry, *file_out and the error message are cleared. On failure *file_out
+ * stays NULL. NULL required pointers, a negative or out-of-range row_index,
+ * missing fields, wrong struct field types and NULL required values return
+ * LANCEDB_INVALID_ARGUMENT. A valid non-struct top-level Arrow type, or any
+ * Arrow C Data import failure, returns LANCEDB_ARROW. Non-NULL Arrow inputs
+ * must conform to the Arrow C Data Interface. SDK failures keep the existing
+ * error mapping. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_open_blob_file(
+    const LanceDBTable* table,
+    const FFI_ArrowArray* descriptors,
+    const FFI_ArrowSchema* descriptor_schema,
+    int64_t row_index,
+    LanceDBBlobFile** file_out,
+    char** error_message
+);
+
+/**
+ * Free one blob file handle
+ *
+ * @param file - handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file, or NULL
+ *
+ * The handle must not be used after this call. Freeing NULL is a no-op.
+ */
+void lancedb_blob_file_free(LanceDBBlobFile* file);
+
+/**
+ * Return the blob length in bytes
+ *
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
+ * @param size_out - pointer to receive the length in bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The size stays available after the handle is closed. Zero is a valid size for
+ * an empty blob. On entry, the error message is cleared. On failure size_out is
+ * left unchanged. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_size(
+    const LanceDBBlobFile* file,
+    uint64_t* size_out,
+    char** error_message
+);
+
+/**
+ * Return the physical byte offset of the blob inside its data file
+ *
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
+ * @param position_out - pointer to receive the position
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Embedded handles set has_position; remote handles do not expose their storage
+ * layout and report it as zero with position zeroed. This is not the read
+ * cursor: seek and read move the cursor, while read_range leaves it unchanged.
+ * On entry, the error message is cleared.
+ * On failure position_out is left unchanged. If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_position(
+    const LanceDBBlobFile* file,
+    LanceDBBlobFilePosition* position_out,
+    char** error_message
+);
+
+/**
+ * Move the read cursor to a byte offset inside the blob
+ *
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
+ * @param position - new byte offset from the beginning of the blob
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The SDK accepts an offset past the blob end; a later read then returns no
+ * bytes. Seeking a closed handle fails with LANCEDB_INVALID_INPUT. On entry, the
+ * error message is cleared. If error_message is provided and an error occurs,
+ * the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_seek(
+    const LanceDBBlobFile* file,
+    uint64_t position,
+    char** error_message
+);
+
+/**
+ * Read from the current cursor to the end of the blob
+ *
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
+ * @param buffer_out - pointer to receive the owned bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * A successful read advances the cursor to the blob size. Reading at or past the
+ * end succeeds with an empty buffer. Reading a closed handle fails with
+ * LANCEDB_INVALID_INPUT. On entry, the buffer and error message are cleared. On
+ * success the caller owns the bytes and frees them with
+ * lancedb_blob_buffer_free(); they stay valid after the handle and table are
+ * freed. On failure the buffer stays clear. If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_read(
+    const LanceDBBlobFile* file,
+    LanceDBBlobBuffer* buffer_out,
+    char** error_message
+);
+
+/**
+ * Read a blob-local byte range without moving the cursor
+ *
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
+ * @param offset - byte offset from the beginning of the blob value
+ * @param length - number of bytes to read
+ * @param buffer_out - pointer to receive the owned bytes
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Empty ranges are allowed at or before the blob size. An end past the blob
+ * size, or an offset and length whose sum overflows uint64_t, is rejected.
+ * Reading a closed handle fails with LANCEDB_INVALID_INPUT. On entry, the buffer
+ * and error message are cleared. On success the caller owns the bytes and frees
+ * them with lancedb_blob_buffer_free(); they stay valid after the handle and
+ * table are freed. On failure the buffer stays clear. If error_message is
+ * provided and an error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_read_range(
+    const LanceDBBlobFile* file,
+    uint64_t offset,
+    uint64_t length,
+    LanceDBBlobBuffer* buffer_out,
+    char** error_message
+);
+
+/**
+ * Free the bytes of one blob read and reset the buffer
+ *
+ * @param buffer - buffer returned by lancedb_blob_file_read or
+ *                 lancedb_blob_file_read_range, or NULL
+ *
+ * Freeing an already freed or empty buffer is a no-op. The caller keeps the
+ * struct until the call; both fields are zeroed.
+ */
+void lancedb_blob_buffer_free(LanceDBBlobBuffer* buffer);
+
+/**
+ * Close the blob file and release its resources
+ *
+ * @param file - blob file handle returned by lancedb_table_fetch_blob_files or
+ *               lancedb_table_open_blob_file
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Closing is idempotent. After a close, reads, range reads and seeks fail with
+ * LANCEDB_INVALID_INPUT, while size and position remain available. Reads already
+ * in flight may still complete. On entry, the error message is cleared. If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
+ */
+LanceDBError lancedb_blob_file_close(
+    const LanceDBBlobFile* file,
     char** error_message
 );
 
@@ -3439,6 +4212,151 @@ LanceDBError lancedb_vector_query_execute_with_status(
 );
 
 /**
+ * Create a take query that selects rows by dataset offset
+ *
+ * Offsets are 0-indexed and relative to the current table version; they can
+ * change when rows are added or deleted. The requested offsets are copied,
+ * including duplicates. Without lancedb_take_query_preserve_order() the result
+ * order is unspecified. Missing offsets are omitted.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param offsets - borrowed array of dataset offsets, or NULL when count is zero
+ * @param count - number of offsets in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of offsets and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_offsets(
+    const LanceDBTable* table,
+    const uint64_t* offsets,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Create a take query that selects rows by row ID
+ *
+ * Row IDs are relative to the current table version and can change after
+ * compaction or updates. The SDK follows the requested order, including
+ * repeated IDs, and omits missing or deleted IDs.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param row_ids - borrowed array of row IDs, or NULL when count is zero
+ * @param count - number of row IDs in the array
+ * @param query_out - pointer to receive the TakeQuery builder
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *query_out set, otherwise LANCEDB_INVALID_ARGUMENT
+ *
+ * The caller keeps ownership of row_ids and may release or change it after this
+ * call returns. On entry, *query_out and the error message are cleared. Free the
+ * returned builder with lancedb_take_query_free() or consume it with
+ * lancedb_take_query_execute(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_take_row_ids(
+    const LanceDBTable* table,
+    const uint64_t* row_ids,
+    size_t count,
+    LanceDBTakeQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Set the column projection of a take query
+ *
+ * Columns are returned in the requested order. A zero num_columns selects no
+ * columns and keeps an empty result schema; columns may then be NULL. The names
+ * are copied and are not borrowed after this call.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param columns - borrowed array of column names, or NULL when num_columns is zero
+ * @param num_columns - number of column names in the array
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_select(
+    LanceDBTakeQuery* query,
+    const char* const* columns,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Ask a take query to return the `_rowid` metadata column
+ *
+ * The metadata column is appended to the projection. For an offset take it
+ * carries the row ID, which is not the same as the requested dataset offset.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_with_row_id(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Restore offset-take occurrences in the exact requested order
+ *
+ * Row-ID takes already follow the requested order and ignore this flag. For an
+ * offset take, the result follows the input order, including repeated offsets,
+ * and missing offsets are omitted.
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_preserve_order(
+    LanceDBTakeQuery* query,
+    char** error_message
+);
+
+/**
+ * Execute a take query and report why it could not start
+ *
+ * @param query - pointer to LanceDBTakeQuery (consumed by this function on every
+ *                path with a non-NULL pointer, including a rejected result pointer)
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The returned result uses the same Arrow C Data and Arrow IPC conversions as
+ * every other query result. On entry, *result_out and the error message are
+ * cleared. Caller must free a returned result with lancedb_query_result_free().
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_take_query_execute(
+    LanceDBTakeQuery* query,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a TakeQuery
+ *
+ * @param query - pointer to LanceDBTakeQuery
+ */
+void lancedb_take_query_free(LanceDBTakeQuery* query);
+
+/**
  * Convert query result to Arrow RecordBatch arrays
  *
  * @param result - pointer to LanceDBQueryResult. When result, result_arrays,
@@ -4204,6 +5122,14 @@ void lancedb_free_arrow_arrays(
 );
 
 /**
+ * Free one Arrow C ABI array returned by a blob fetch function
+ *
+ * @param array - Arrow C ABI array pointer returned by lancedb_table_fetch_blobs()
+ *                or lancedb_table_fetch_blob_ranges()
+ */
+void lancedb_free_arrow_array(FFI_ArrowArray* array);
+
+/**
  * Information about one index on a table
  *
  * The strings and arrays are owned by the result and are valid until it is freed
@@ -4562,6 +5488,91 @@ LanceDBError lancedb_table_delete_branch(
     const char* name,
     char** error_message
 );
+
+/**
+ * Diff a branch against main on a remote table
+ *
+ * @param table - pointer to LanceDBTable
+ * @param from_branch - null-terminated C string containing the branch to compare
+ * @param diff_out - pointer to receive the branch diff
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The SDK decides whether the table supports branch diffs. Native (embedded)
+ * tables return LANCEDB_NOT_SUPPORTED with the SDK's message unchanged.
+ *
+ * On entry, *diff_out and the error message are cleared. The result is
+ * published only on success, so a failure leaves *diff_out NULL. The result
+ * owns every string and nested array in SDK response order; free the whole
+ * result once with lancedb_free_branch_diff(). Do not free nested pointers
+ * individually. If error_message is provided and an error occurs, the caller
+ * must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_diff_branch(
+    const LanceDBTable* table,
+    const char* from_branch,
+    LanceDBBranchDiff** diff_out,
+    char** error_message
+);
+
+/**
+ * Cherry-pick a branch onto main, or preview it with a dry run
+ *
+ * @param table - pointer to LanceDBTable
+ * @param from_branch - null-terminated C string containing the branch to cherry-pick
+ * @param dry_run - non-zero to request a preview without applying the cherry-pick
+ * @param result_out - pointer to receive the cherry-pick result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * The SDK decides whether the table supports cherry-picking. Native (embedded)
+ * tables return LANCEDB_NOT_SUPPORTED with the SDK's message unchanged.
+ *
+ * An HTTP 409 that the SDK decodes as a failed cherry-pick result returns
+ * LANCEDB_SUCCESS with LANCEDB_CHERRY_PICK_STATUS_FAILED in the result.
+ * Converting a response to C can also fail, for example if an SDK string
+ * contains an embedded NUL. For a non-dry run, the server may already have
+ * applied the change when an error is returned. Check the table state before
+ * retrying.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * published only on success, so a failure leaves *result_out NULL. The result owns every string and nested array; free the
+ * whole result once with lancedb_free_cherry_pick_result(). Do not free nested
+ * pointers individually or pass its embedded diff to
+ * lancedb_free_branch_diff(). If error_message is provided and an error
+ * occurs, the caller must free the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_cherry_pick(
+    const LanceDBTable* table,
+    const char* from_branch,
+    int dry_run,
+    LanceDBCherryPickResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a branch diff returned by lancedb_table_diff_branch
+ *
+ * @param diff - pointer returned by lancedb_table_diff_branch (NULL is a no-op)
+ *
+ * The call frees every string and nested array owned by the result. The
+ * pointer and all data reachable from it must not be used afterwards. Do not
+ * free nested pointers individually or pass an embedded
+ * LanceDBCherryPickResult.diff address to this function.
+ */
+void lancedb_free_branch_diff(LanceDBBranchDiff* diff);
+
+/**
+ * Free a cherry-pick result returned by lancedb_table_cherry_pick
+ *
+ * @param result - pointer returned by lancedb_table_cherry_pick (NULL is a no-op)
+ *
+ * The call frees every string and nested array owned by the result. The
+ * pointer and all data reachable from it must not be used afterwards. Do not
+ * free nested pointers individually or pass the embedded diff to
+ * lancedb_free_branch_diff().
+ */
+void lancedb_free_cherry_pick_result(LanceDBCherryPickResult* result);
 
 /**
  * Create a delta between two endpoints on the table's current branch
