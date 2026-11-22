@@ -18,7 +18,7 @@ use futures::TryStreamExt;
 use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
-use lancedb::index::scalar::FullTextSearchQuery;
+use lancedb::index::scalar::{FullTextSearchQuery, PhraseQuery};
 use lancedb::query::{
     ColumnOrdering, ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
 };
@@ -48,6 +48,16 @@ pub struct LanceDBQuery {
     filter: Option<String>,
     df_filter: Option<Expr>,
     full_text_search: Option<FullTextSearchQuery>,
+}
+
+/// Opaque handle to a structured full-text query
+///
+/// The constructor copies its inputs. Builder setters clone the stored SDK
+/// query, so one handle can be attached to several builders and freed as soon
+/// as the setters return.
+#[repr(C)]
+pub struct LanceDBFtsQuery {
+    inner: FullTextSearchQuery,
 }
 
 /// Opaque handle to a LanceDB VectorQuery
@@ -178,34 +188,56 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
     Box::into_raw(vector_query)
 }
 
-/// Build a full-text search from the query text and optional text column
+/// Copy the query text and optional text column from C strings
 ///
 /// # Safety
 /// - `text` must be a valid null-terminated UTF-8 string
 /// - `column` may be NULL or a valid null-terminated UTF-8 string. An empty
 ///   column leaves the choice to LanceDB, which uses the indexed text column.
-unsafe fn full_text_search_from_c(
+unsafe fn full_text_search_parts_from_c(
     text: *const c_char,
     column: *const c_char,
-) -> Result<FullTextSearchQuery, String> {
+) -> Result<(String, Option<String>), String> {
     if text.is_null() {
         return Err("full-text search text is required".to_string());
     }
 
     let text = CStr::from_ptr(text)
         .to_str()
-        .map_err(|_| "full-text search text is not valid UTF-8".to_string())?;
-    let mut search = FullTextSearchQuery::new(text.to_string());
+        .map_err(|_| "full-text search text is not valid UTF-8".to_string())?
+        .to_string();
 
-    if !column.is_null() {
+    let column = if column.is_null() {
+        None
+    } else {
         let column = CStr::from_ptr(column)
             .to_str()
             .map_err(|_| "full-text search column is not valid UTF-8".to_string())?;
-        if !column.is_empty() {
-            search = search
-                .with_column(column.to_string())
-                .map_err(|error| format!("Invalid FTS column: {error}"))?;
+        if column.is_empty() {
+            None
+        } else {
+            Some(column.to_string())
         }
+    };
+
+    Ok((text, column))
+}
+
+/// Build the legacy text Match query from the C text and optional column
+///
+/// # Safety
+/// See `full_text_search_parts_from_c`.
+unsafe fn full_text_search_from_c(
+    text: *const c_char,
+    column: *const c_char,
+) -> Result<FullTextSearchQuery, String> {
+    let (text, column) = full_text_search_parts_from_c(text, column)?;
+    let mut search = FullTextSearchQuery::new(text);
+
+    if let Some(column) = column {
+        search = search
+            .with_column(column)
+            .map_err(|error| format!("Invalid FTS column: {error}"))?;
     }
 
     Ok(search)
@@ -595,6 +627,113 @@ pub unsafe extern "C" fn lancedb_query_full_text_search(
             LanceDBError::InvalidArgument
         }
     }
+}
+
+/// Create a structured phrase full-text query
+///
+/// The phrase text and column are copied, and `slop` is forwarded unchanged to
+/// the SDK's `PhraseQuery`. A NULL or empty column leaves the choice to the
+/// index; an explicit column can be scanned without an index by embedded
+/// LanceDB. Indexed phrase queries require the index to store positions.
+///
+/// The SDK selects embedded, namespace, or Enterprise execution from the
+/// connection. A namespace connection forwards the structured node only with
+/// QueryTable pushdown enabled and selected. Enterprise servers 0.3.0 and later
+/// accept the node; older servers receive only the quoted phrase text, so a
+/// nonzero slop is not transmitted.
+///
+/// The pinned Lance indexed path converts `slop` to signed 32-bit. Values up to
+/// `i32::MAX` keep their indexed meaning; larger values are forwarded unchanged
+/// but can return no matches. This binding does not clamp or reject them.
+///
+/// # Safety
+/// - `text` must be a valid null-terminated UTF-8 string
+/// - `column` may be NULL or a valid null-terminated UTF-8 string naming the
+///   text column; an empty string means automatic discovery
+/// - `query_out` must be a valid pointer to receive the created handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry `*query_out` and the error message are cleared. On success the
+/// caller owns the handle and frees it with `lancedb_fts_query_free()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_new_phrase(
+    text: *const c_char,
+    column: *const c_char,
+    slop: u32,
+    query_out: *mut *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !query_out.is_null() {
+        *query_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let (text, column) = match full_text_search_parts_from_c(text, column) {
+        Ok(parts) => parts,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let mut phrase = PhraseQuery::new(text).with_slop(slop);
+    if let Some(column) = column {
+        phrase = phrase.with_column(Some(column));
+    }
+    let search = FullTextSearchQuery::new_query(phrase.into());
+
+    *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
+/// Free a structured full-text query
+///
+/// # Safety
+/// - `query` must be NULL or a valid pointer returned from
+///   `lancedb_fts_query_new_phrase`
+/// - `query` must not be used after calling this function
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
+    if !query.is_null() {
+        let _ = Box::from_raw(query);
+    }
+}
+
+/// Set a structured full-text query for query
+///
+/// This replaces any full-text query set by
+/// `lancedb_query_full_text_search` or an earlier call to this function. The
+/// builder clones the handle's query, so the caller keeps ownership and may
+/// reuse or free the handle immediately.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `full_text_query` must be a valid pointer returned from
+///   `lancedb_fts_query_new_phrase`; it is borrowed, not consumed
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On failure, including a NULL handle, the builder keeps its previous
+/// full-text setting.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_full_text_search_query(
+    query: *mut LanceDBQuery,
+    full_text_query: *const LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() || full_text_query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).full_text_search = Some((*full_text_query).inner.clone());
+    LanceDBError::Success
 }
 
 /// Set DataFusion Expr filter for query
@@ -1000,6 +1139,39 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
             LanceDBError::InvalidArgument
         }
     }
+}
+
+/// Set a structured full-text query for a vector query
+///
+/// This replaces any full-text query set by
+/// `lancedb_vector_query_full_text_search` or an earlier call to this function,
+/// making the builder a hybrid nearest-neighbour plus full-text search. The
+/// builder clones the handle's query, so the caller keeps ownership and may
+/// reuse or free the handle immediately.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `full_text_query` must be a valid pointer returned from
+///   `lancedb_fts_query_new_phrase`; it is borrowed, not consumed
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On failure, including a NULL handle, the builder keeps its previous
+/// full-text setting.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_full_text_search_query(
+    query: *mut LanceDBVectorQuery,
+    full_text_query: *const LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() || full_text_query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).full_text_search = Some((*full_text_query).inner.clone());
+    LanceDBError::Success
 }
 
 /// Set DataFusion Expr filter for vector query
