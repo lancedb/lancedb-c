@@ -7,6 +7,7 @@
 //! with C and C++ applications. The API follows standard C conventions with
 //! opaque handles, explicit error codes, and manual memory management.
 
+pub mod arrow_stream;
 pub mod connection;
 pub mod error;
 pub mod expr;
@@ -20,6 +21,7 @@ pub mod types;
 pub mod version;
 
 // Re-export all public FFI functions
+pub use arrow_stream::*;
 pub use connection::*;
 pub use error::*;
 pub use expr::*;

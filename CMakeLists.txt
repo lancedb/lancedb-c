@@ -621,6 +621,30 @@ if(BUILD_TESTS)
     BUILD_RPATH ${RUST_TARGET_DIR}
   )
 
+  # Arrow C Stream import and ownership tests run under valgrind like the other
+  # lifecycle-sensitive suites.
+  add_executable(lancedb_arrow_stream_tests
+    tests/test_main.cpp
+    tests/test_common.cpp
+    tests/test_arrow_stream.cpp
+  )
+  target_link_libraries(lancedb_arrow_stream_tests
+    PRIVATE
+    lancedb
+    Catch2::Catch2
+    Threads::Threads
+    ${ARROW_LIBRARIES}
+  )
+  target_include_directories(lancedb_arrow_stream_tests
+    PRIVATE ${ARROW_INCLUDE_DIRS}
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  )
+  target_compile_options(lancedb_arrow_stream_tests PRIVATE ${ARROW_CFLAGS_OTHER})
+  set_target_properties(lancedb_arrow_stream_tests PROPERTIES
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
   # C_STANDARD is a target property. Apply strict C17 only to the targets that
   # compile the C consumer helper; each has no other C sources, so the C++
   # sources and all other targets keep their existing flags.
@@ -731,6 +755,19 @@ if(BUILD_TESTS)
         --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
         $<TARGET_FILE:lancedb_json_tests>
     )
+    # Run Arrow C Stream import and ownership tests with valgrind
+    add_test(NAME lancedb_arrow_stream_tests
+      COMMAND ${VALGRIND_EXECUTABLE}
+        --tool=memcheck
+        --leak-check=full
+        --show-leak-kinds=definite,possible
+        --errors-for-leak-kinds=definite,possible
+        --track-origins=yes
+        --error-exitcode=1
+        --log-file=${CMAKE_BINARY_DIR}/valgrind_arrow_stream.txt
+        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+        $<TARGET_FILE:lancedb_arrow_stream_tests>
+    )
   else()
     message(WARNING "Valgrind not found, running tests without memory checking")
     add_test(NAME lancedb_connection_tests COMMAND $<TARGET_FILE:lancedb_connection_tests>)
@@ -740,6 +777,7 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_query_tests COMMAND $<TARGET_FILE:lancedb_query_tests>)
     add_test(NAME lancedb_df_query_tests COMMAND $<TARGET_FILE:lancedb_df_query_tests>)
     add_test(NAME lancedb_json_tests COMMAND $<TARGET_FILE:lancedb_json_tests>)
+    add_test(NAME lancedb_arrow_stream_tests COMMAND $<TARGET_FILE:lancedb_arrow_stream_tests>)
   endif()
 
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)
