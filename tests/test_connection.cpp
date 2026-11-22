@@ -1125,6 +1125,55 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Open Table Options", "[connection]") {
     lancedb_table_free(opened);
   }
 
+  SECTION("A named branch opens its head and a pinned branch version") {
+    LanceDBTable* main = open_table(table_name);
+    LanceDBBranchSource source{};
+    source.kind = LANCEDB_BRANCH_SOURCE_VERSION;
+    source.has_version = 1;
+    source.version = 2;
+
+    LanceDBTable* branch = nullptr;
+    REQUIRE(lancedb_table_create_branch(
+        main, "open_options_branch", &source, &branch, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(branch != nullptr);
+    lancedb_table_free(main);
+
+    auto branch_reader = create_reader_from_batch(
+        create_test_record_batch(2, initial_rows + added_rows));
+    REQUIRE(branch_reader != nullptr);
+    REQUIRE(lancedb_table_add(branch, branch_reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(branch, initial_rows + added_rows + 2, 3);
+    lancedb_table_free(branch);
+
+    LanceDBOpenTableOptions options{};
+    options.branch = "open_options_branch";
+    LanceDBTable* opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows + 2, 3);
+    lancedb_table_free(opened);
+
+    options.set_fields = LANCEDB_OPEN_TABLE_VERSION;
+    options.version = 2;
+    opened = nullptr;
+    REQUIRE(open_with_options(table_name.c_str(), &options, &opened, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+
+    auto pinned_reader = create_reader_from_batch(create_test_record_batch(1, 30));
+    REQUIRE(pinned_reader != nullptr);
+    REQUIRE(lancedb_table_add(opened, pinned_reader, &error_message) != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    require_count_and_version(opened, initial_rows + added_rows, 2);
+    lancedb_table_free(opened);
+  }
+
   SECTION("A missing branch keeps the output NULL") {
     LanceDBOpenTableOptions options{};
     options.branch = "open_options_missing_branch";
