@@ -8,6 +8,7 @@
 //! opaque handles, explicit error codes, and manual memory management.
 
 pub mod connection;
+pub mod delta;
 pub mod error;
 pub mod expr;
 pub mod index;
@@ -21,6 +22,7 @@ pub mod version;
 
 // Re-export all public FFI functions
 pub use connection::*;
+pub use delta::*;
 pub use error::*;
 pub use expr::*;
 pub use index::*;

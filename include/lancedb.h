@@ -77,6 +77,11 @@ typedef struct LanceDBVectorQuery LanceDBVectorQuery;
 typedef struct LanceDBQueryResult LanceDBQueryResult;
 
 /**
+ * Opaque handle to a LanceDB TableDelta
+ */
+typedef struct LanceDBTableDelta LanceDBTableDelta;
+
+/**
  * Opaque handle to a LanceDB Session
  */
 typedef struct LanceDBSession LanceDBSession;
@@ -449,6 +454,28 @@ typedef struct {
     uint64_t manifest_size;      // Manifest size in bytes at the referenced version
     const char* branch;          // Read-only optional branch name (NULL when the tag has no branch)
 } LanceDBTag;
+
+/**
+ * Kind of endpoint a table delta compares
+ */
+typedef enum {
+    LANCEDB_DELTA_REF_VERSION = 0,  // Use the version field
+    LANCEDB_DELTA_REF_TAG = 1       // Use the tag field
+} LanceDBDeltaRefType;
+
+/**
+ * One endpoint of a table delta
+ *
+ * Set kind to LANCEDB_DELTA_REF_VERSION and version to a persisted table
+ * version, or kind to LANCEDB_DELTA_REF_TAG and tag to a NUL-terminated tag
+ * name. The field not selected by kind is ignored. A tag is resolved on the
+ * table's current branch; a tag from another branch is rejected.
+ */
+typedef struct {
+    LanceDBDeltaRefType kind;  // Endpoint kind
+    uint64_t version;          // Version number for LANCEDB_DELTA_REF_VERSION
+    const char* tag;           // Tag name for LANCEDB_DELTA_REF_TAG
+} LanceDBDeltaRef;
 
 /**
  * Create a ConnectBuilder for the given URI
@@ -2914,6 +2941,158 @@ LanceDBError lancedb_table_update_tag(
     uint64_t version,
     char** error_message
 );
+
+/**
+ * Create a delta between two endpoints on the table's current branch
+ *
+ * @param table - pointer to LanceDBTable
+ * @param begin - required exclusive starting endpoint
+ * @param end - optional inclusive ending endpoint; NULL uses the table's
+ *              currently visible snapshot
+ * @param delta_out - pointer to receive the delta handle
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * Both endpoints are resolved when the delta is created, so later tag moves,
+ * checkouts or table commits do not change it. Endpoints may be versions or
+ * tags; tags are resolved on the current branch. A nonempty range with
+ * reversed endpoints, an unknown version or tag, or a tag from another branch
+ * fails with LANCEDB_INVALID_INPUT. Deltas are only supported on embedded
+ * (native) tables; a remote table fails with LANCEDB_NOT_SUPPORTED.
+ *
+ * On entry, *delta_out and the error message are cleared. Free the returned
+ * handle with lancedb_table_delta_free(). If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
+ */
+LanceDBError lancedb_table_delta(
+    const LanceDBTable* table,
+    const LanceDBDeltaRef* begin,
+    const LanceDBDeltaRef* end,
+    LanceDBTableDelta** delta_out,
+    char** error_message
+);
+
+/**
+ * Get the resolved begin version of a delta
+ *
+ * @param delta - pointer to LanceDBTableDelta (NULL returns 0)
+ * @return The delta's exclusive begin version, or 0 for a NULL handle
+ *
+ * A persisted version is never 0, so 0 is a safe failure sentinel.
+ */
+uint64_t lancedb_table_delta_begin_version(const LanceDBTableDelta* delta);
+
+/**
+ * Get the resolved end version of a delta
+ *
+ * @param delta - pointer to LanceDBTableDelta (NULL returns 0)
+ * @return The delta's inclusive end version, or 0 for a NULL handle
+ *
+ * A persisted version is never 0, so 0 is a safe failure sentinel.
+ */
+uint64_t lancedb_table_delta_end_version(const LanceDBTableDelta* delta);
+
+/**
+ * Stream rows inserted between the delta endpoints
+ *
+ * @param delta - pointer to LanceDBTableDelta
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * Row-level readers require stable row ids at both endpoints. Without them the
+ * SDK rejects the reader with LANCEDB_INVALID_INPUT when this function is
+ * called; creating the delta still succeeds. A range containing a Restore or
+ * missing transaction history is rejected the same way. Each batch carries the
+ * table columns plus _rowid, _row_created_at_version and
+ * _row_last_updated_at_version, read as of the end version.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * independent of the delta and the source table; consume it with
+ * lancedb_query_result_to_arrow() or lancedb_query_result_to_ipc_file() and
+ * free it with lancedb_query_result_free().
+ */
+LanceDBError lancedb_table_delta_inserted_rows(
+    const LanceDBTableDelta* delta,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Stream rows updated between the delta endpoints
+ *
+ * @param delta - pointer to LanceDBTableDelta
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * Newly inserted rows are excluded; use lancedb_table_delta_upserted_rows()
+ * for inserted and updated rows together. The stable-row-id and restore
+ * requirements are the same as for lancedb_table_delta_inserted_rows(). Each
+ * batch carries the table columns plus _rowid, _row_created_at_version and
+ * _row_last_updated_at_version, read as of the end version.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * independent of the delta and the source table.
+ */
+LanceDBError lancedb_table_delta_updated_rows(
+    const LanceDBTableDelta* delta,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Stream inserted and updated rows between the delta endpoints
+ *
+ * @param delta - pointer to LanceDBTableDelta
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The stable-row-id and restore requirements are the same as for
+ * lancedb_table_delta_inserted_rows(). Each batch carries the table columns
+ * plus _rowid, _row_created_at_version and _row_last_updated_at_version, read
+ * as of the end version.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * independent of the delta and the source table.
+ */
+LanceDBError lancedb_table_delta_upserted_rows(
+    const LanceDBTableDelta* delta,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Stream the ids of rows deleted between the delta endpoints
+ *
+ * @param delta - pointer to LanceDBTableDelta
+ * @param result_out - pointer to receive the streaming result
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return LANCEDB_SUCCESS with *result_out set, otherwise the SDK error code
+ *
+ * The stable-row-id and restore requirements are the same as for
+ * lancedb_table_delta_inserted_rows(). Each batch carries one _rowid column of
+ * type UInt64; deleted rows are not reconstructed from earlier versions.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * independent of the delta and the source table.
+ */
+LanceDBError lancedb_table_delta_deleted_row_ids(
+    const LanceDBTableDelta* delta,
+    LanceDBQueryResult** result_out,
+    char** error_message
+);
+
+/**
+ * Free a TableDelta
+ *
+ * @param delta - pointer to LanceDBTableDelta (NULL is a no-op)
+ *
+ * Results already returned by a reader stay valid after the delta is freed.
+ */
+void lancedb_table_delta_free(LanceDBTableDelta* delta);
 
 
 /**
