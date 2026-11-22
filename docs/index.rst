@@ -9,6 +9,9 @@ a developer-friendly, serverless vector database for AI applications.
    :caption: Contents:
 
    api/index
+   versioning
+   ownership
+   threading
 
 Overview
 --------
@@ -24,11 +27,32 @@ The LanceDB C API provides a complete interface to LanceDB functionality includi
 Quick Start
 -----------
 
-This example shows how to create a LanceDB table with vector data using Apache Arrow.
+The smallest C17 program includes only ``lancedb.h``. The repository's
+``examples/hello.c`` connects to a local database and prints the runtime
+version:
+
+.. literalinclude:: ../examples/hello.c
+   :language: c
+   :linenos:
+
+Build it against an installed package:
+
+.. code-block:: bash
+
+   cc -std=c17 -Wall -Wextra -Werror hello.c \
+     $(pkg-config --cflags --libs lancedb) -o hello
+
+See the repository README for build and installation commands.
+
+Creating a table with Arrow C++
+-------------------------------
+
+The example below uses Arrow C++ to build a table. A pure C producer can fill
+the Arrow C Data structures directly or import an Arrow IPC file instead.
 
 **1. Connect to a database:**
 
-.. code-block:: c
+.. code-block:: cpp
 
    #include <lancedb.h>
    #include <arrow/c/bridge.h>
