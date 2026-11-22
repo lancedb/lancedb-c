@@ -515,21 +515,30 @@ pub struct LanceDBUpdateResult {
     pub version: u64,
 }
 
+/// Paired C arrays that describe one update's assignments
+struct UpdateAssignmentInput {
+    columns: *const *const c_char,
+    expressions: *const *const c_char,
+    num_assignments: usize,
+}
+
 /// Run one SDK update from the C argument layout
 ///
 /// The caller decides whether a result pointer is required. `result_out` is
 /// written only after a successful commit, so a failure leaves it unchanged.
 unsafe fn execute_update(
     table: *const LanceDBTable,
-    columns: *const *const c_char,
-    expressions: *const *const c_char,
-    num_assignments: usize,
+    input: UpdateAssignmentInput,
     predicate: *const c_char,
     options: *const LanceDBUpdateOptions,
     result_out: *mut LanceDBUpdateResult,
     error_message: *mut *mut c_char,
 ) -> LanceDBError {
-    if table.is_null() || columns.is_null() || expressions.is_null() || num_assignments == 0 {
+    if table.is_null()
+        || input.columns.is_null()
+        || input.expressions.is_null()
+        || input.num_assignments == 0
+    {
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     }
@@ -553,10 +562,10 @@ unsafe fn execute_update(
         }
     };
 
-    let mut assignments = Vec::with_capacity(num_assignments);
-    for i in 0..num_assignments {
-        let column_ptr = *columns.add(i);
-        let expression_ptr = *expressions.add(i);
+    let mut assignments = Vec::with_capacity(input.num_assignments);
+    for i in 0..input.num_assignments {
+        let column_ptr = *input.columns.add(i);
+        let expression_ptr = *input.expressions.add(i);
         if column_ptr.is_null() || expression_ptr.is_null() {
             set_invalid_argument_message(error_message);
             return LanceDBError::InvalidArgument;
@@ -659,9 +668,11 @@ pub unsafe extern "C" fn lancedb_table_update(
 
     execute_update(
         table,
-        columns,
-        expressions,
-        num_assignments,
+        UpdateAssignmentInput {
+            columns,
+            expressions,
+            num_assignments,
+        },
         predicate,
         ptr::null(),
         result_out,
@@ -699,9 +710,11 @@ pub unsafe extern "C" fn lancedb_table_update_with_options(
 ) -> LanceDBError {
     execute_update(
         table,
-        columns,
-        expressions,
-        num_assignments,
+        UpdateAssignmentInput {
+            columns,
+            expressions,
+            num_assignments,
+        },
         predicate,
         options,
         result_out,
