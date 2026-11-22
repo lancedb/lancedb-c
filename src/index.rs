@@ -1350,3 +1350,69 @@ pub unsafe extern "C" fn lancedb_free_index_statistics(stats: *const LanceDBInde
         drop(Box::from_raw(stats.cast_mut()));
     }
 }
+
+/// Wait until the named indices are fully indexed
+///
+/// Polls the index statistics of the table until every named index reports no unindexed
+/// rows, or until the budget no longer allows another polling round. `timeout_ms` gates
+/// the start of a round, so the requests of a round can outlast it. Waiting does not
+/// build or extend an index: an index that does not cover all the rows of the table never
+/// becomes fully indexed by waiting.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `index_names` must be an array of `num_index_names` valid null-terminated C strings
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` once every named index is fully indexed
+/// - `LANCEDB_TIMEOUT` when the budget runs out before that
+/// - `LANCEDB_INVALID_ARGUMENT` for a missing table or names array, an empty names
+///   array, a NULL or non-UTF-8 name, or a zero `timeout_ms`
+/// - Any other error code the SDK reports, including `LANCEDB_INVALID_INPUT` for a
+///   budget above its maximum
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_wait_for_index(
+    table: *const LanceDBTable,
+    index_names: *const *const c_char,
+    num_index_names: usize,
+    timeout_ms: u64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() || index_names.is_null() || num_index_names == 0 {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    // a zero budget is a missing one: the SDK would treat it as an immediate timeout,
+    // which no caller can tell apart from an index that is not ready
+    if timeout_ms == 0 {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let mut names = Vec::with_capacity(num_index_names);
+    for i in 0..num_index_names {
+        let name_ptr = *index_names.add(i);
+        if name_ptr.is_null() {
+            set_invalid_argument_message(error_message);
+            return LanceDBError::InvalidArgument;
+        }
+
+        match CStr::from_ptr(name_ptr).to_str() {
+            Ok(name) => names.push(name),
+            Err(_) => {
+                set_invalid_argument_message(error_message);
+                return LanceDBError::InvalidArgument;
+            }
+        }
+    }
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    match runtime.block_on(tbl.wait_for_index(&names, Duration::from_millis(timeout_ms))) {
+        Ok(()) => LanceDBError::Success,
+        Err(e) => handle_error(&e, error_message),
+    }
+}
