@@ -4755,12 +4755,15 @@ LanceDBError lancedb_table_diff_branch(
  * The SDK decides whether the table supports cherry-picking. Native (embedded)
  * tables return LANCEDB_NOT_SUPPORTED with the SDK's message unchanged.
  *
- * An HTTP 409 from the server is not a transport error: the SDK returns its
- * CherryPickResult with LANCEDB_CHERRY_PICK_STATUS_FAILED, so this entry point
- * returns LANCEDB_SUCCESS with that result. Only a transport or SDK failure
- * becomes an error status. On entry, *result_out and the error message are
- * cleared. The result is published only on success, so a failure leaves
- * *result_out NULL. The result owns every string and nested array; free the
+ * An HTTP 409 that the SDK decodes as a failed cherry-pick result returns
+ * LANCEDB_SUCCESS with LANCEDB_CHERRY_PICK_STATUS_FAILED in the result.
+ * Converting a response to C can also fail, for example if an SDK string
+ * contains an embedded NUL. For a non-dry run, the server may already have
+ * applied the change when an error is returned. Check the table state before
+ * retrying.
+ *
+ * On entry, *result_out and the error message are cleared. The result is
+ * published only on success, so a failure leaves *result_out NULL. The result owns every string and nested array; free the
  * whole result once with lancedb_free_cherry_pick_result(). Do not free nested
  * pointers individually or pass its embedded diff to
  * lancedb_free_branch_diff(). If error_message is provided and an error

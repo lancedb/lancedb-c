@@ -903,6 +903,11 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_arrow_stream_tests COMMAND $<TARGET_FILE:lancedb_arrow_stream_tests>)
   endif()
 
+  # The table tests use a local HTTP server for remote branch operations.
+  set_tests_properties(lancedb_table_tests PROPERTIES
+    ENVIRONMENT "NO_PROXY=127.0.0.1;no_proxy=127.0.0.1"
+  )
+
   # Run vector index tests WITHOUT valgrind (too slow under valgrind)
   add_test(NAME lancedb_vector_index_tests COMMAND $<TARGET_FILE:lancedb_vector_index_tests>)
   # Run vector query tests WITHOUT valgrind (too slow under valgrind)

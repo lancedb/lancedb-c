@@ -498,14 +498,16 @@ pub unsafe extern "C" fn lancedb_table_diff_branch(
 /// # Returns
 /// - `LANCEDB_SUCCESS` with `*result_out` holding the result, or the SDK error
 ///
-/// `dry_run` selects the preview request. An HTTP 409 from the server is not a
-/// transport error: the SDK returns its `CherryPickResult` with
-/// `LanceDBCherryPickStatus::Failed`, and this entry point returns
-/// `LANCEDB_SUCCESS` with that result. Only a transport or SDK failure becomes
-/// an error status. On entry, `*result_out` and the error message are cleared.
-/// The result is published only on success and owns every nested string and
-/// array. Free it with `lancedb_free_cherry_pick_result()`. Native tables
-/// return the SDK `LANCEDB_NOT_SUPPORTED` status and message unchanged.
+/// `dry_run` selects the preview request. An HTTP 409 that the SDK decodes as
+/// a failed cherry-pick result returns `LANCEDB_SUCCESS` with
+/// `LanceDBCherryPickStatus::Failed` in the result. Converting the SDK response
+/// to C can also fail after the server has applied a non-dry-run cherry-pick.
+/// Check the table state before retrying after an error.
+///
+/// On entry, `*result_out` and the error message are cleared. The result is
+/// published only on success and owns every nested string and array. Free it
+/// with `lancedb_free_cherry_pick_result()`. Native tables return the SDK
+/// `LANCEDB_NOT_SUPPORTED` status and message unchanged.
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_table_cherry_pick(
     table: *const LanceDBTable,
