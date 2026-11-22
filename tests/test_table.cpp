@@ -3443,5 +3443,6 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Schema Evolution", "[table]") {
     auto note_field = schema_field(read_table_schema(table), "note");
     REQUIRE_FALSE(field_metadata_has_key(note_field, "unit"));
   }
+
   lancedb_table_free(table);
 }
