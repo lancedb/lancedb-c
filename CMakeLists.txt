@@ -497,6 +497,7 @@ if(BUILD_TESTS)
     tests/test_main.cpp
     tests/test_common.cpp
     tests/test_c_enum_inputs.c
+    tests/test_branch_diff.cpp
     tests/test_table.cpp
   )
   target_link_libraries(lancedb_table_tests
