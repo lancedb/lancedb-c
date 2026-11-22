@@ -352,6 +352,10 @@ FUNCTION_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     # c_int and rejects values outside the enumerators at the FFI boundary.
     ("lancedb_expr_binary", "op"): Allow(enum_int="LanceDBBinaryOp"),
     ("lancedb_table_create_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
+    (
+        "lancedb_table_create_index_with_builder_options",
+        "index_type",
+    ): Allow(enum_int="LanceDBIndexType"),
     ("lancedb_table_create_vector_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
     ("lancedb_table_create_scalar_index", "index_type"): Allow(enum_int="LanceDBIndexType"),
     ("lancedb_table_optimize", "optimize_type"): Allow(enum_int="LanceDBOptimizeType"),
