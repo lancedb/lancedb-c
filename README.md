@@ -106,6 +106,12 @@ If you prefer to build manually:
    cargo build --release
    ```
 
+   Shared-library export control uses the repository `.cargo/config.toml` and
+   the wrappers under `cmake/`. Run Cargo from the repository root. A target
+   linker override, or `cargo build --manifest-path` from outside the
+   repository, bypasses that configuration and fails closed instead of
+   producing a library with undeclared exports.
+
 2. **Compile the C++ simple example with Arrow:**
    ```bash
    g++ -std=c++20 -Wall -Wextra -O2 \
