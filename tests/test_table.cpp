@@ -3199,11 +3199,14 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table - branch sources", "[table][bran
   REQUIRE(count_matching_rows(pinned_copy, "key = 'key_10'") == 0);
 
   // Raw values outside the public enum are rejected before reaching the SDK.
+  // The other source fields are valid, so only the kind can cause the failure.
   LanceDBTable* invalid = nullptr;
   REQUIRE(lancedb_test_create_branch_with_source_kind(
-      table, "invalid", 999, nullptr, 0, 0, &invalid, &error_message) == LANCEDB_INVALID_ARGUMENT);
+      table, "invalid", 999, "v1", 1, tagged_version, &invalid, &error_message)
+      == LANCEDB_INVALID_ARGUMENT);
   REQUIRE(invalid == nullptr);
   REQUIRE(error_message != nullptr);
+  REQUIRE(std::string(error_message).find("branch source kind") != std::string::npos);
   lancedb_free_string(error_message);
   error_message = nullptr;
 

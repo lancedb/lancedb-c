@@ -479,11 +479,13 @@ typedef enum {
 /**
  * Source reference for lancedb_table_create_branch()
  *
- * The fields read depend on kind:
- * - LANCEDB_BRANCH_SOURCE_VERSION: version is required; has_version must be 1.
- * - LANCEDB_BRANCH_SOURCE_TAG: name is the tag name; has_version is ignored.
- * - LANCEDB_BRANCH_SOURCE_BRANCH: name is the branch name; has_version selects
- *   whether version pins the source or the branch head is used.
+ * Only the fields selected by kind are read; the caller may leave the other
+ * fields uninitialized.
+ * - LANCEDB_BRANCH_SOURCE_VERSION: has_version and version are read; has_version
+ *   must be nonzero. name is not read.
+ * - LANCEDB_BRANCH_SOURCE_TAG: only name is read; it is the tag name.
+ * - LANCEDB_BRANCH_SOURCE_BRANCH: name and has_version are read. version is
+ *   read only when has_version is nonzero; otherwise the branch head is used.
  *
  * The pointed-to name is only read during the call.
  */
@@ -499,7 +501,8 @@ typedef struct {
  *
  * has_version set to 0 checks out the branch head and keeps the handle
  * writable. Any other value pins the handle to version, which makes it a
- * read-only detached view.
+ * read-only detached view. version is read only when has_version is nonzero;
+ * otherwise it may be left uninitialized.
  */
 typedef struct {
     int has_version;   // 1 to pin the checkout to version, 0 for the branch head
@@ -512,13 +515,15 @@ typedef struct {
  * The array, every string and every metadata array are owned by the result.
  * Callers must not modify or free them individually. The strings remain valid
  * until lancedb_free_branches() is called with the same array and count.
+ * parent_version is the parent branch version the branch diverged from, and
+ * manifest_size is the parent version's manifest size in bytes at divergence.
  */
 typedef struct {
     const char* name;                 // Read-only branch name
     const char* parent_branch;        // Read-only parent branch name (NULL when forked from main)
     uint64_t parent_version;          // Version on the parent branch the branch started from
     uint64_t created_at;              // Creation time in seconds since the Unix epoch
-    uint64_t manifest_size;           // Manifest size in bytes at the branch head at creation
+    uint64_t manifest_size;           // Parent version manifest size in bytes at divergence
     const char* const* metadata_keys;   // Read-only metadata keys, NULL when metadata_count is 0
     const char* const* metadata_values; // Read-only metadata values, parallel to metadata_keys
     size_t metadata_count;            // Number of metadata key-value pairs

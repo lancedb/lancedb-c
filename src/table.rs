@@ -1347,10 +1347,11 @@ impl LanceDBBranchSourceKind {
 
 /// Source reference for `lancedb_table_create_branch`
 ///
-/// For `LANCEDB_BRANCH_SOURCE_VERSION`, `version` is required and `name` is
-/// ignored. For `LANCEDB_BRANCH_SOURCE_TAG`, `name` is the tag name. For
-/// `LANCEDB_BRANCH_SOURCE_BRANCH`, `name` is the branch name and `has_version`
-/// selects whether `version` pins the source or the branch head is used.
+/// Only the fields selected by `kind` are read; the caller may leave the other
+/// fields uninitialized. For `LANCEDB_BRANCH_SOURCE_VERSION`, `has_version`
+/// must be nonzero and `version` is read. For `LANCEDB_BRANCH_SOURCE_TAG`, only
+/// `name` is read. For `LANCEDB_BRANCH_SOURCE_BRANCH`, `name` and `has_version`
+/// are read, and `version` is read only when `has_version` is nonzero.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct LanceDBBranchSource {
@@ -1363,7 +1364,8 @@ pub struct LanceDBBranchSource {
 /// Optional version for `lancedb_table_checkout_branch`
 ///
 /// `has_version` set to 0 checks out the branch head. Any other value pins the
-/// returned handle to `version`, which makes it read-only.
+/// returned handle to `version`, which makes it read-only. `version` is read
+/// only when `has_version` is nonzero.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct LanceDBBranchCheckoutOptions {
@@ -1374,7 +1376,8 @@ pub struct LanceDBBranchCheckoutOptions {
 /// Branch metadata returned by `lancedb_table_list_branches`
 ///
 /// The array, every string and every metadata array are owned by the result.
-/// Free them with `lancedb_free_branches`.
+/// Free them with `lancedb_free_branches`. `manifest_size` is the parent
+/// version's manifest size in bytes at divergence.
 #[repr(C)]
 pub struct LanceDBBranch {
     pub name: *const c_char,
@@ -1791,35 +1794,49 @@ struct PreparedBranch {
 }
 
 /// Convert a branch source from its C representation into the SDK reference
-unsafe fn branch_ref_from_source(source: &LanceDBBranchSource) -> Result<Ref, &'static str> {
-    let Some(kind) = LanceDBBranchSourceKind::from_c_int(source.kind) else {
+///
+/// Only the fields selected by `kind` are read. The caller may leave the other
+/// fields uninitialized, so this function never forms a reference to the whole
+/// C struct.
+unsafe fn branch_ref_from_source(source: *const LanceDBBranchSource) -> Result<Ref, &'static str> {
+    let kind = ptr::addr_of!((*source).kind).read();
+    let Some(kind) = LanceDBBranchSourceKind::from_c_int(kind) else {
         return Err("branch source kind is not a LanceDBBranchSourceKind value");
     };
 
     match kind {
         LanceDBBranchSourceKind::Version => {
-            if source.has_version == 0 {
+            let has_version = ptr::addr_of!((*source).has_version).read();
+            if has_version == 0 {
                 return Err("branch source version is required");
             }
-            Ok(Ref::VersionNumber(source.version))
+            let version = ptr::addr_of!((*source).version).read();
+            Ok(Ref::VersionNumber(version))
         }
         LanceDBBranchSourceKind::Tag => {
-            if source.name.is_null() {
+            let name = ptr::addr_of!((*source).name).read();
+            if name.is_null() {
                 return Err("branch source tag name is required");
             }
-            let name = CStr::from_ptr(source.name)
+            let name = CStr::from_ptr(name)
                 .to_str()
                 .map_err(|_| "branch source tag name is not valid UTF-8")?;
             Ok(Ref::Tag(name.to_string()))
         }
         LanceDBBranchSourceKind::Branch => {
-            if source.name.is_null() {
+            let name = ptr::addr_of!((*source).name).read();
+            if name.is_null() {
                 return Err("branch source branch name is required");
             }
-            let name = CStr::from_ptr(source.name)
+            let name = CStr::from_ptr(name)
                 .to_str()
                 .map_err(|_| "branch source branch name is not valid UTF-8")?;
-            let version = (source.has_version != 0).then_some(source.version);
+            let has_version = ptr::addr_of!((*source).has_version).read();
+            let version = if has_version != 0 {
+                Some(ptr::addr_of!((*source).version).read())
+            } else {
+                None
+            };
             Ok(Ref::Version(Some(name.to_string()), version))
         }
     }
@@ -1853,7 +1870,7 @@ pub unsafe extern "C" fn lancedb_table_create_branch(
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     };
-    let from = match branch_ref_from_source(&*source) {
+    let from = match branch_ref_from_source(source) {
         Ok(from) => from,
         Err(message) => {
             set_custom_error_message(error_message, message);
@@ -1901,7 +1918,12 @@ pub unsafe extern "C" fn lancedb_table_checkout_branch(
         set_invalid_argument_message(error_message);
         return LanceDBError::InvalidArgument;
     };
-    let version = ((*options).has_version != 0).then_some((*options).version);
+    let has_version = ptr::addr_of!((*options).has_version).read();
+    let version = if has_version != 0 {
+        Some(ptr::addr_of!((*options).version).read())
+    } else {
+        None
+    };
 
     let name = name.to_string();
     let tbl = (*table).inner.clone();
@@ -1999,64 +2021,78 @@ pub unsafe extern "C" fn lancedb_table_list_branches(
         return LanceDBError::Unknown;
     }
 
-    for (branch_index, entry) in entries.iter().enumerate() {
+    // Allocate every metadata array before any ownership is transferred, so a
+    // partial allocation can still be cleaned up without touching records that
+    // have not been initialized yet.
+    let mut metadata_arrays: Vec<(*mut *const c_char, *mut *const c_char)> =
+        Vec::with_capacity(count);
+    for entry in &entries {
         let metadata_count = entry.metadata.len();
-        let mut metadata_keys: *mut *const c_char = ptr::null_mut();
-        let mut metadata_values: *mut *const c_char = ptr::null_mut();
-        if metadata_count > 0 {
-            let keys = libc::calloc(metadata_count, std::mem::size_of::<*const c_char>())
-                as *mut *const c_char;
-            let values = libc::calloc(metadata_count, std::mem::size_of::<*const c_char>())
-                as *mut *const c_char;
-            if keys.is_null() || values.is_null() {
-                if !keys.is_null() {
-                    libc::free(keys as *mut libc::c_void);
-                }
-                if !values.is_null() {
-                    libc::free(values as *mut libc::c_void);
-                }
-                free_branch_arrays(branches_array, branch_index);
-                set_unknown_error_message(error_message);
-                return LanceDBError::Unknown;
-            }
-            for (index, (key, value)) in entry.metadata.iter().enumerate() {
-                *keys.add(index) = key.as_ptr();
-                *values.add(index) = value.as_ptr();
-            }
-            metadata_keys = keys;
-            metadata_values = values;
+        if metadata_count == 0 {
+            metadata_arrays.push((ptr::null_mut(), ptr::null_mut()));
+            continue;
         }
 
-        let dest = &mut *branches_array.add(branch_index);
-        dest.name = entry.name.as_ptr();
-        dest.parent_branch = entry
-            .parent_branch
-            .as_ref()
-            .map_or(ptr::null(), |parent| parent.as_ptr());
-        dest.parent_version = entry.parent_version;
-        dest.created_at = entry.created_at;
-        dest.manifest_size = entry.manifest_size;
-        dest.metadata_keys = metadata_keys;
-        dest.metadata_values = metadata_values;
-        dest.metadata_count = metadata_count;
+        let keys = libc::calloc(metadata_count, std::mem::size_of::<*const c_char>())
+            as *mut *const c_char;
+        let values = libc::calloc(metadata_count, std::mem::size_of::<*const c_char>())
+            as *mut *const c_char;
+        if keys.is_null() || values.is_null() {
+            if !keys.is_null() {
+                libc::free(keys as *mut libc::c_void);
+            }
+            if !values.is_null() {
+                libc::free(values as *mut libc::c_void);
+            }
+            for (allocated_keys, allocated_values) in &metadata_arrays {
+                if !allocated_keys.is_null() {
+                    libc::free(*allocated_keys as *mut libc::c_void);
+                }
+                if !allocated_values.is_null() {
+                    libc::free(*allocated_values as *mut libc::c_void);
+                }
+            }
+            libc::free(branches_array as *mut libc::c_void);
+            set_unknown_error_message(error_message);
+            return LanceDBError::Unknown;
+        }
+        metadata_arrays.push((keys, values));
     }
 
-    // All allocations succeeded; transfer the string ownership to the result.
-    for entry in entries {
+    // All allocations and conversions succeeded. Transfer the strings and write
+    // fully initialized records into the uninitialized allocation.
+    for (branch_index, (entry, (metadata_keys, metadata_values))) in
+        entries.into_iter().zip(metadata_arrays).enumerate()
+    {
         let PreparedBranch {
             name,
             parent_branch,
+            parent_version,
+            created_at,
+            manifest_size,
             metadata,
-            ..
         } = entry;
-        let _ = name.into_raw();
-        if let Some(parent_branch) = parent_branch {
-            let _ = parent_branch.into_raw();
+        let metadata_count = metadata.len();
+        let name = name.into_raw();
+        let parent_branch = parent_branch.map_or(ptr::null(), |parent| parent.into_raw());
+        for (index, (key, value)) in metadata.into_iter().enumerate() {
+            *metadata_keys.add(index) = key.into_raw();
+            *metadata_values.add(index) = value.into_raw();
         }
-        for (key, value) in metadata {
-            let _ = key.into_raw();
-            let _ = value.into_raw();
-        }
+
+        ptr::write(
+            branches_array.add(branch_index),
+            LanceDBBranch {
+                name,
+                parent_branch,
+                parent_version,
+                created_at,
+                manifest_size,
+                metadata_keys,
+                metadata_values,
+                metadata_count,
+            },
+        );
     }
 
     *branches_out = branches_array as *const LanceDBBranch;
