@@ -178,3 +178,41 @@
    ...
    fun:*BLOB_V2_DESC*
 }
+
+# Rust 1.95 inlines the LazyLock closure symbols for the Lance blob v2 global
+# schema fields into core::ops::function::FnOnce::call_once, so the
+# *BLOB_V2_DESC* frame above is no longer visible. The remaining stacks come
+# from FileReader::decode_schema -> normalize_blob_footer_schema and follow two
+# paths:
+# - BLOB_V2_DESC_FIELD builds the schema metadata under two nested LazyLocks;
+# - BLOB_V2_DESC_LANCE_FIELD clones that metadata through Field::try_from,
+#   with a hashbrown RawTable clone immediately before the TryFrom frame.
+# Keep every observed frame adjacent and allow a wildcard only after malloc.
+{
+   lance_blob_v2_global_schema_fields_inlined_lazy
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:_ZN4core3ops8function6FnOnce9call_once17h*E
+   fun:_ZN3std4sync4once4Once15call_once_force28_*17h*E
+   fun:_RNvM*3std3sys4sync4once5futex*4Once4call
+   fun:_ZN4core3ops8function6FnOnce9call_once17h*E
+   fun:_ZN3std4sync4once4Once15call_once_force28_*17h*E
+   fun:_RNvM*3std3sys4sync4once5futex*4Once4call
+   fun:_ZN10lance_file6reader10FileReader13decode_schema17h*E
+}
+
+{
+   lance_blob_v2_global_schema_fields_inlined_field
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   ...
+   fun:_ZN*hashbrown..raw..RawTable*core..clone..Clone*5clone17h*E
+   fun:_ZN*lance_core..datatypes..field..Field*TryFrom*$RF$arrow_schema..field..Field*8try_from17h*E
+   fun:_ZN4core3ops8function6FnOnce9call_once17h*E
+   fun:_ZN3std4sync4once4Once15call_once_force28_*17h*E
+   fun:_RNvM*3std3sys4sync4once5futex*4Once4call
+   fun:_ZN10lance_file6reader10FileReader13decode_schema17h*E
+}

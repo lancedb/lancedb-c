@@ -42,6 +42,8 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES AND NOT RUST_TARGET_TRIPLE)
   set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
 endif()
 
+# Keep configuration-time rustc probes in the source tree so rustup resolves
+# the repository toolchain file when the build directory is out of tree.
 if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
   # Map CMake compiler architecture and platform to the corresponding Rust target triple.
   # Note: CMAKE_C_COMPILER_ARCHITECTURE_ID requires CMake 3.10+, with expanded support in 4.1+.
@@ -84,6 +86,7 @@ if(RUST_TARGET_TRIPLE)
 else()
   execute_process(
     COMMAND rustc --print host-tuple
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     OUTPUT_VARIABLE RUST_TARGET_TRIPLE
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
@@ -151,8 +154,18 @@ if(BUILD_COVERAGE)
   endif()
 
   # Find llvm-profdata and llvm-cov via rustc sysroot or system PATH
-  execute_process(COMMAND rustc --print sysroot OUTPUT_VARIABLE RUST_SYSROOT OUTPUT_STRIP_TRAILING_WHITESPACE)
-  execute_process(COMMAND rustc -vV OUTPUT_VARIABLE RUSTC_VERSION_INFO OUTPUT_STRIP_TRAILING_WHITESPACE)
+  execute_process(
+    COMMAND rustc --print sysroot
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE RUST_SYSROOT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND rustc -vV
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE RUSTC_VERSION_INFO
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
   string(REGEX MATCH "host: ([a-zA-Z0-9_-]+)" _match "${RUSTC_VERSION_INFO}")
   set(RUST_HOST_TRIPLE "${CMAKE_MATCH_1}")
   find_program(_profdata llvm-profdata HINTS "${RUST_SYSROOT}/lib/rustlib/${RUST_HOST_TRIPLE}/bin" NO_DEFAULT_PATH)
@@ -185,7 +198,7 @@ include(cmake/ProbeRustNativeLibs.cmake)
 configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 
 # rust-lib target
-  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
+  set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --target-dir "${CMAKE_BINARY_DIR}/target")
 if(BUILD_COVERAGE)
   set(PROFRAW_DIR "${CMAKE_BINARY_DIR}/profraw")
   set(BUILD_PROFRAW_DIR "${PROFRAW_DIR}/build")
@@ -270,7 +283,7 @@ if(BUILD_EXAMPLES)
   )
 
   # external_provider helper crate (provides external_object_store_provider_create)
-  set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --target-dir "${CMAKE_BINARY_DIR}/target")
+  set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${CMAKE_BINARY_DIR}/target")
   if(BUILD_COVERAGE)
     set(EXT_PROVIDER_CARGO_CMD ${CMAKE_COMMAND} -E env "CARGO_ENCODED_RUSTFLAGS=-Cinstrument-coverage" "${BUILD_PROFRAW_ENV}" ${EXT_PROVIDER_CARGO_CMD})
   endif()
@@ -287,7 +300,7 @@ if(BUILD_EXAMPLES)
   endif()
   add_custom_target(external-provider-lib
     COMMAND ${EXT_PROVIDER_CARGO_CMD}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/examples/external_provider
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Building external provider Rust crate..."
     BYPRODUCTS ${EXT_PROVIDER_LIB_PATHS}
   )

@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
 
@@ -70,7 +70,31 @@ jobs:
         run: ninja -C build check
 
       - name: Test
-        run: ctest --test-dir build -j
+        run: ctest --test-dir build -j --output-on-failure
+
+      - name: Show test diagnostics
+        if: failure()
+        run: |
+          if [ -f build/Testing/Temporary/LastTest.log ]; then
+            cat build/Testing/Temporary/LastTest.log
+          fi
+          for log in build/valgrind_*.txt; do
+            [ -e "$log" ] || continue
+            echo "::group::$log"
+            cat "$log"
+            echo "::endgroup::"
+          done
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ matrix.os }}-${{ matrix.lib_type }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/valgrind_*.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
   package-script:
     name: Package script checks
@@ -190,7 +214,7 @@ jobs:
           cmake-version: '4.1'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: x86_64-pc-windows-gnu
 

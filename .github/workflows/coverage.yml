@@ -25,7 +25,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        id: rust
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: llvm-tools-preview
 
@@ -103,22 +104,66 @@ jobs:
           search_artifacts: true
           if_no_artifact_found: warn
 
+      # Rebuild only when rust-toolchain.toml differs from the merge base. If
+      # the configuration matches, a missing artifact stays on the normal
+      # comparison path so an upload race does not trigger a second build.
+      - name: Check baseline toolchain
+        id: baseline_toolchain
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --quiet "${{ steps.merge_base.outputs.sha }}" HEAD -- rust-toolchain.toml; then
+            echo "matches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "matches=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build matching baseline
+        if: github.event_name == 'pull_request' && steps.baseline_toolchain.outputs.matches != 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.rust.outputs.name }}
+        run: |
+          baseline_dir="$RUNNER_TEMP/coverage-baseline"
+          git worktree add --detach "$baseline_dir" "${{ steps.merge_base.outputs.sha }}"
+          mkdir -p "$baseline_dir/build"
+          cd "$baseline_dir/build"
+          cmake .. -G Ninja -DBUILD_TESTS=ON -DBUILD_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+          ninja
+          ninja coverage
+
+      - name: Extract matching baseline
+        if: github.event_name == 'pull_request' && steps.baseline_toolchain.outputs.matches != 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.rust.outputs.name }}
+        run: |
+          cd "$RUNNER_TEMP/coverage-baseline"
+          LLVM_COV=$(find "$(rustc --print sysroot)" -name llvm-cov -type f | head -1)
+          BASELINE_COVERAGE=$("$LLVM_COV" report build/target/debug/liblancedb.so \
+            --instr-profile=build/coverage.profdata \
+            src/ \
+            | grep "^TOTAL" | awk '{for(i=1;i<=NF;i++) if($i ~ /%$/ && count++==2) {gsub(/%/,"",$i); print $i; exit}}')
+          echo "Line coverage baseline: $BASELINE_COVERAGE%"
+          echo "$BASELINE_COVERAGE" > "$GITHUB_WORKSPACE/coverage-baseline.txt"
+
       - name: Compare coverage with baseline
         if: github.event_name == 'pull_request'
         run: |
           HEAD_COVERAGE=${{ steps.coverage.outputs.percentage }}
-          if [ -f coverage-baseline.txt ]; then
-            BASE_COVERAGE=$(cat coverage-baseline.txt)
-            echo "Base branch coverage: $BASE_COVERAGE%"
-            echo "PR branch coverage: $HEAD_COVERAGE%"
-            DECREASED=$(echo "$BASE_COVERAGE $HEAD_COVERAGE" | awk '{if ($1 > $2) print "true"; else print "false"}')
-            if [ "$DECREASED" = "true" ]; then
-              echo "::error::Code coverage decreased from $BASE_COVERAGE% to $HEAD_COVERAGE%"
-              exit 1
-            else
-              echo "Coverage is maintained or improved: $BASE_COVERAGE% -> $HEAD_COVERAGE%"
+          if [ ! -f coverage-baseline.txt ]; then
+            if [ "${{ steps.baseline_toolchain.outputs.matches }}" = "true" ]; then
+              echo "No baseline coverage found (first run on main?). Skipping comparison."
+              echo "Current coverage: $HEAD_COVERAGE%"
+              exit 0
             fi
+            echo "::error::No matching coverage baseline produced for merge base ${{ steps.merge_base.outputs.sha }}"
+            exit 1
+          fi
+          BASE_COVERAGE=$(cat coverage-baseline.txt)
+          echo "Base branch coverage: $BASE_COVERAGE%"
+          echo "PR branch coverage: $HEAD_COVERAGE%"
+          DECREASED=$(echo "$BASE_COVERAGE $HEAD_COVERAGE" | awk '{if ($1 > $2) print "true"; else print "false"}')
+          if [ "$DECREASED" = "true" ]; then
+            echo "::error::Code coverage decreased from $BASE_COVERAGE% to $HEAD_COVERAGE%"
+            exit 1
           else
-            echo "No baseline coverage found (first run on main?). Skipping comparison."
-            echo "Current coverage: $HEAD_COVERAGE%"
+            echo "Coverage is maintained or improved: $BASE_COVERAGE% -> $HEAD_COVERAGE%"
           fi
