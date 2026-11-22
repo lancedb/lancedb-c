@@ -238,6 +238,17 @@ def _pe_exports(library: Path) -> set[str]:
                 f"{library} exports {functions} functions but only {names} names; "
                 "ordinal-only exports are not part of the public header"
             )
+        candidates = set()
+        for base in (10, 16):
+            try:
+                candidates.add(int(name_count.group(1), base))
+            except ValueError:
+                pass
+        if len(exports) not in candidates:
+            raise SystemExit(
+                f"{library} reports {name_count.group(1)} named exports but "
+                f"{len(exports)} names were read from the export table"
+            )
     elif function_count and int(function_count.group(1), 16) != len(exports):
         raise SystemExit(
             f"{library} exports {function_count.group(1)} functions but named "

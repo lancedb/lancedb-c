@@ -21,6 +21,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LANCEDB_VERSION");
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=LANCEDB_REAL_LINKER");
+    println!("cargo:rerun-if-env-changed=RUSTC_LINKER");
 
     let root = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -48,7 +49,7 @@ fn emit_export_control_watch(root: &Path) {
             fingerprint = fingerprint.wrapping_mul(0x100000001b3);
         }
     }
-    for name in ["CC", "LANCEDB_REAL_LINKER"] {
+    for name in ["CC", "LANCEDB_REAL_LINKER", "RUSTC_LINKER"] {
         if let Some(value) = env::var_os(name) {
             for byte in value.to_string_lossy().bytes() {
                 fingerprint ^= u64::from(byte);
@@ -59,6 +60,30 @@ fn emit_export_control_watch(root: &Path) {
         }
     }
     println!("cargo:rustc-env=LANCEDB_EXPORT_CONTROL_FINGERPRINT={fingerprint:016x}");
+    emit_resolved_linker();
+}
+
+fn emit_resolved_linker() {
+    // Cargo resolves a target linker from its configuration and exposes it to
+    // build scripts. The explicit wrapper must forward that path instead of
+    // falling back to cc. A caller-provided LANCEDB_REAL_LINKER always wins.
+    if env::var_os("LANCEDB_REAL_LINKER").is_some() {
+        return;
+    }
+    let Some(linker) = env::var_os("RUSTC_LINKER") else {
+        return;
+    };
+    let file_name = Path::new(&linker)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    if file_name == "export-linker.sh" || file_name == "export-linker.cmd" {
+        return;
+    }
+    println!(
+        "cargo:rustc-env=LANCEDB_REAL_LINKER={}",
+        Path::new(&linker).display()
+    );
 }
 
 fn emit_export_controls(root: &Path) {

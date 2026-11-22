@@ -112,6 +112,12 @@ If you prefer to build manually:
    shared-library export boundary; CMake, the package workflow and this
    command are the supported shared build entries.
 
+   The export boundary and paired import-library verification cover Linux ELF,
+   macOS Mach-O and native Windows MSVC shared builds. Windows GNU shared
+   builds and their installed `liblancedb.dll.a` consumers remain supported,
+   but Windows GNU is not a release target and does not use the MSVC export
+   policy.
+
 2. **Compile the C++ simple example with Arrow:**
    ```bash
    g++ -std=c++20 -Wall -Wextra -O2 \
