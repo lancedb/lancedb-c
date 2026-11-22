@@ -126,6 +126,9 @@ typedef struct {
 
 /**
  * Error codes for LanceDB C API
+ *
+ * Existing values never move. Codes for error categories added by a newer SDK
+ * are appended before LANCEDB_UNKNOWN, which stays outside the contiguous range.
  */
 typedef enum {
     LANCEDB_SUCCESS = 0,
@@ -152,6 +155,19 @@ typedef enum {
     LANCEDB_NAMESPACE = 21,
     LANCEDB_PERMISSION_DENIED = 22,
     LANCEDB_NOT_FOUND = 23,
+    LANCEDB_TABLE_CORRUPTED = 24,
+    LANCEDB_COLUMN_NOT_FOUND = 25,
+    LANCEDB_FIELD_NOT_FOUND = 26,
+    LANCEDB_COLUMN_ALREADY_EXISTS = 27,
+    LANCEDB_NOT_A_COMPUTED_COLUMN = 28,
+    LANCEDB_NOT_A_MATERIALIZED_VIEW = 29,
+    LANCEDB_INVALID_EXPRESSION = 30,
+    LANCEDB_SQL = 31,
+    LANCEDB_JOB_FAILED = 32,
+    LANCEDB_JOB_CANCELLED = 33,
+    LANCEDB_JOB_NOT_FOUND = 34,
+    LANCEDB_RESPONSE_INTERRUPTED = 35,
+    LANCEDB_EXTERNAL = 36,
     /* keep last, so that new error codes can be added without renumbering */
     LANCEDB_UNKNOWN = 99
 } LanceDBError;
@@ -183,7 +199,20 @@ static const char* LANCEDB_ERROR_MESSAGES[] = {
     "Other error",
     "Namespace error",
     "Permission denied",
-    "Not found"
+    "Not found",
+    "Table corrupted",
+    "Column not found",
+    "Field not found",
+    "Column already exists",
+    "Not a computed column",
+    "Not a materialized view",
+    "Invalid expression",
+    "SQL error",
+    "Job failed",
+    "Job cancelled",
+    "Job not found",
+    "Response interrupted",
+    "External error"
 };
 
 /**
