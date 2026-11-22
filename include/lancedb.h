@@ -1605,9 +1605,9 @@ typedef struct {
  * @return Error code indicating success or failure
  *
  * The result follows row_ids in length, order and duplicates. NULL blobs stay
- * NULL and valid empty blobs are empty byte strings. An empty input succeeds
- * without reading blob bytes and returns an empty array. One missing or deleted
- * row id rejects the whole request without partial results.
+ * NULL and valid empty blobs are empty byte strings. With a valid blob column,
+ * an empty input returns an empty array without reading blob bytes. One missing
+ * or deleted row id rejects the whole request without partial results.
  * On entry, both outputs and the error message are cleared. On success the
  * array and schema are independent of the table and of each other; the caller
  * frees the array with lancedb_free_arrow_array() and the schema with
@@ -1640,9 +1640,9 @@ LanceDBError lancedb_table_fetch_blobs(
  *
  * The result follows the request order exactly, including duplicate and
  * reordered requests. NULL blobs stay NULL, empty ranges on non-NULL blobs are
- * empty byte strings, and an empty request list succeeds without reading blob
- * bytes. One missing row id or invalid range rejects the whole request without
- * partial results.
+ * empty byte strings. With a valid blob column, an empty request list returns an
+ * empty array without reading blob bytes. One missing row id or invalid range
+ * rejects the whole request without partial results.
  * On entry, both outputs and the error message are cleared. On success the
  * array and schema are independent of the table and of each other; the caller
  * frees the array with lancedb_free_arrow_array() and the schema with
