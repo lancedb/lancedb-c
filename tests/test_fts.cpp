@@ -591,6 +591,20 @@ QueryResultBatches run_structured_query(
   return collect_query_result(lancedb_query_execute(query));
 }
 
+void set_fts_candidate_limit(LanceDBFtsQuery* fts_query, int64_t limit) {
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_limit(fts_query, limit, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
+void unset_fts_candidate_limit(LanceDBFtsQuery* fts_query) {
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_unset_limit(fts_query, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
 LanceDBFtsQuery* make_multi_match_query(
     const char* text,
     const std::vector<std::string>& columns,
@@ -1407,6 +1421,156 @@ TEST_CASE_METHOD(MultiMatchFtsFixture, "LanceDB Query - structured multi-match i
       error_message = nullptr;
       // execute_with_status consumes the builder on every path.
     }
+  }
+}
+
+TEST_CASE_METHOD(FtsFixture,
+                 "LanceDB Query - structured FTS candidate limit", "[fts]") {
+  auto* fts_query = make_match_query("common", "text");
+
+  SECTION("caps candidates independently of the query result limit") {
+    set_fts_candidate_limit(fts_query, 2);
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 2);
+  }
+
+  SECTION("zero requests no candidates") {
+    set_fts_candidate_limit(fts_query, 0);
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 0);
+  }
+
+  SECTION("unset restores the derived search ceiling") {
+    set_fts_candidate_limit(fts_query, 0);
+    REQUIRE(run_structured_query(table(), fts_query, 10).num_rows() == 0);
+
+    unset_fts_candidate_limit(fts_query);
+    auto result = run_structured_query(table(), fts_query, kRowCount);
+    REQUIRE(result.num_rows() == kRowCount);
+  }
+
+  SECTION("the query result limit still caps a larger candidate ceiling") {
+    set_fts_candidate_limit(fts_query, kRowCount + 1);
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 10);
+  }
+
+  lancedb_fts_query_free(fts_query);
+}
+
+TEST_CASE_METHOD(MultiMatchFtsFixture,
+                 "LanceDB Query - structured FTS column selection", "[fts]") {
+  SECTION("replaces a Match column with several fields") {
+    auto options = lancedb_fts_match_options_default();
+    options.boost = 2.0F;
+    auto* fts_query = make_match_query("alpha", "missing", &options);
+    const char* columns[] = {"title", "body"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(fts_query, columns, 2, &error_message) ==
+            LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto baseline = run_multi_match_query(
+        table(), "alpha", {"title", "body"});
+    auto result = run_structured_query(table(), fts_query);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2, 3});
+    for (const int32_t id : {0, 1, 2, 3}) {
+      REQUIRE(std::abs(float_column_of(result, "_score", id) -
+                       2.0F * float_column_of(baseline, "_score", id)) <
+              1e-5F);
+    }
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("rewrites nested Boolean children instead of using automatic discovery") {
+    auto* child = make_match_query("alpha", nullptr);
+    std::vector<LanceDBFtsClause> clauses = {
+        {child, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* boolean = make_boolean_query(clauses);
+    lancedb_fts_query_free(child);
+
+    // Without a column, the Boolean resolves against every indexed text field.
+    REQUIRE(run_structured_query(table(), boolean).num_rows() == 4);
+
+    const char* columns[] = {"title"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(boolean, columns, 1, &error_message) ==
+            LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = run_structured_query(table(), boolean);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 3});
+    lancedb_fts_query_free(boolean);
+  }
+
+  SECTION("does not copy a child candidate limit into the parent Boolean") {
+    auto* child = make_match_query("alpha", "title");
+    set_fts_candidate_limit(child, 0);
+    REQUIRE(run_structured_query(table(), child).num_rows() == 0);
+
+    std::vector<LanceDBFtsClause> clauses = {
+        {child, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* boolean = make_boolean_query(clauses);
+    auto result = run_structured_query(table(), boolean);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 3});
+
+    lancedb_fts_query_free(boolean);
+    lancedb_fts_query_free(child);
+  }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture,
+                 "LanceDB Query - structured FTS column selection failure", "[fts]") {
+  SECTION("a Phrase accepts exactly one selected column") {
+    auto* fts_query = make_phrase_query("alpha beta", "text", 0);
+    const char* columns[] = {"text", "text"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(fts_query, columns, 2, &error_message) ==
+            LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::strstr(error_message, "column must be specified") != nullptr);
+    lancedb_free_string(error_message);
+
+    // The rejected rewrite leaves the previous phrase in place.
+    auto result = run_structured_query(table(), fts_query);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0});
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("an empty selection fails atomically") {
+    auto* fts_query = make_match_query("alpha", "text");
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(fts_query, nullptr, 0, &error_message) ==
+            LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    auto result = run_structured_query(table(), fts_query);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("invalid C inputs leave the previous query usable") {
+    auto* fts_query = make_match_query("alpha", "text");
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(fts_query, nullptr, 1, &error_message) ==
+            LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    const char invalid_utf8[] = {static_cast<char>(0xff), '\0'};
+    const char* columns[] = {invalid_utf8};
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(fts_query, columns, 1, &error_message) ==
+            LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    auto result = run_structured_query(table(), fts_query);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+    lancedb_fts_query_free(fts_query);
   }
 }
 

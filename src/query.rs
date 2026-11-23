@@ -749,30 +749,7 @@ unsafe fn multi_match_parts_from_c(
         .map_err(|_| "multi-match text is not valid UTF-8".to_string())?
         .to_string();
 
-    let columns = if num_columns == 0 {
-        Vec::new()
-    } else {
-        if columns.is_null() {
-            return Err(
-                "multi-match columns are required when num_columns is not zero".to_string(),
-            );
-        }
-
-        let mut parsed = Vec::with_capacity(num_columns);
-        for index in 0..num_columns {
-            let column = *columns.add(index);
-            if column.is_null() {
-                return Err(format!("multi-match column {index} is required"));
-            }
-            parsed.push(
-                CStr::from_ptr(column)
-                    .to_str()
-                    .map_err(|_| format!("multi-match column {index} is not valid UTF-8"))?
-                    .to_string(),
-            );
-        }
-        parsed
-    };
+    let columns = fts_columns_from_c(columns, num_columns, "multi-match")?;
 
     let (boosts, term_operator) = if options.is_null() {
         (None, None)
@@ -804,6 +781,46 @@ unsafe fn multi_match_parts_from_c(
         boosts,
         term_operator,
     })
+}
+
+/// Copy selected full-text column names from a C string array
+///
+/// A zero count describes an empty selection, so the array may be NULL. A
+/// positive count requires an array whose entries are non-NULL and valid UTF-8.
+/// Empty strings are copied unchanged; the SDK decides how to resolve them.
+/// `role` names the caller in diagnostics.
+///
+/// # Safety
+/// `columns` may be NULL only when `num_columns` is zero. Otherwise it must
+/// point to `num_columns` readable null-terminated strings.
+unsafe fn fts_columns_from_c(
+    columns: *const *const c_char,
+    num_columns: usize,
+    role: &str,
+) -> Result<Vec<String>, String> {
+    if num_columns == 0 {
+        return Ok(Vec::new());
+    }
+    if columns.is_null() {
+        return Err(format!(
+            "{role} columns are required when num_columns is not zero"
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(num_columns);
+    for index in 0..num_columns {
+        let column = *columns.add(index);
+        if column.is_null() {
+            return Err(format!("{role} column {index} is required"));
+        }
+        parsed.push(
+            CStr::from_ptr(column)
+                .to_str()
+                .map_err(|_| format!("{role} column {index} is not valid UTF-8"))?
+                .to_string(),
+        );
+    }
+    Ok(parsed)
 }
 
 /// Clone one borrowed handle's structured query node
@@ -1504,7 +1521,8 @@ pub unsafe extern "C" fn lancedb_fts_query_new_phrase(
 /// Clauses are a flat borrowed array; nesting is expressed by composing handles
 /// rather than by a recursive C representation. Each clause's structured query
 /// node is copied, so child handles can be reused or freed after this call
-/// returns.
+/// returns. Only the node is copied; a child handle's candidate limit is not
+/// part of the node and does not constrain the Boolean query.
 ///
 /// SDK semantics apply unchanged. MUST clauses must all match and their scores
 /// are summed. SHOULD clauses are optional when a MUST clause exists and add
@@ -1569,8 +1587,10 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boolean(
 ///
 /// Both legs are required borrowed handles, and each leg's structured query
 /// node is copied so the handles can be reused or freed after this call
-/// returns. A NULL `negative_boost` passes `None` to the SDK constructor, which
-/// supplies its default 0.5; a pointed-to value is forwarded unchanged. The
+/// returns. Only the node is copied; a child handle's candidate limit is not
+/// part of the node and does not constrain the Boost query. A NULL
+/// `negative_boost` passes `None` to the SDK constructor, which supplies its
+/// default 0.5; a pointed-to value is forwarded unchanged. The
 /// embedded dataset scanner requires it to be finite and non-negative and
 /// otherwise fails while planning with `LANCEDB_INVALID_INPUT`. A MemWAL LSM
 /// query runs its column checks first, and namespace or Enterprise execution
@@ -1621,6 +1641,143 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boost(
     let search = FullTextSearchQuery::new_query(query.into());
 
     *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
+/// Replace the column selection of a structured full-text query
+///
+/// This applies the SDK's `FullTextSearchQuery::with_columns` to a copy and
+/// publishes the result only after the SDK accepts it, so a failure leaves the
+/// previous query, candidate limit and settings unchanged. The operation
+/// replaces the columns of every Match and Phrase leaf; it does not fill only
+/// leaves that lack a column.
+///
+/// A Match leaf becomes one leaf per selected column. Several columns therefore
+/// turn it into a MultiMatch, and every scalar setting of the original leaf
+/// (boost, fuzziness, max_expansions, operator, prefix_length and document
+/// granularity) is copied to each new leaf. A Phrase leaf accepts exactly one
+/// column; zero or several columns fail with `LANCEDB_INVALID_INPUT`. Boolean
+/// nodes recurse into must, should and must_not, and Boost nodes recurse into
+/// both legs. A MultiMatch expands each existing Match leaf by every selected
+/// column, so N existing leaves produce N * M leaves and each copy keeps its
+/// original scalar settings. Prefer constructing a MultiMatch with its columns;
+/// this operation is intended for trees whose leaves have not selected columns.
+/// A selection that makes the tree span several columns follows the existing
+/// MultiMatch backend limits: native MemWAL requires one explicit column. An
+/// empty Boolean has no leaves and succeeds unchanged.
+///
+/// A zero column count is forwarded as an empty selection and normally fails
+/// with `LANCEDB_INVALID_INPUT`. Empty strings are forwarded as named columns
+/// rather than automatic discovery, and the SDK reports their resolution error
+/// when the query runs. A NULL array with a nonzero count, a NULL entry or
+/// invalid UTF-8 returns `LANCEDB_INVALID_ARGUMENT`. The handle keeps its
+/// candidate limit set by `lancedb_fts_query_limit`.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from an
+///   `lancedb_fts_query_new_*` constructor
+/// - `columns` may be NULL only when `num_columns` is zero; otherwise it must
+///   point to `num_columns` readable null-terminated UTF-8 strings
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_with_columns(
+    query: *mut LanceDBFtsQuery,
+    columns: *const *const c_char,
+    num_columns: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let columns = match fts_columns_from_c(columns, num_columns, "full-text") {
+        Ok(columns) => columns,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let updated = match (*query).inner.clone().with_columns(&columns) {
+        Ok(updated) => updated,
+        Err(error) => {
+            let error = lancedb::error::Error::from(error);
+            return handle_error(&error, error_message);
+        }
+    };
+    (*query).inner = updated;
+    LanceDBError::Success
+}
+
+/// Set the candidate limit of a structured full-text query
+///
+/// This sets the SDK `FullTextSearchQuery` candidate ceiling. It is separate
+/// from `lancedb_query_limit` and `lancedb_vector_query_limit`, which limit the
+/// final query result. On a backend that consumes the field, zero requests no
+/// candidates and returns no rows, and a positive value caps the candidates the
+/// full-text leg may produce before the final limit and offset are applied.
+///
+/// The value is forwarded unchanged as `i64`. Embedded LanceDB converts it to
+/// `usize` when planning, so a negative value becomes a very large ceiling on a
+/// 64-bit target. The native MemWAL LSM path rejects a negative value at
+/// execution with `LANCEDB_INVALID_INPUT`. The setter does not clamp or reject
+/// negative values; the selected backend determines that outcome.
+///
+/// The pinned SDK consumes the ceiling for standalone embedded full-text
+/// search, for the full-text leg of an embedded hybrid query, and for a native
+/// MemWAL LSM full-text query. Namespace QueryTable pushdown and LanceDB
+/// Enterprise requests do not carry the field; only their outer result limit
+/// applies. Boolean and Boost constructors copy child query nodes and do not
+/// copy a child's candidate limit.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from an
+///   `lancedb_fts_query_new_*` constructor
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_limit(
+    query: *mut LanceDBFtsQuery,
+    limit: i64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).inner = (*query).inner.clone().limit(Some(limit));
+    LanceDBError::Success
+}
+
+/// Remove the candidate limit from a structured full-text query
+///
+/// This sets the SDK `FullTextSearchQuery` limit to `None`. Embedded standalone
+/// full-text search then derives its search ceiling from the final query limit
+/// and offset when available, and native MemWAL derives it from the scanner
+/// limit and offset. The final query result limit remains independent.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from an
+///   `lancedb_fts_query_new_*` constructor
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_unset_limit(
+    query: *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).inner = (*query).inner.clone().limit(None);
     LanceDBError::Success
 }
 

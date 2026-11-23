@@ -4033,6 +4033,10 @@ LanceDBError lancedb_vector_query_add_query_vector(
 /**
  * Set limit for query
  *
+ * This limits the final query result. It is independent of a structured
+ * full-text query's candidate ceiling, which is set with
+ * lancedb_fts_query_limit().
+ *
  * @param query - pointer to LanceDBQuery
  * @param limit - maximum number of results
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
@@ -4610,7 +4614,9 @@ typedef struct {
  * C representation, and a child can itself be a Boolean or Boost handle. The
  * constructor copies each clause's structured query node and occurrence, so
  * child handles may be reused in several clauses or freed after this call
- * returns.
+ * returns. Only the node is copied: a child handle's candidate limit set with
+ * lancedb_fts_query_limit() is not part of the node and does not constrain the
+ * Boolean query.
  *
  * SDK clause semantics apply unchanged. MUST clauses must all match and their
  * scores are summed. SHOULD clauses are optional when a MUST clause exists and
@@ -4687,9 +4693,11 @@ LanceDBError lancedb_fts_query_new_boolean(
  *
  * `positive` and `negative` are required borrowed handles; the constructor
  * copies each handle's structured query node, so the caller may reuse or free
- * the handles after this call returns. `negative_boost` may be NULL, which
- * passes "unset" to the SDK constructor so the SDK supplies its default of
- * 0.5. A pointed-to value is forwarded unchanged. The embedded dataset
+ * the handles after this call returns. Only the node is copied: a child
+ * handle's candidate limit set with lancedb_fts_query_limit() is not part of
+ * the node and does not constrain the Boost query. `negative_boost` may be
+ * NULL, which passes "unset" to the SDK constructor so the SDK supplies its
+ * default of 0.5. A pointed-to value is forwarded unchanged. The embedded dataset
  * scanner requires a finite, non-negative multiplier when it plans the query
  * and otherwise fails with LANCEDB_INVALID_INPUT. A MemWAL LSM query runs its
  * column checks before that validation, and a namespace or Enterprise
@@ -4756,6 +4764,119 @@ LanceDBError lancedb_fts_query_new_boost(
 );
 
 /**
+ * Replace the column selection of a structured full-text query
+ *
+ * This applies the pinned SDK's `FullTextSearchQuery::with_columns` to a copy
+ * and publishes the result only after the SDK accepts it. A failure leaves the
+ * handle's previous query, candidate limit and settings unchanged. The
+ * operation replaces the columns of every Match and Phrase leaf; it does not
+ * fill only leaves that lack a column.
+ *
+ * A Match leaf becomes one leaf per selected column. Several columns therefore
+ * turn it into a MultiMatch, and every scalar setting of the original leaf
+ * (boost, fuzziness, max_expansions, operator, prefix_length and document
+ * granularity) is copied to each new leaf. A Phrase leaf accepts exactly one
+ * selected column; zero or several columns fail with
+ * LANCEDB_INVALID_INPUT. Boolean nodes recurse into must, should and must_not,
+ * and Boost nodes recurse into both legs. A MultiMatch expands each existing
+ * Match leaf by every selected column, so N existing leaves produce N * M
+ * leaves and each copy keeps its original scalar settings. Prefer constructing
+ * a MultiMatch with its columns; this operation is intended for trees whose
+ * leaves have not selected columns. A selection that makes the tree span
+ * several columns follows the existing MultiMatch backend limits: native
+ * MemWAL requires one explicit column. An empty Boolean has no leaves and
+ * succeeds unchanged.
+ *
+ * A zero column count is forwarded as an empty selection and normally fails
+ * with LANCEDB_INVALID_INPUT, except for an empty Boolean. Empty strings are
+ * forwarded as named columns rather than automatic discovery; the SDK reports
+ * their resolution error when the query runs. A NULL array with a nonzero
+ * count, a NULL entry or invalid UTF-8 returns LANCEDB_INVALID_ARGUMENT and
+ * leaves the handle usable. SDK errors keep their mapped status.
+ *
+ * Backend routing is unchanged. Column names are part of the structured node
+ * forwarded to a namespace QueryTable pushdown and to Enterprise 0.3.0 and
+ * later; older Enterprise projections remain the ones documented on the
+ * constructors.
+ *
+ * @param query - pointer to LanceDBFtsQuery
+ * @param columns - ordered column names, or NULL when num_columns is zero
+ * @param num_columns - number of column names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_with_columns(
+    LanceDBFtsQuery* query,
+    const char* const* columns,
+    size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Set the candidate limit of a structured full-text query
+ *
+ * This sets the SDK FullTextSearchQuery candidate ceiling. It is separate from
+ * lancedb_query_limit() and lancedb_vector_query_limit(), which limit the
+ * final query result. On a backend that consumes the field, zero requests no
+ * full-text candidates and returns no rows, and a positive value caps the
+ * candidates the full-text leg may produce before the final query limit and
+ * offset are applied.
+ *
+ * The value is forwarded unchanged as int64_t. Embedded LanceDB converts it to
+ * size_t when planning, so a negative value becomes a very large ceiling on a
+ * 64-bit target. The native MemWAL LSM path rejects a negative value at
+ * execution with LANCEDB_INVALID_INPUT. This setter does not clamp or reject
+ * negative values; the selected backend determines that outcome.
+ *
+ * The pinned SDK consumes the ceiling for standalone embedded full-text search,
+ * for the full-text leg of an embedded hybrid query, and for a native MemWAL
+ * LSM full-text query. Namespace QueryTable pushdown and LanceDB Enterprise
+ * requests do not carry the field: only their outer result limit applies, so
+ * the candidate ceiling is silently absent on those backends.
+ *
+ * The limit belongs to the full-text search wrapper, not to the query tree.
+ * Boolean and Boost constructors copy child query nodes and do not copy a
+ * child's candidate limit. Attaching the handle to a builder copies the whole
+ * wrapper, including this limit.
+ *
+ * @param query - pointer to LanceDBFtsQuery
+ * @param limit - candidate ceiling
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_limit(
+    LanceDBFtsQuery* query,
+    int64_t limit,
+    char** error_message
+);
+
+/**
+ * Remove the candidate limit from a structured full-text query
+ *
+ * This sets the SDK FullTextSearchQuery limit to unset. Embedded standalone
+ * full-text search then derives its search ceiling from the final query limit
+ * and offset when available, and native MemWAL derives it from the scanner
+ * limit and offset. The final query result limit remains independent.
+ *
+ * @param query - pointer to LanceDBFtsQuery
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_unset_limit(
+    LanceDBFtsQuery* query,
+    char** error_message
+);
+
+/**
  * Free a structured full-text query
  *
  * @param query - pointer to LanceDBFtsQuery, or NULL
@@ -4809,6 +4930,10 @@ LanceDBError lancedb_query_df_filter(
 
 /**
  * Set limit for vector query
+ *
+ * This limits the final query result. It is independent of a structured
+ * full-text query's candidate ceiling, which is set with
+ * lancedb_fts_query_limit().
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param limit - maximum number of results

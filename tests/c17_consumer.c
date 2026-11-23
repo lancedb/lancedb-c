@@ -477,6 +477,215 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   }
   second = NULL;
 
+  /* Column selection replaces a leaf's column. The "missing" column never
+   * resolves, so the successful execution proves the setter ran. */
+  if (lancedb_fts_query_new_match(
+          "alpha", "missing", NULL, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 column-selection Match failed");
+    goto cleanup;
+  }
+  {
+    const char* selected_columns[] = {"text"};
+    if (lancedb_fts_query_with_columns(
+            fts_query, selected_columns, 1, &error_message) != LANCEDB_SUCCESS ||
+        error_message != NULL) {
+      result = fail("selecting the C17 Match column failed");
+      goto cleanup;
+    }
+  }
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 column-selection Match failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the C17 selected Match column returned the wrong row count");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* The candidate limit is separate from the query result limit. Zero stops the
+   * FTS collector. Negative is forwarded to the SDK, and unsetting restores
+   * the single matching row. Each builder clones the state at attach time. */
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", NULL, &fts_query, &error_message) != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL ||
+      lancedb_fts_query_limit(fts_query, 0, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("setting the C17 zero FTS candidate limit failed");
+    goto cleanup;
+  }
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 zero-limit Match failed");
+    goto cleanup;
+  }
+  if (lancedb_fts_query_limit(fts_query, -1, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL ||
+      lancedb_fts_query_unset_limit(fts_query, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("updating the C17 negative and unset candidate limits failed");
+    goto cleanup;
+  }
+  second = lancedb_query_new(table);
+  if (second == NULL ||
+      lancedb_query_full_text_search_query(second, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 reset-limit Match failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 0) {
+    first = NULL;
+    result = fail("the C17 zero FTS candidate limit returned rows");
+    goto cleanup;
+  }
+  first = NULL;
+  if (execute_query_rows(second, &rows) != 0 || rows != 1) {
+    second = NULL;
+    result = fail("unsetting the C17 FTS candidate limit did not restore the match");
+    goto cleanup;
+  }
+  second = NULL;
+
+  /* A Phrase accepts exactly one selected column. The rejected rewrite leaves
+   * the previous phrase in place and still matches the first row. */
+  if (lancedb_fts_query_new_phrase(
+          "alpha beta", "text", 0, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 atomic Phrase failed");
+    goto cleanup;
+  }
+  {
+    const char* phrase_columns[] = {"text", "text"};
+    if (lancedb_fts_query_with_columns(
+            fts_query, phrase_columns, 2, &error_message)
+            != LANCEDB_INVALID_INPUT ||
+        error_message == NULL) {
+      result = fail("a C17 Phrase with two selected columns must be rejected");
+      goto cleanup;
+    }
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 atomic Phrase failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("a failed C17 column rewrite changed the previous Phrase");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* Representation errors leave the handle usable. */
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", NULL, &fts_query, &error_message) != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 column-error sentinel failed");
+    goto cleanup;
+  }
+  if (lancedb_fts_query_with_columns(fts_query, NULL, 1, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a NULL C17 column array with a count must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  {
+    const char* null_columns[] = {"text", NULL};
+    if (lancedb_fts_query_with_columns(
+            fts_query, null_columns, 2, &error_message)
+            != LANCEDB_INVALID_ARGUMENT ||
+        error_message == NULL) {
+      result = fail("a NULL C17 column entry must be rejected");
+      goto cleanup;
+    }
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+  {
+    const char invalid_column[] = {(char)0xff, '\0'};
+    const char* invalid_columns[] = {invalid_column};
+    if (lancedb_fts_query_with_columns(
+            fts_query, invalid_columns, 1, &error_message)
+            != LANCEDB_INVALID_ARGUMENT ||
+        error_message == NULL) {
+      result = fail("invalid UTF-8 C17 column names must be rejected");
+      goto cleanup;
+    }
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 column-error sentinel failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("a rejected C17 column rewrite changed the previous Match");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* Every new entry rejects a NULL handle. */
+  {
+    const char* selected_columns[] = {"text"};
+    if (lancedb_fts_query_with_columns(
+            NULL, selected_columns, 1, &error_message)
+            != LANCEDB_INVALID_ARGUMENT ||
+        error_message == NULL) {
+      result = fail("a NULL C17 column-selection handle must be rejected");
+      goto cleanup;
+    }
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+  if (lancedb_fts_query_limit(NULL, 1, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a NULL C17 candidate-limit handle must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  if (lancedb_fts_query_unset_limit(NULL, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a NULL C17 candidate-limit reset handle must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
   /* Invalid representation values are rejected at construction. */
   match_options = lancedb_fts_match_options_default();
   match_options.fuzziness = -2;
