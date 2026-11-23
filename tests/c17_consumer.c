@@ -579,7 +579,7 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
     error_message = NULL;
   }
   {
-    const char invalid_column[] = {(char)0xff, '\0'};
+    const char invalid_column[] = "\xff";
     const char* invalid_columns[] = {invalid_column};
     if (lancedb_fts_query_with_columns(
             fts_query, invalid_columns, 1, &error_message)
@@ -610,9 +610,9 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
 
   /* Every new entry rejects a NULL handle. */
   {
-    const char* selected_columns[] = {"text"};
+    const char* null_handle_columns[] = {"text"};
     if (lancedb_fts_query_with_columns(
-            NULL, selected_columns, 1, &error_message)
+            NULL, null_handle_columns, 1, &error_message)
             != LANCEDB_INVALID_ARGUMENT ||
         error_message == NULL) {
       result = fail("a NULL C17 column-selection handle must be rejected");
