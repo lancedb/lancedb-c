@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from check_exports import verify_library
+
 
 def cache_value(build_dir: Path, name: str) -> str:
     cache = (build_dir / "CMakeCache.txt").read_text(encoding="utf-8")
@@ -104,6 +106,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-dir", required=True)
     parser.add_argument("--source-dir", required=True)
     parser.add_argument("--config", default="")
+    parser.add_argument(
+        "--export-target",
+        default="",
+        choices=("", "linux", "darwin", "windows"),
+        help="CMake-selected export verifier target; empty disables the check",
+    )
     return parser.parse_args()
 
 
@@ -179,6 +187,25 @@ def main() -> int:
     run([str(cxx_consumer), str(work_dir / "cxx-consumer-db")], env=env)
 
     version = installed_version(prefix)
+    target_os = args.export_target or None
+    if target_os is not None:
+        header_path = prefix / "include" / "lancedb.h"
+        if target_os == "windows":
+            library = installed_bindir / "lancedb.dll"
+            import_library = installed_libdir / "lancedb.dll.lib"
+        elif target_os == "darwin":
+            library = installed_libdir / "liblancedb.dylib"
+            import_library = None
+        else:
+            library = installed_libdir / "liblancedb.so"
+            import_library = None
+        verify_library(
+            library,
+            header_path,
+            target_os,
+            version,
+            import_library,
+        )
     configure_version_case(
         source_dir, work_dir, package_dir, generator, generator_platform, "", False, True
     )

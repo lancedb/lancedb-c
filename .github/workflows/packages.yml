@@ -110,7 +110,7 @@ jobs:
           echo "LANCEDB_TAG_COMMIT=${tag_commit}" >> "$GITHUB_ENV"
           echo "commit=${tag_commit}" >> "$GITHUB_OUTPUT"
 
-      # The locked Lance v15.0.0-beta.26 fixture contains a 188-character
+      # The locked Lance v15.0.0-beta.28 fixture contains a 188-character
       # relative test-data path. The default runner Cargo home makes Cargo's
       # git checkout path exceed Windows MAX_PATH; C:\c keeps the longest
       # checkout path at 238 characters, so use it only on Windows.
@@ -175,6 +175,7 @@ jobs:
         if: runner.os == 'macOS'
         run: >
           cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib --
+          -C "linker=${PWD}/cmake/export-linker.sh"
           -C link-arg=-Wl,-install_name,@rpath/liblancedb.dylib
 
       - name: Build shared library (Linux)
@@ -183,11 +184,14 @@ jobs:
         run: |
           soversion="$("${{ matrix.python }}" .github/scripts/version.py soversion)"
           cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib -- \
+            -C "linker=${PWD}/cmake/export-linker.sh" \
             -C "link-arg=-Wl,-soname,liblancedb.so.${soversion}"
 
       - name: Build shared library (Windows)
         if: runner.os == 'Windows'
-        run: cargo build --release --locked --package lancedb-c --target ${{ matrix.target }}
+        run: >
+          cargo rustc --release --locked --package lancedb-c --target ${{ matrix.target }} --lib --
+          -C "linker=$env:GITHUB_WORKSPACE\cmake\export-linker.cmd"
 
       - name: Create package
         id: package

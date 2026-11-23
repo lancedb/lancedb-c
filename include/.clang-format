@@ -1,0 +1,8 @@
+# Keep the hand-written public C header in its four-space layout. Keep the
+# remaining options in sync with the repository root .clang-format.
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 0
+SortIncludes: false
+PointerAlignment: Left
+DerivePointerAlignment: false

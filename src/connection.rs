@@ -129,6 +129,153 @@ const OPEN_TABLE_MANAGED_VERSIONING: u32 = 1 << 2;
 const OPEN_TABLE_ALL_FIELDS: u32 =
     OPEN_TABLE_INDEX_CACHE_SIZE | OPEN_TABLE_VERSION | OPEN_TABLE_MANAGED_VERSIONING;
 
+/// Client configuration fields of `LanceDBClientConfig`
+///
+/// These values mirror the `LanceDBClientConfigField` enumerators of the public header.
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_TIMEOUT: u32 = 1 << 0;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_CONNECT_TIMEOUT: u32 = 1 << 1;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_READ_TIMEOUT: u32 = 1 << 2;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_POOL_IDLE_TIMEOUT: u32 = 1 << 3;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_RETRIES: u32 = 1 << 4;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_CONNECT_RETRIES: u32 = 1 << 5;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_READ_RETRIES: u32 = 1 << 6;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_BACKOFF_FACTOR: u32 = 1 << 7;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_BACKOFF_JITTER: u32 = 1 << 8;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_RETRY_STATUSES: u32 = 1 << 9;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY: u32 = 1 << 10;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_MAX_BYTES_PER_REQUEST: u32 = 1 << 11;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_MAX_REQUEST_DURATION: u32 = 1 << 12;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_TLS_ASSERT_HOSTNAME: u32 = 1 << 13;
+#[cfg(feature = "remote")]
+const CLIENT_CONFIG_ALL_FIELDS: u32 = CLIENT_CONFIG_TIMEOUT
+    | CLIENT_CONFIG_CONNECT_TIMEOUT
+    | CLIENT_CONFIG_READ_TIMEOUT
+    | CLIENT_CONFIG_POOL_IDLE_TIMEOUT
+    | CLIENT_CONFIG_RETRIES
+    | CLIENT_CONFIG_CONNECT_RETRIES
+    | CLIENT_CONFIG_READ_RETRIES
+    | CLIENT_CONFIG_BACKOFF_FACTOR
+    | CLIENT_CONFIG_BACKOFF_JITTER
+    | CLIENT_CONFIG_RETRY_STATUSES
+    | CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY
+    | CLIENT_CONFIG_MAX_BYTES_PER_REQUEST
+    | CLIENT_CONFIG_MAX_REQUEST_DURATION
+    | CLIENT_CONFIG_TLS_ASSERT_HOSTNAME;
+
+/// Options for `lancedb_connect_builder_client_config`
+///
+/// A NULL pointer or a zeroed struct leaves every SDK `ClientConfig` field at
+/// its Rust `Default`, including a `None` TLS configuration, which leaves the
+/// SDK/reqwest default hostname verification enabled. `set_fields` selects only
+/// the scalar overrides, so an omitted duration or retry count stays distinct
+/// from an explicit zero.
+///
+/// String pointers are borrowed for the call and copied into the SDK
+/// configuration. NULL leaves the matching `Option<String>` unset and, for
+/// `user_agent`, keeps the SDK default. A non-NULL string, including an empty
+/// one, is passed unchanged. `retry_statuses` and the extra header arrays are
+/// borrowed for the call and copied as well.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBClientConfig {
+    /// Bitmask of `LanceDBClientConfigField` values; 0 keeps every default
+    pub set_fields: u32,
+    /// User agent; NULL keeps the SDK default
+    pub user_agent: *const c_char,
+    /// Overall request timeout in milliseconds; read only when its bit is set
+    pub timeout_ms: u64,
+    /// Connection timeout in milliseconds; read only when its bit is set
+    pub connect_timeout_ms: u64,
+    /// Response read timeout in milliseconds; read only when its bit is set
+    pub read_timeout_ms: u64,
+    /// Idle connection pool timeout in milliseconds; read only when its bit is set
+    pub pool_idle_timeout_ms: u64,
+    /// Request retry budget; read only when its bit is set
+    pub retries: u8,
+    /// Connect retry budget; read only when its bit is set
+    pub connect_retries: u8,
+    /// Read retry budget; read only when its bit is set
+    pub read_retries: u8,
+    /// Retry backoff factor in seconds; read only when its bit is set
+    pub backoff_factor: f32,
+    /// Retry backoff jitter in seconds; read only when its bit is set
+    pub backoff_jitter: f32,
+    /// Retryable HTTP status codes, or NULL when `retry_status_count` is zero
+    pub retry_statuses: *const u16,
+    /// Number of retryable status codes
+    pub retry_status_count: usize,
+    /// Maximum concurrent blob requests; read only when its bit is set
+    pub blob_request_concurrency: usize,
+    /// Maximum bytes per insert request; read only when its bit is set
+    pub max_bytes_per_request: u64,
+    /// Maximum time per insert request in milliseconds; read only when its bit is set
+    pub max_request_duration_ms: u64,
+    /// Namespace identifier delimiter; NULL leaves it unset
+    pub id_delimiter: *const c_char,
+    /// User identifier; NULL keeps the SDK environment fallback
+    pub user_id: *const c_char,
+    /// Client certificate path; NULL leaves it unset
+    pub tls_cert_file: *const c_char,
+    /// Client private key path; NULL leaves it unset
+    pub tls_key_file: *const c_char,
+    /// CA certificate path for server verification; NULL leaves it unset
+    pub tls_ssl_ca_cert: *const c_char,
+    /// Hostname verification; read only when its bit is set (0 = false, 1 = true)
+    pub tls_assert_hostname: c_int,
+    /// Extra header names, or NULL when `extra_header_count` is zero
+    pub extra_header_keys: *const *const c_char,
+    /// Extra header values matching `extra_header_keys`
+    pub extra_header_values: *const *const c_char,
+    /// Number of static extra headers
+    pub extra_header_count: usize,
+}
+
+impl Default for LanceDBClientConfig {
+    fn default() -> Self {
+        Self {
+            set_fields: 0,
+            user_agent: ptr::null(),
+            timeout_ms: 0,
+            connect_timeout_ms: 0,
+            read_timeout_ms: 0,
+            pool_idle_timeout_ms: 0,
+            retries: 0,
+            connect_retries: 0,
+            read_retries: 0,
+            backoff_factor: 0.0,
+            backoff_jitter: 0.0,
+            retry_statuses: ptr::null(),
+            retry_status_count: 0,
+            blob_request_concurrency: 0,
+            max_bytes_per_request: 0,
+            max_request_duration_ms: 0,
+            id_delimiter: ptr::null(),
+            user_id: ptr::null(),
+            tls_cert_file: ptr::null(),
+            tls_key_file: ptr::null(),
+            tls_ssl_ca_cert: ptr::null(),
+            tls_assert_hostname: 0,
+            extra_header_keys: ptr::null(),
+            extra_header_values: ptr::null(),
+            extra_header_count: 0,
+        }
+    }
+}
+
 /// Options for `lancedb_connection_open_table_with_options`
 ///
 /// A zero-initialized struct keeps every SDK default. `set_fields` selects the
@@ -740,6 +887,148 @@ unsafe fn connect_builder_with_key_value(
     connect_builder_handle(updated_builder, is_remote)
 }
 
+#[cfg(feature = "remote")]
+unsafe fn client_config_string(value: *const c_char) -> Result<Option<String>, &'static str> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    CStr::from_ptr(value)
+        .to_str()
+        .map(|value| Some(value.to_string()))
+        .map_err(|_| "client configuration string is not valid UTF-8")
+}
+
+/// Translate the borrowed C configuration into the SDK representation
+///
+/// Only the C representation is checked here. Values that the SDK validates
+/// (retry status codes, the identifier delimiter, blob concurrency, TLS files
+/// and header syntax) are passed through so the SDK reports them at execute
+/// time, where a message and an error code are available.
+#[cfg(feature = "remote")]
+unsafe fn client_config_from_c(
+    config: *const LanceDBClientConfig,
+) -> Result<lancedb::remote::ClientConfig, &'static str> {
+    let mut result = lancedb::remote::ClientConfig::default();
+    if config.is_null() {
+        return Ok(result);
+    }
+    let config = &*config;
+
+    if config.set_fields & !CLIENT_CONFIG_ALL_FIELDS != 0 {
+        return Err("unknown client configuration field bits");
+    }
+
+    if let Some(value) = client_config_string(config.user_agent)? {
+        result.user_agent = value;
+    }
+
+    if config.set_fields & CLIENT_CONFIG_TIMEOUT != 0 {
+        result.timeout_config.timeout = Some(std::time::Duration::from_millis(config.timeout_ms));
+    }
+    if config.set_fields & CLIENT_CONFIG_CONNECT_TIMEOUT != 0 {
+        result.timeout_config.connect_timeout =
+            Some(std::time::Duration::from_millis(config.connect_timeout_ms));
+    }
+    if config.set_fields & CLIENT_CONFIG_READ_TIMEOUT != 0 {
+        result.timeout_config.read_timeout =
+            Some(std::time::Duration::from_millis(config.read_timeout_ms));
+    }
+    if config.set_fields & CLIENT_CONFIG_POOL_IDLE_TIMEOUT != 0 {
+        result.timeout_config.pool_idle_timeout = Some(std::time::Duration::from_millis(
+            config.pool_idle_timeout_ms,
+        ));
+    }
+
+    if config.set_fields & CLIENT_CONFIG_RETRIES != 0 {
+        result.retry_config.retries = Some(config.retries);
+    }
+    if config.set_fields & CLIENT_CONFIG_CONNECT_RETRIES != 0 {
+        result.retry_config.connect_retries = Some(config.connect_retries);
+    }
+    if config.set_fields & CLIENT_CONFIG_READ_RETRIES != 0 {
+        result.retry_config.read_retries = Some(config.read_retries);
+    }
+    if config.set_fields & CLIENT_CONFIG_BACKOFF_FACTOR != 0 {
+        result.retry_config.backoff_factor = Some(config.backoff_factor);
+    }
+    if config.set_fields & CLIENT_CONFIG_BACKOFF_JITTER != 0 {
+        result.retry_config.backoff_jitter = Some(config.backoff_jitter);
+    }
+    if config.set_fields & CLIENT_CONFIG_RETRY_STATUSES != 0 {
+        if config.retry_status_count != 0 && config.retry_statuses.is_null() {
+            return Err("retry_statuses must not be NULL when retry_status_count is non-zero");
+        }
+        let mut statuses = Vec::with_capacity(config.retry_status_count);
+        for index in 0..config.retry_status_count {
+            statuses.push(*config.retry_statuses.add(index));
+        }
+        result.retry_config.statuses = Some(statuses);
+    }
+
+    if config.set_fields & CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY != 0 {
+        result.blob_request_concurrency = Some(config.blob_request_concurrency);
+    }
+    if config.set_fields & CLIENT_CONFIG_MAX_BYTES_PER_REQUEST != 0 {
+        result.max_bytes_per_request = Some(config.max_bytes_per_request);
+    }
+    if config.set_fields & CLIENT_CONFIG_MAX_REQUEST_DURATION != 0 {
+        result.max_request_duration = Some(std::time::Duration::from_millis(
+            config.max_request_duration_ms,
+        ));
+    }
+
+    result.id_delimiter = client_config_string(config.id_delimiter)?;
+    result.user_id = client_config_string(config.user_id)?;
+
+    let tls_cert_file = client_config_string(config.tls_cert_file)?;
+    let tls_key_file = client_config_string(config.tls_key_file)?;
+    let tls_ssl_ca_cert = client_config_string(config.tls_ssl_ca_cert)?;
+    let has_tls_assert_hostname = config.set_fields & CLIENT_CONFIG_TLS_ASSERT_HOSTNAME != 0;
+    if tls_cert_file.is_some()
+        || tls_key_file.is_some()
+        || tls_ssl_ca_cert.is_some()
+        || has_tls_assert_hostname
+    {
+        let assert_hostname = if has_tls_assert_hostname {
+            match config.tls_assert_hostname {
+                0 => false,
+                1 => true,
+                _ => return Err("tls_assert_hostname must be 0 or 1"),
+            }
+        } else {
+            true
+        };
+        result.tls_config = Some(lancedb::remote::TlsConfig {
+            cert_file: tls_cert_file,
+            key_file: tls_key_file,
+            ssl_ca_cert: tls_ssl_ca_cert,
+            assert_hostname,
+        });
+    }
+
+    if config.extra_header_count != 0 {
+        if config.extra_header_keys.is_null() || config.extra_header_values.is_null() {
+            return Err(
+                "extra_header_keys and extra_header_values must not be NULL when extra_header_count is non-zero",
+            );
+        }
+        result.extra_headers = HashMap::with_capacity(config.extra_header_count);
+        for index in 0..config.extra_header_count {
+            let key = *config.extra_header_keys.add(index);
+            let value = *config.extra_header_values.add(index);
+            let Some(key) = client_config_string(key)? else {
+                return Err("extra header names must not be NULL");
+            };
+            let Some(value) = client_config_string(value)? else {
+                return Err("extra header values must not be NULL");
+            };
+            result.extra_headers.insert(key, value);
+        }
+    }
+
+    Ok(result)
+}
+
 /// Create a ConnectBuilder for the given URI
 ///
 /// # Safety
@@ -1006,6 +1295,50 @@ pub unsafe extern "C" fn lancedb_connect_builder_session(
     };
 
     connect_builder_handle(updated_builder, is_remote)
+}
+
+/// Set the HTTP client configuration for a remote connection
+///
+/// The configuration is copied into the SDK builder. A NULL pointer or a
+/// zeroed struct keeps the SDK `ClientConfig::default()`. Native connections
+/// ignore the configuration, matching the other remote-only setters. Builds
+/// without the `remote` feature consume the builder and leave it unchanged.
+///
+/// # Safety
+/// - `builder` must be a valid pointer returned from `lancedb_connect`
+/// - `builder` will be consumed and must not be used after calling this function
+/// - `config` may be NULL or point to a valid `LanceDBClientConfig` whose
+///   borrowed strings and arrays stay valid for the duration of this call
+///
+/// # Returns
+/// - A new pointer to LanceDBConnectBuilder on success
+/// - Null pointer on failure
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_connect_builder_client_config(
+    builder: *mut LanceDBConnectBuilder,
+    config: *const LanceDBClientConfig,
+) -> *mut LanceDBConnectBuilder {
+    if builder.is_null() {
+        return ptr::null_mut();
+    }
+
+    let builder_box = Box::from_raw(builder);
+    let is_remote = builder_box.is_remote;
+
+    #[cfg(feature = "remote")]
+    {
+        let client_config = match client_config_from_c(config) {
+            Ok(config) => config,
+            Err(_) => return ptr::null_mut(),
+        };
+        if is_remote {
+            let updated_builder = (*builder_box.inner).client_config(client_config);
+            return connect_builder_handle(updated_builder, is_remote);
+        }
+    }
+
+    let _ = config;
+    connect_builder_handle(*builder_box.inner, is_remote)
 }
 
 /// Free a ConnectBuilder
@@ -3465,6 +3798,49 @@ mod tests {
         assert!(!debug.contains(secret.to_str().unwrap()));
 
         unsafe { lancedb_connect_builder_free(builder) };
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn default_client_config_keeps_sdk_defaults_and_hostname_verification() {
+        let config = unsafe { client_config_from_c(ptr::null()) }.unwrap();
+        let default = lancedb::remote::ClientConfig::default();
+
+        assert_eq!(config.user_agent, default.user_agent);
+        assert!(config.timeout_config.timeout.is_none());
+        assert!(config.retry_config.retries.is_none());
+        assert!(config.extra_headers.is_empty());
+        assert!(config.tls_config.is_none());
+        assert!(lancedb::remote::TlsConfig::default().assert_hostname);
+    }
+
+    #[cfg(feature = "remote")]
+    #[test]
+    fn client_config_keeps_explicit_zero_and_false() {
+        let raw_config = LanceDBClientConfig {
+            set_fields: CLIENT_CONFIG_TIMEOUT
+                | CLIENT_CONFIG_RETRIES
+                | CLIENT_CONFIG_RETRY_STATUSES
+                | CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY
+                | CLIENT_CONFIG_TLS_ASSERT_HOSTNAME,
+            timeout_ms: 0,
+            retries: 0,
+            retry_status_count: 0,
+            blob_request_concurrency: 0,
+            tls_assert_hostname: 0,
+            ..LanceDBClientConfig::default()
+        };
+
+        let config = unsafe { client_config_from_c(&raw_config) }.unwrap();
+
+        assert_eq!(
+            config.timeout_config.timeout,
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(config.retry_config.retries, Some(0));
+        assert_eq!(config.retry_config.statuses, Some(Vec::<u16>::new()));
+        assert_eq!(config.blob_request_concurrency, Some(0));
+        assert!(!config.tls_config.unwrap().assert_hostname);
     }
 
     #[test]
