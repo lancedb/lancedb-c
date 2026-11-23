@@ -30,7 +30,7 @@ VERSION = "0.1.0-preview.1"
 TAG = f"v{VERSION}"
 TAG_OBJECT = "a" * 40
 COMMIT = "b" * 40
-LANCEDB_REVISION = "b5ec7d6af4337106bbb76ec93f2c3075a0609b83"
+LANCEDB_REVISION = "de81c35ba09eee802b2e916800e6d61c75b714e2"
 LANCE_REVISION = "4e5530c0ed83d3978e35d0e585257ddf438b9cf7"
 
 
@@ -47,8 +47,8 @@ def cargo_lock() -> str:
     return (
         block(
             "lancedb",
-            "0.42.0-beta.25",
-            "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.25#"
+            "0.42.0-beta.26",
+            "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.26#"
             + LANCEDB_REVISION,
         )
         + block(
