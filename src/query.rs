@@ -1349,7 +1349,19 @@ pub unsafe extern "C" fn lancedb_fts_query_new_match(
 /// Only representation values are checked here. An empty column list and a
 /// boost count that differs from the column count are rejected by the SDK and
 /// map to `LANCEDB_INVALID_INPUT`; per-column boost values are checked when the
-/// embedded planner runs. Backend details are documented on the C declaration.
+/// embedded planner runs.
+///
+/// Embedded LanceDB rejects a MultiMatch that resolves to ListElement
+/// documents with `LANCEDB_NOT_SUPPORTED`, including single-column and nested
+/// cases. A MemWAL LSM full-text query first requires an unenforced primary
+/// key (`LANCEDB_INVALID_INPUT` when absent), then requires the whole full-text
+/// tree to name one explicit column whose FTS index the write spec maintains
+/// and every resident MemTable carries; a cross-column MultiMatch fails with
+/// `LANCEDB_NOT_SUPPORTED` even with a primary key, and the same check applies
+/// to a hybrid query's full-text leg. Older Enterprise servers
+/// reject AND only at a root Match or MultiMatch; a MultiMatch nested under
+/// Boolean or Boost follows the parent's legacy text projection and can lose
+/// AND. The C declaration has the full backend contract.
 ///
 /// # Safety
 /// - `text` must be a valid null-terminated UTF-8 string

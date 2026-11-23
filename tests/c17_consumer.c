@@ -624,7 +624,9 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   }
   multi_text[0] = 'z';
   multi_columns[0] = "missing";
-  multi_boosts[0] = 0.0F;
+  /* A borrowed boost array would now make planning fail. The finite negative
+   * value makes the successful executions prove the constructor copied it. */
+  multi_boosts[0] = -1.0F;
 
   first = lancedb_query_new(table);
   second = lancedb_query_new(table);

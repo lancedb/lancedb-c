@@ -4422,6 +4422,11 @@ typedef struct {
  * max_expansions (50) and prefix_length (0) apply to every leaf; each leaf has
  * its own max_expansions budget.
  *
+ * Embedded LanceDB rejects a MultiMatch that resolves to ListElement documents
+ * with LANCEDB_NOT_SUPPORTED, including a single-column or nested MultiMatch.
+ * That is an embedded dataset-scanner check and is separate from the MemWAL
+ * routing limits below.
+ *
  * The constructor validates representation only and leaves semantics to the
  * SDK. A nonzero boost count that differs from the column count fails here with
  * LANCEDB_INVALID_INPUT. Boost values are not checked here: the embedded
@@ -4444,19 +4449,27 @@ typedef struct {
  * every leaf, so ordered columns, per-column boosts and the shared operator
  * are preserved. A non-finite boost stays an explicit JSON null in that
  * request; the client does not reject it and the server determines the
- * outcome. Older Enterprise servers reject AND because the pinned client
- * treats any AND leaf as requiring server version 0.3.0, returning
- * LANCEDB_NOT_SUPPORTED locally. With OR, an older server receives the shared
- * text and the union of the columns, so membership is preserved but every
- * per-column boost is dropped and the server applies its default.
+ * outcome. Older Enterprise servers reject AND only for a root Match or
+ * MultiMatch, including a hybrid query's full-text leg, with
+ * LANCEDB_NOT_SUPPORTED. A MultiMatch nested under Boolean or Boost is not
+ * inspected by that check; it follows the parent's legacy text projection,
+ * which can lose the AND constraint. For example, a Boost whose positive leg
+ * is an AND MultiMatch sends the positive leg's shared text over the union of
+ * the columns, so the server can treat it as OR. With a root OR MultiMatch, an
+ * older server receives the shared text and the union of the columns, so
+ * membership is preserved but every per-column boost is dropped and the
+ * server applies its default.
  *
- * A MemWAL LSM query whose leaves all name one column follows the
- * single-column path and does not require a primary key. A query spanning
- * several columns is planned as one independent search per leaf, unioned and
- * collapsed to the best score per primary key; without a primary key it fails
- * with LANCEDB_NOT_SUPPORTED. That cross-column path supports row documents
- * only; a query resolved to list elements fails with LANCEDB_NOT_SUPPORTED.
- * Every leaf keeps its own max_expansions budget.
+ * A MemWAL LSM full-text query first checks the table's unenforced primary
+ * key, and a table without one fails with LANCEDB_INVALID_INPUT before FTS
+ * planning. The pinned SDK then requires the whole full-text tree to name
+ * exactly one explicit column, and that column's FTS index must be maintained
+ * by the write spec and carried by every resident MemTable; otherwise the
+ * query fails with LANCEDB_NOT_SUPPORTED. A MultiMatch spanning several
+ * columns fails that check even when the table has a primary key, before
+ * Lance's lower-level cross-column path is reached. The same single-column
+ * check applies to a hybrid query's full-text leg. Every leaf keeps its own
+ * max_expansions budget.
  *
  * On entry `*query_out` and the error message are cleared. On success
  * `*query_out` owns a handle that the caller frees with
