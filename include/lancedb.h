@@ -172,10 +172,11 @@ typedef struct LanceDBExpr LanceDBExpr;
 /**
  * Opaque handle to a structured full-text query
  *
- * Create with lancedb_fts_query_new_match() or
- * lancedb_fts_query_new_phrase() and free with lancedb_fts_query_free().
- * Builders clone the handle's query when it is set, so one handle can be
- * attached to several builders and freed immediately after the setters return.
+ * Create with lancedb_fts_query_new_match(), lancedb_fts_query_new_phrase(),
+ * lancedb_fts_query_new_boolean() or lancedb_fts_query_new_boost() and free
+ * with lancedb_fts_query_free(). Builders clone the handle's query when it is
+ * set, so one handle can be attached to several builders and freed immediately
+ * after the setters return.
  */
 typedef struct LanceDBFtsQuery LanceDBFtsQuery;
 
@@ -4440,6 +4441,174 @@ LanceDBError lancedb_fts_query_new_phrase(
 );
 
 /**
+ * Occurrence of one clause in lancedb_fts_query_new_boolean()
+ *
+ * LANCEDB_FTS_OCCUR_MUST clauses must all match and their scores are summed.
+ * LANCEDB_FTS_OCCUR_SHOULD clauses are optional when at least one MUST clause
+ * exists and add their score when they match; without MUST clauses, at least
+ * one SHOULD clause must match and the matching SHOULD scores are summed.
+ * LANCEDB_FTS_OCCUR_MUST_NOT clauses exclude matching documents and never
+ * contribute to the score.
+ */
+typedef enum {
+    LANCEDB_FTS_OCCUR_SHOULD = 0,
+    LANCEDB_FTS_OCCUR_MUST = 1,
+    LANCEDB_FTS_OCCUR_MUST_NOT = 2
+} LanceDBFtsOccur;
+
+/**
+ * One clause of lancedb_fts_query_new_boolean()
+ *
+ * `query` is a borrowed handle; the constructor copies its structured query
+ * node, so the caller may reuse or free the child handle after the call
+ * returns. `occur` must be a LanceDBFtsOccur value; any other integer is
+ * rejected by the constructor rather than converted to an SDK occurrence.
+ */
+typedef struct {
+    const LanceDBFtsQuery* query; // Borrowed child query; copied by the constructor
+    LanceDBFtsOccur occur;        // Clause occurrence; out-of-range values are rejected
+} LanceDBFtsClause;
+
+/**
+ * Create a structured Boolean full-text query
+ *
+ * Clauses are a flat borrowed array; Boolean nodes compose without a recursive
+ * C representation, and a child can itself be a Boolean or Boost handle. The
+ * constructor copies each clause's structured query node and occurrence, so
+ * child handles may be reused in several clauses or freed after this call
+ * returns.
+ *
+ * SDK clause semantics apply unchanged. MUST clauses must all match and their
+ * scores are summed. SHOULD clauses are optional when a MUST clause exists and
+ * add their score when they match; without MUST clauses, at least one SHOULD
+ * must match and the matching SHOULD scores are summed. MUST_NOT clauses
+ * exclude matching documents and never contribute score. An empty Boolean
+ * query, and a query whose only clauses are MUST_NOT, construct successfully
+ * but fail when the query is executed with LANCEDB_INVALID_INPUT: the SDK
+ * requires at least one leaf for document-granularity resolution and at least
+ * one SHOULD or MUST clause for scoring. This constructor does not impose
+ * either requirement early.
+ *
+ * A successful construction can still be limited by the selected backend.
+ * Embedded LanceDB evaluates the clauses directly, including across several
+ * text columns, and resolves a NULL or empty child column against the indexed
+ * text columns.
+ *
+ * A namespace QueryTable pushdown sends Boolean and Boost roots as structured
+ * nodes rather than text. Child Match options are narrowed to the namespace
+ * model's signed 32-bit fields, so a fuzziness, max_expansions or
+ * prefix_length above INT32_MAX fails the pushdown with
+ * LANCEDB_INVALID_INPUT. Non-finite boost or multiplier values are serialized
+ * as JSON null and reach the server unset instead of being rejected locally.
+ *
+ * A MemWAL LSM query requires every clause to name the same explicit text
+ * column: the union of the child columns must contain exactly one column whose
+ * FTS index is maintained by the write spec and carried by every resident
+ * MemTable. A query with no named column or with several columns fails with
+ * LANCEDB_NOT_SUPPORTED, and a query in which only some clauses name the
+ * column fails the LSM scanner's column check with LANCEDB_INVALID_INPUT.
+ * Each Match leaf keeps its own max_expansions budget, which the pinned MemWAL
+ * path applies separately to the base table, each SSTable and each in-memory
+ * source.
+ *
+ * LanceDB Enterprise servers 0.3.0 and later receive the structured Boolean
+ * node. Older servers receive a degraded projection: the union of the child
+ * columns and an empty text query, because the SDK's flat query string for a
+ * Boolean node is empty. The SDK does not reject this locally, so an older
+ * server cannot execute the intended Boolean semantics.
+ *
+ * On entry `*query_out` and the error message are cleared. On success
+ * `*query_out` owns a handle that the caller frees with
+ * lancedb_fts_query_free(). On failure `*query_out` stays NULL and the error is
+ * LANCEDB_INVALID_ARGUMENT for a missing output pointer, a NULL clause array
+ * with a nonzero count, a NULL child handle, or an occurrence outside
+ * LanceDBFtsOccur.
+ *
+ * @param clauses - array of borrowed clauses, or NULL when num_clauses is 0
+ * @param num_clauses - number of clauses in the array
+ * @param query_out - pointer to receive the structured full-text query
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_new_boolean(
+    const LanceDBFtsClause* clauses,
+    size_t num_clauses,
+    LanceDBFtsQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Create a structured Boost full-text query
+ *
+ * `positive` and `negative` are required borrowed handles; the constructor
+ * copies each handle's structured query node, so the caller may reuse or free
+ * the handles after this call returns. `negative_boost` may be NULL, which
+ * passes "unset" to the SDK constructor so the SDK supplies its default of
+ * 0.5. A pointed-to value is forwarded unchanged; the SDK requires a finite,
+ * non-negative multiplier when the query is planned and otherwise fails with
+ * LANCEDB_INVALID_INPUT.
+ *
+ * The positive query drives iteration: only documents matching it appear. When
+ * the negative query also matches a document, its score times the multiplier
+ * is subtracted from the positive score; otherwise the positive score is
+ * returned unchanged. Boost is a positive gate plus a demotion, not a
+ * disjunction.
+ *
+ * A successful construction can still be limited by the selected backend.
+ * Embedded LanceDB evaluates the node directly, including across columns, and
+ * resolves NULL or empty child columns against the indexed text columns.
+ *
+ * A namespace QueryTable pushdown sends Boolean and Boost roots as structured
+ * nodes rather than text. Child Match options are narrowed to the namespace
+ * model's signed 32-bit fields, so a fuzziness, max_expansions or
+ * prefix_length above INT32_MAX fails the pushdown with
+ * LANCEDB_INVALID_INPUT. Non-finite boost or multiplier values are serialized
+ * as JSON null and reach the server unset instead of being rejected locally.
+ *
+ * A MemWAL LSM query requires both legs to name the same explicit text
+ * column: the union of the leg columns must contain exactly one column whose
+ * FTS index is maintained by the write spec and carried by every resident
+ * MemTable. A query with no named column or with several columns fails with
+ * LANCEDB_NOT_SUPPORTED, and a query in which only one leg names the column
+ * fails the LSM scanner's column check with LANCEDB_INVALID_INPUT. Each Match
+ * leaf keeps its own max_expansions budget, which the pinned MemWAL path
+ * applies separately to the base table, each SSTable and each in-memory
+ * source.
+ *
+ * LanceDB Enterprise servers 0.3.0 and later receive the structured Boost
+ * node. Older servers receive a degraded projection: the SDK's flat query
+ * string of the positive leg (empty for a Boolean positive) searched over the
+ * union of both legs' columns, so the negative leg and the multiplier are
+ * silently dropped. The SDK does not reject this locally.
+ *
+ * On entry `*query_out` and the error message are cleared. On success
+ * `*query_out` owns a handle that the caller frees with
+ * lancedb_fts_query_free(). On failure `*query_out` stays NULL and the error is
+ * LANCEDB_INVALID_ARGUMENT for a missing output pointer or a NULL positive or
+ * negative handle.
+ *
+ * @param positive - required borrowed handle matching the scored documents
+ * @param negative - required borrowed handle demoting documents it matches
+ * @param negative_boost - multiplier, or NULL for the SDK default of 0.5
+ * @param query_out - pointer to receive the structured full-text query
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_new_boost(
+    const LanceDBFtsQuery* positive,
+    const LanceDBFtsQuery* negative,
+    const float* negative_boost,
+    LanceDBFtsQuery** query_out,
+    char** error_message
+);
+
+/**
  * Free a structured full-text query
  *
  * @param query - pointer to LanceDBFtsQuery, or NULL
@@ -4798,8 +4967,10 @@ LanceDBError lancedb_vector_query_full_text_search(
  * stays unchanged.
  *
  * The SDK's default RRF reranker applies when no reranker is set explicitly.
- * Match and phrase evaluation, including backend limitations, are described on
- * lancedb_fts_query_new_match() and lancedb_fts_query_new_phrase().
+ * Match, phrase, Boolean and Boost evaluation, including backend limitations,
+ * are described on lancedb_fts_query_new_match(),
+ * lancedb_fts_query_new_phrase(), lancedb_fts_query_new_boolean() and
+ * lancedb_fts_query_new_boost().
  *
  * If the vector leg returns batch results with `query_index` and the full-text
  * leg returns matches, the pinned SDK beta.26 RRF merge fails with an Arrow

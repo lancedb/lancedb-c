@@ -175,6 +175,9 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   int result = 0;
   char* error_message = NULL;
   LanceDBFtsQuery* fts_query = NULL;
+  LanceDBFtsQuery* alpha = NULL;
+  LanceDBFtsQuery* gamma = NULL;
+  LanceDBFtsQuery* beta = NULL;
   LanceDBVectorQuery* typed = NULL;
   LanceDBQuery* first = NULL;
   LanceDBQuery* second = NULL;
@@ -513,6 +516,205 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   lancedb_free_string(error_message);
   error_message = NULL;
 
+  /* Boolean composition borrows its clause handles and copies each child query
+   * node, so the children can be freed before the parent is attached. MUST
+   * alpha gates membership to the alpha row, SHOULD beta is optional beside
+   * it, and MUST_NOT gamma removes the row that names gamma. */
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", NULL, &alpha, &error_message) != LANCEDB_SUCCESS ||
+      alpha == NULL || error_message != NULL ||
+      lancedb_fts_query_new_match(
+          "gamma", "text", NULL, &gamma, &error_message) != LANCEDB_SUCCESS ||
+      gamma == NULL || error_message != NULL ||
+      lancedb_fts_query_new_match(
+          "beta", "text", NULL, &beta, &error_message) != LANCEDB_SUCCESS ||
+      beta == NULL || error_message != NULL) {
+    result = fail("creating the C17 Boolean child matches failed");
+    goto cleanup;
+  }
+
+  const LanceDBFtsClause boolean_clauses[] = {
+      {.query = alpha, .occur = LANCEDB_FTS_OCCUR_MUST},
+      {.query = beta, .occur = LANCEDB_FTS_OCCUR_SHOULD},
+      {.query = gamma, .occur = LANCEDB_FTS_OCCUR_MUST_NOT}};
+  if (lancedb_fts_query_new_boolean(
+          boolean_clauses, 3, &fts_query, &error_message) != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 Boolean query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(alpha);
+  alpha = NULL;
+  lancedb_fts_query_free(gamma);
+  gamma = NULL;
+  lancedb_fts_query_free(beta);
+  beta = NULL;
+
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 Boolean query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the C17 Boolean query returned the wrong row count");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* Boost requires both legs; a NULL multiplier uses the SDK default. The
+   * positive leg gates membership to the alpha row even though the negative
+   * beta leg also matches it to demote its score. */
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", NULL, &alpha, &error_message) != LANCEDB_SUCCESS ||
+      alpha == NULL || error_message != NULL ||
+      lancedb_fts_query_new_match(
+          "beta", "text", NULL, &beta, &error_message) != LANCEDB_SUCCESS ||
+      beta == NULL || error_message != NULL ||
+      lancedb_fts_query_new_boost(
+          alpha, beta, NULL, &fts_query, &error_message) != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 default Boost query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(alpha);
+  alpha = NULL;
+  lancedb_fts_query_free(beta);
+  beta = NULL;
+
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 Boost query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the C17 Boost positive leg did not drive membership");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* An empty Boolean constructs but the SDK rejects it when planned: the
+   * query has no leaf for granularity resolution. */
+  if (lancedb_fts_query_new_boolean(
+          NULL, 0, &fts_query, &error_message) != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 empty Boolean failed");
+    goto cleanup;
+  }
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 empty Boolean failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  {
+    LanceDBQueryResult* failed_result = NULL;
+    error_message = NULL;
+    if (lancedb_query_execute_with_status(first, &failed_result, &error_message)
+            != LANCEDB_INVALID_INPUT ||
+        failed_result != NULL || error_message == NULL) {
+      first = NULL;
+      lancedb_free_string(error_message);
+      lancedb_query_result_free(failed_result);
+      result = fail("the C17 empty Boolean must fail with INVALID_INPUT");
+      goto cleanup;
+    }
+    first = NULL;
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+
+  /* Invalid representation values are rejected at construction, clear the
+   * output handle, and leave the borrowed child usable. */
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", NULL, &alpha, &error_message) != LANCEDB_SUCCESS ||
+      alpha == NULL || error_message != NULL) {
+    result = fail("creating the C17 invalid-input sentinel failed");
+    goto cleanup;
+  }
+  {
+    const LanceDBFtsClause invalid_clause = {
+        .query = alpha, .occur = (LanceDBFtsOccur)3};
+    if (lancedb_fts_query_new_boolean(
+            &invalid_clause, 1, &fts_query, &error_message)
+            != LANCEDB_INVALID_ARGUMENT ||
+        fts_query != NULL || error_message == NULL) {
+      result = fail("an out-of-range C17 Boolean occurrence must be rejected");
+      goto cleanup;
+    }
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+  {
+    const LanceDBFtsClause null_clause = {
+        .query = NULL, .occur = LANCEDB_FTS_OCCUR_MUST};
+    if (lancedb_fts_query_new_boolean(
+            &null_clause, 1, &fts_query, &error_message)
+            != LANCEDB_INVALID_ARGUMENT ||
+        fts_query != NULL || error_message == NULL) {
+      result = fail("a NULL C17 Boolean child must be rejected");
+      goto cleanup;
+    }
+    lancedb_free_string(error_message);
+    error_message = NULL;
+  }
+  if (lancedb_fts_query_new_boolean(
+          NULL, 1, &fts_query, &error_message) != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("a NULL C17 Boolean clause array must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  if (lancedb_fts_query_new_boost(
+          NULL, alpha, NULL, &fts_query, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("a NULL C17 Boost positive must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  if (lancedb_fts_query_new_boost(
+          alpha, NULL, NULL, &fts_query, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("a NULL C17 Boost negative must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
+  {
+    const LanceDBFtsClause clause = {
+        .query = alpha, .occur = LANCEDB_FTS_OCCUR_MUST};
+    if (lancedb_fts_query_new_boolean(
+            &clause, 1, &fts_query, &error_message) != LANCEDB_SUCCESS ||
+        fts_query == NULL || error_message != NULL) {
+      result = fail("reusing the C17 child after rejected constructors failed");
+      goto cleanup;
+    }
+    lancedb_fts_query_free(fts_query);
+    fts_query = NULL;
+  }
+  lancedb_fts_query_free(alpha);
+  alpha = NULL;
+
   /* Typed query vectors are borrowed for the constructor and add call and
    * copied before those calls return. The phrase table has no vector column,
    * so this checks the ABI and ownership path without executing the query. */
@@ -565,6 +767,9 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
 cleanup:
   lancedb_free_string(error_message);
   lancedb_fts_query_free(fts_query);
+  lancedb_fts_query_free(alpha);
+  lancedb_fts_query_free(gamma);
+  lancedb_fts_query_free(beta);
   lancedb_vector_query_free(typed);
   lancedb_query_free(first);
   lancedb_query_free(second);
