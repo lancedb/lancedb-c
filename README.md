@@ -1,46 +1,143 @@
-# LanceDB C Bindings
+# LanceDB C bindings
 
-This repository contains comprehensive C FFI bindings for LanceDB, allowing you to use all LanceDB functionality from C and C++ applications.
+[![CI](https://github.com/lancedb/lancedb-c/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lancedb/lancedb-c/actions/workflows/ci.yml)
+[![Documentation](https://github.com/lancedb/lancedb-c/actions/workflows/docs.yml/badge.svg?branch=main)](https://lancedb.github.io/lancedb-c/)
+[![Release](https://img.shields.io/github/v/release/lancedb/lancedb-c?include_prereleases&label=release)](https://github.com/lancedb/lancedb-c/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Project Structure
+C17 FFI bindings for [LanceDB](https://github.com/lancedb/lancedb), usable from
+C, C++, and other languages through the C ABI. The public header includes the
+Arrow C Data and C Stream structures it needs, so a C program does not need the
+Arrow C++ library, Rust, or CMake to use a prebuilt package.
 
+> **Status:** pre-1.0 preview releases (`v0.1.0-preview.*`). The C binding has
+> its own version line, independent of the pinned `lancedb` Rust crate. Before
+> 1.0 the C ABI may change; recompile C and C++ callers against the published
+> header. See [Versioning and ABI](docs/versioning.rst).
+
+Capabilities include embedded/local and remote/cloud connections, Arrow C Data
+Interface and Arrow IPC interchange, vector, full-text and hybrid search, scalar
+and vector indexes, CRUD and merge-insert, branches and history, and table
+optimization. Cloud storage and compile-time feature flags are covered in
+[Cloud storage and native features](docs/cloud-storage.rst).
+
+## Supported platforms
+
+The release workflow builds and tests five native targets:
+
+| Platform | Release archive suffix | Notes |
+| --- | --- | --- |
+| Linux x86_64 | `linux-amd64` | glibc 2.35 or newer |
+| Linux arm64 | `linux-arm64` | glibc 2.35 or newer |
+| macOS arm64 | `darwin-arm64` | Apple Silicon only; Intel macOS is not supported |
+| Windows x86_64 | `windows-amd64` | MSVC import library is `lancedb.dll.lib` |
+| Windows arm64 | `windows-arm64` | MSVC import library is `lancedb.dll.lib` |
+
+Linux packages are built on Ubuntu 22.04. The Windows packages use MSVC; the
+import library name matters, see [Windows (MSVC)](#windows-msvc).
+
+## Requirements
+
+### Using a prebuilt package
+
+- A C17 compiler, or a C++ compiler for C++ callers.
+- No Rust toolchain, CMake, or Apache Arrow C++ installation is required. The
+  public header defines the Arrow C ABI structures used by the C entry points.
+
+### Building from source
+
+- Rust 1.95.0 or newer (`rustc` and `cargo`; the minimum declared by the locked
+  dependency graph).
+- CMake 3.22 or later.
+- A C and C++ compiler. CMake enables both languages even when examples and
+  tests are off.
+- A Protocol Buffers compiler (`protoc`) for the pinned Lance build.
+- `pkg-config` only if you want to consume the installed `.pc` file.
+- Apache Arrow C++ development headers and libraries, plus C++20, only for the
+  examples and tests.
+
+## Install a prebuilt package
+
+Download an archive and its sibling `.sha256` file from
+[GitHub Releases](https://github.com/lancedb/lancedb-c/releases), verify the
+checksum, and extract it. For example, for the public
+`v0.1.0-preview.2` Linux x86_64 package:
+
+```bash
+tag=v0.1.0-preview.2
+archive=lancedb-c-250aa95153848c6fc6f4af571af70e979fb89ce3-linux-amd64.tar.gz
+base="https://github.com/lancedb/lancedb-c/releases/download/${tag}"
+
+curl -fLO "${base}/${archive}"
+curl -fLO "${base}/${archive}.sha256"
+sha256sum -c "${archive}.sha256"
+tar -xzf "${archive}"
+root="${PWD}/${archive%.tar.gz}"
 ```
-├── src/                    # Rust FFI implementation
-├── include/
-│   └── lancedb.h           # Public C17 header with Arrow C ABI types
-├── examples/               # C17 and C++ examples
-├── tests/                  # Catch2 suites and C17 consumers
-├── docs/                   # Sphinx documentation and API group pages
-├── .github/                # CI, packaging, and release workflows
-├── Cargo.toml              # Rust crate configuration
-├── CMakeLists.txt          # CMake build, install, and check targets
-└── README.md               # This file
+
+On macOS use `shasum -a 256 -c "${archive}.sha256"` instead of `sha256sum`.
+Substitute the current release tag and archive name from the Releases page; the
+archive name contains the packaged commit and the platform suffix from the
+table above. The release also publishes a combined `SHA256SUMS` and an internal
+`SHA256SUMS` inside each archive.
+
+The extracted package contains:
+
+```text
+lancedb-c-<commit>-<target>/
+├── LICENSE
+├── include/lancedb.h
+├── lib/liblancedb.so        # Linux linker name
+├── lib/liblancedb.so.0.1    # Linux SONAME
+├── manifest.json
+└── SHA256SUMS
 ```
 
-## Building
+macOS uses `lib/liblancedb.dylib`; Windows uses `lib/lancedb.dll` and
+`lib/lancedb.dll.lib`. The manifest records the version, commit, target and
+package-relative paths.
 
-### Prerequisites
+The `v0.1.0-preview.2` archives do not contain a CMake package config or a
+pkg-config file. Use the `-I`/`-L` commands below for that archive. A current
+source build installs both, as described in
+[Build and install from source](#build-and-install-from-source).
 
-Building the library requires:
+### Linux and macOS
 
-- Rust 1.95.0 or newer (`rustc` and `cargo`; the minimum declared by the locked dependency graph)
-- CMake 3.22 or later
-- A C and C++ compiler (CMake enables both languages even when examples are off)
-- A Protocol Buffers compiler (`protoc`) for the pinned Lance build
-- A C17 compiler for code that includes `include/lancedb.h`; this can be the same C compiler
+Compile the C17 example against the extracted `include/` and `lib/`:
 
-Building and running the C++ examples and tests additionally requires:
+```bash
+cc -std=c17 -Wall -Wextra -Werror -pedantic examples/hello.c \
+  -I"$root/include" -L"$root/lib" -llancedb \
+  -Wl,-rpath,"$root/lib" -o hello
+./hello ./example-db
+```
 
-- C++20 support in that compiler (gcc, clang, or MSVC)
-- Apache Arrow C++ development headers and libraries
-- pkg-config for the manual example command below
-- Boost coroutine and context only for the optional Asio example
+`-Wl,-rpath` records the package library directory in the executable. Without
+it, set `LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS before
+running. The macOS dylib uses an `@rpath/liblancedb.dylib` install name, so the
+same `-rpath` form works for a package extracted anywhere.
 
-A program that only uses the C API needs the header and the shared library. It
-does not need the Arrow C++ library: `lancedb.h` defines the Arrow C Data and
-C Stream structures it uses.
+### Windows (MSVC)
 
-### Quick Start
+Run this from an MSVC developer shell. The import library is
+`lancedb.dll.lib`; `-llancedb` does not select it under MSVC.
+
+```bat
+set root=%CD%\lancedb-c-<commit>-<target>
+cl /nologo /std:c17 /W4 /I"%root%\include" examples\hello.c ^
+  /Fe:hello.exe /link /LIBPATH:"%root%\lib" lancedb.dll.lib
+copy "%root%\lib\lancedb.dll" .
+hello.exe .\example-db
+```
+
+The loader must find `lancedb.dll` at runtime. Copy it next to the executable
+(as above) or add `%root%\lib` to `PATH`. A CMake consumer of an installed
+source build links the installed `lancedb::lancedb` target instead; the target
+links `lancedb.dll.lib` from the installation `lib` directory and expects the
+DLL in the installation `bin` directory.
+
+## Build and install from source
 
 Build the shared library:
 
@@ -49,410 +146,237 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-`BUILD_EXAMPLES` and `BUILD_TESTS` default to `OFF`, so the library build does
-not require Apache Arrow C++. To build the C++ examples as well:
+`BUILD_SHARED_LIBS` defaults to `ON`. For a static library:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+cmake --build build
+```
+
+Install into a prefix. `GNUInstallDirs` controls the layout, so the library,
+header, pkg-config file and CMake package follow `CMAKE_INSTALL_LIBDIR` and
+`CMAKE_INSTALL_INCLUDEDIR`:
+
+```bash
+cmake --install build --prefix "$PWD/install"
+```
+
+The current source install contains a relocatable CMake package and
+`lancedb.pc`. The CMake package is under
+`${CMAKE_INSTALL_LIBDIR}/cmake/lancedb`; pkg-config is under
+`${CMAKE_INSTALL_LIBDIR}/pkgconfig`.
+
+### CMake consumer
+
+```cmake
+cmake_minimum_required(VERSION 3.22)
+project(my_app C)
+
+find_package(lancedb CONFIG REQUIRED)
+add_executable(my_app main.c)
+target_link_libraries(my_app PRIVATE lancedb::lancedb)
+```
+
+Point CMake at the prefix with `-DCMAKE_PREFIX_PATH="$PWD/install"` or
+`-Dlancedb_DIR="$PWD/install/lib/cmake/lancedb"`. Use unversioned discovery for
+preview packages: CMake cannot express a
+prerelease in a version request, so `find_package(lancedb 0.1.0)` is rejected
+for `0.1.0-preview.*`. The imported target handles include and link paths, but
+not the runtime loader path. On Unix, install into a loader path, set an RPATH
+in the consumer, or set `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` at runtime. On
+Windows, the DLL is in the installation `bin` directory; copy it next to the
+executable or add `bin` to `PATH`.
+
+### pkg-config consumer
+
+```bash
+export PKG_CONFIG_PATH="$PWD/install/lib/pkgconfig"
+cc -std=c17 -Wall -Wextra -Werror -pedantic main.c \
+  $(pkg-config --cflags --libs lancedb) \
+  -Wl,-rpath,"$(pkg-config --variable=libdir lancedb)" -o my_app
+```
+
+If the install used `lib64`, point `PKG_CONFIG_PATH` at
+`$PWD/install/lib64/pkgconfig` and use the same `pkg-config` commands. For a
+static install, add `--static` so `Libs.private` supplies the native link
+dependencies.
+
+## Minimal C17 program
+
+The complete program is [`examples/hello.c`](examples/hello.c). It includes only
+`<lancedb.h>`, connects to a local database, prints the runtime version, and
+frees every handle:
+
+```c
+#include <lancedb.h>
+
+#include <stdio.h>
+
+int main(int argc, char** argv) {
+  const char* uri = argc > 1 ? argv[1] : "./lancedb-c-example-db";
+
+  printf("lancedb-c %s\n", lancedb_version());
+
+  LanceDBConnectBuilder* builder = lancedb_connect(uri);
+  if (builder == NULL) {
+    fprintf(stderr, "failed to create a connection builder for %s\n", uri);
+    return 1;
+  }
+
+  LanceDBConnection* connection = NULL;
+  char* error_message = NULL;
+  const LanceDBError status =
+      lancedb_connect_builder_execute(builder, &connection, &error_message);
+  if (status != LANCEDB_SUCCESS) {
+    fprintf(stderr, "connect failed: %s\n",
+            error_message != NULL ? error_message
+                                  : lancedb_error_to_message(status));
+    lancedb_free_string(error_message);
+    return 1;
+  }
+
+  printf("connected to %s\n", lancedb_connection_uri(connection));
+  lancedb_connection_free(connection);
+  return 0;
+}
+```
+
+With the prebuilt package from above, compile and run it with the
+[Linux and macOS](#linux-and-macos) command. With a source install, use:
+
+```bash
+cc -std=c17 -Wall -Wextra -Werror -pedantic examples/hello.c \
+  $(pkg-config --cflags --libs lancedb) \
+  -Wl,-rpath,"$(pkg-config --variable=libdir lancedb)" -o hello
+./hello ./example-db
+```
+
+The same file is compiled by the `check-c17` CMake target against the generated
+header. That target also compiles the strict C17 consumer against both the
+generated and checked-in header.
+
+## C++ and Apache Arrow
+
+[`examples/simple.cpp`](examples/simple.cpp) is a complete C++20 program that
+creates a table with a fixed-size-list vector column, inserts rows through the
+Arrow C Data Interface, creates an IVF_FLAT vector index, and runs a nearest
+neighbor search. Build the examples with Arrow C++ installed:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON
 cmake --build build
 ./build/simple
-./build/full
-./build/s3
 ```
 
-Those paths are for Unix single-config generators such as Makefiles or Ninja.
-With Visual Studio or Xcode, build with
-`cmake --build build --config Release` and run the executables from
-`build/Release`. On Windows the build-tree DLL stays in
-`build/target/release`; add that directory to `PATH` before running. CMake sets
-the build-tree RPATH on Unix only; installed consumers still need the loader
-setup described below.
-
-The Boost.Asio coroutine example is optional because it needs Boost. Enable it
-with `-DBUILD_ASIO_COROUTINE_EXAMPLE=ON` in addition to `-DBUILD_EXAMPLES=ON`.
-
-### Installing and downstream discovery
-
-Install into a prefix of your choice. `GNUInstallDirs` controls the layout, so
-the library, header, pkg-config file and CMake package all follow
-`CMAKE_INSTALL_LIBDIR` and `CMAKE_INSTALL_INCLUDEDIR`:
+With a multi-config generator such as Visual Studio or Xcode, build with
+`cmake --build build --config Release` and run from the configuration
+subdirectory. On Windows the build-tree DLL stays in `build/target/release`; add
+that directory to `PATH` before running an example. The Boost.Asio coroutine
+example is optional:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/opt/lancedb -DCMAKE_INSTALL_LIBDIR=lib64
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON \
+  -DBUILD_ASIO_COROUTINE_EXAMPLE=ON
 cmake --build build
-cmake --install build
 ```
 
-A CMake consumer then uses the installed `lancedb::lancedb` target:
-
-```cmake
-find_package(lancedb CONFIG REQUIRED)
-target_link_libraries(my_app PRIVATE lancedb::lancedb)
-```
-
-CMake cannot express a prerelease in a version request, so a numeric
-requirement such as `find_package(lancedb 0.1.0)` is rejected for a preview
-package. Use unversioned discovery for previews.
-
-The imported target handles compile and link paths; it does not add an install
-RPATH to the consuming executable. On Unix, install into a loader path, set an
-RPATH in the consumer, or set `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` at runtime.
-On Windows, the target links `lancedb.dll.lib` from the installation `lib`
-directory, but the loader still has to find `lancedb.dll` in the installation
-`bin` directory. Copy the DLL next to the executable or add that `bin` directory
-to `PATH` before running.
-
-The package config and version file are installed under
-`${CMAKE_INSTALL_LIBDIR}/cmake/lancedb` and use paths relative to the installed
-prefix. For Unix-like and GNU-style toolchains, pkg-config works from
-`${CMAKE_INSTALL_LIBDIR}/pkgconfig`:
-
-```bash
-PKG_CONFIG_PATH=/opt/lancedb/lib64/pkgconfig pkg-config --cflags --libs lancedb
-```
-
-MSVC shared consumers should use the `lancedb::lancedb` CMake target. The MSVC
-import library is named `lancedb.dll.lib`, which the conventional `-llancedb`
-pkg-config spelling does not select.
-
-On Linux, CMake shared-library builds from this revision and release packages
-from `v0.1.0-preview.2` onward record a SONAME derived from the binding version:
-before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the major
-version is. The unversioned `liblancedb.so` linker name remains available. The
-published `v0.1.0-preview.1` Linux package predates this and has no SONAME.
-CMake shared-library builds and packages from preview.2 use
-`@rpath/liblancedb.dylib` on macOS. Prebuilt packages from preview.2 keep the
-same metadata and package the unversioned library path used by consumers.
-
-### Minimal C17 program
-
-`examples/hello.c` is a complete C17 program that connects to a local database
-and prints the runtime version. It includes only `lancedb.h`, so it does not
-need the C++ compiler or the Arrow C++ library.
-
-After installing into a prefix as shown above:
-
-```bash
-export PKG_CONFIG_PATH=/opt/lancedb/lib64/pkgconfig
-lancedb_libdir="$(pkg-config --variable=libdir lancedb)"
-cc -std=c17 -Wall -Wextra -Werror examples/hello.c \
-  $(pkg-config --cflags --libs lancedb) \
-  -Wl,-rpath,"$lancedb_libdir" -o hello
-./hello ./example-db
-```
-
-`pkg-config` supplies the link-time `-L` and `-l` flags. The explicit rpath
-lets the loader find the shared library after linking; alternatively set
-`LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS when running the
-program.
-
-A CMake consumer can build the same file as C17:
-
-```cmake
-cmake_minimum_required(VERSION 3.22)
-project(hello C)
-set(CMAKE_C_STANDARD 17)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-find_package(lancedb CONFIG REQUIRED)
-add_executable(hello hello.c)
-target_link_libraries(hello PRIVATE lancedb::lancedb)
-```
-
-The installed target supplies the include path, library and runtime lookup.
-Use unversioned `find_package` for preview packages.
-
-### Manual Build Process
-
-If you prefer to build manually:
-
-1. **Build the export-controlled shared library:**
-   ```bash
-   cargo rustc --release -- -C linker=./cmake/export-linker.sh
-   ```
-
-   On Windows use `-C linker=.\cmake\export-linker.cmd` from a Visual Studio
-   developer shell. Plain `cargo build` remains the normal path for static,
-   rlib and external-provider development, but it does not apply the
-   shared-library export boundary; CMake, the package workflow and this
-   command are the supported shared build entries.
-
-   The export boundary and paired import-library verification cover Linux ELF,
-   macOS Mach-O and native Windows MSVC shared builds. Windows GNU shared
-   builds and their installed `liblancedb.dll.a` consumers remain supported,
-   but Windows GNU is not a release target and does not use the MSVC export
-   policy.
-
-2. **Compile the C++ simple example with Arrow:**
-   ```bash
-   g++ $(pkg-config --cflags arrow) -std=c++20 -Wall -Wextra -O2 \
-       -I./include \
-       -o examples/simple examples/simple.cpp \
-       -L./target/release -llancedb \
-       $(pkg-config --libs arrow) \
-       -Wl,-rpath,./target/release
-   ```
-
-3. **Run the example:**
-   ```bash
-   ./examples/simple
-   ```
-
-### Cloud Storage and Native Features
-
-`lancedb-c` declares the SDK features it builds against and forwards them, so a
-build states what it asks the SDK for instead of inheriting it. These are
-forwarding declarations: the public header and the error codes are the same for
-every combination, and a feature only changes what the built library can reach.
-
-| C feature | Forwarded to | SDK-side wiring |
-|---|---|---|
-| `remote` | `lancedb/remote` | The `db://` client and the REST namespace |
-| `aws` | `lancedb/aws` | The SDK's AWS support and the `dir-aws` namespace |
-| `gcs` | `lancedb/gcs` | The SDK's GCS support and the `dir-gcp` namespace |
-| `azure` | `lancedb/azure` | The `dir-azure` namespace and Azure namespace credential vending |
-| `dynamodb` | `lancedb/dynamodb` | The DynamoDB commit handler for `s3+ddb://`; implies the SDK's `aws` |
-| `oss` | `lancedb/oss` | The `dir-oss` namespace |
-| `geo` | `lancedb/geo` | Lance's `geo` feature |
-| `fp16kernels` | `lancedb/fp16kernels` | Native f16/bf16 kernels in `lance-linalg` |
-
-Most of these backends are already reachable without the switches. An embedded
-connection opens a generic `dir` namespace whose root is resolved through the
-connection's object-store registry, and the direct `lance` and `lance-io`
-dependencies enable the Lance-side providers for S3, GCS, Azure, OSS, COS, TOS,
-GooseFS and Hugging Face as well as Lance's `geo`. What the forwarding changes is
-the SDK's own side of that wiring: the `dir-aws`/`dir-gcp`/`dir-azure`
-implementations, the SDK's `object_store` edges, Azure namespace credential
-vending and the DynamoDB commit handler. The last two are the capabilities a
-default build did not have before, and the `s3+ddb://` commit path with them.
-
-On the default S3 backend and the DynamoDB commit handler, `aws_profile` is a
-storage option that selects the AWS shared profile per store, so one process
-can open connections under different profiles without changing `AWS_PROFILE`:
-
-```c
-LanceDBConnectBuilder* builder = lancedb_connect("s3+ddb://bucket/db?ddbTableName=commits");
-builder = lancedb_connect_builder_storage_option(builder, "aws_profile", "analytics");
-builder = lancedb_connect_builder_storage_option(builder, "aws_region", "eu-west-1");
-```
-
-On those two paths the option takes effect from LanceDB SDK `v0.42.0-beta.22`
-with its Lance `v15.0.0-beta.26`. A build pinned to the earlier
-`v0.42.0-beta.21`/`v15.0.0-beta.25` pair ignores `aws_profile` there and keeps
-both on the ambient chains; `Cargo.toml` records which pair a source build
-uses. The `v0.1.0-preview.1` release predates the `dynamodb` forwarding and the
-profile routing: it was built without the `dynamodb` feature, so `s3+ddb://` is
-unavailable there.
-
-`aws_region` is the explicit region and wins over both the environment and the
-profile. Without it, the default S3 backend takes `AWS_REGION` when it is set
-and then falls back to ordinary bucket-region discovery. Custom S3 endpoints
-and the DynamoDB client instead use the SDK-resolved region, or the applicable
-default chain. An explicit `aws_profile` still follows the AWS SDK's environment
-precedence: `AWS_REGION` and the standard credential variables take precedence
-over the profile's own region and keys.
-
-The default set is `remote,aws,gcs,azure,dynamodb`, and packages built from
-this revision with the default flags contain it. `oss`, `geo` and
-`fp16kernels` are opt-in for source builds:
-
-```bash
-cargo rustc --release --locked -p lancedb-c -- -C linker=./cmake/export-linker.sh
-cargo rustc --release --locked -p lancedb-c --features geo,fp16kernels -- -C linker=./cmake/export-linker.sh
-cargo rustc --release --locked -p lancedb-c --no-default-features --features remote,gcs -- -C linker=./cmake/export-linker.sh
-```
-
-Feature selection applies to the packages Cargo selects. A workspace build also
-selects `examples/external_provider`, which depends on this package with its
-default features, and feature unification then turns those defaults back on even
-when `--no-default-features` was passed. Use `-p lancedb-c` when the narrowing is
-meant to apply to the library.
-
-`--no-default-features` turns off these forwarding declarations only; the Lance
-defaults above still apply, so the Lance-side providers and `geo` remain. Without
-`remote` the library cannot produce `LANCEDB_HTTP` or `LANCEDB_RETRY`, because
-the SDK does not define those error variants; both codes keep their values for
-source compatibility.
-
-`geo` is what builds an RTree index natively; the C index-type enumeration has
-no RTree entry yet, so enabling `geo` alone does not expose that index type to C
-callers.
-
-`fp16kernels` compiles C kernels with the `cc` crate, per target:
-
-- Windows: no kernels. The Lance build script warns and skips them.
-- arm64: NEON only (`-march=armv8.2-a+fp16` on Linux, Apple Silicon tuning on
-  macOS).
-- Non-Windows x86_64: AVX2 always, plus AVX-512 and AMX-FP16 when the compiler
-  supports them. The AVX2 object needs `_Float16`, so the compiler baseline is
-  Clang 6 or GCC 12 and newer. GCC 11 rejects the AVX2 object with `'_Float16'
-  is not supported on this target` and does not know `-mavx512fp16`. Point `CC`
-  at a supported compiler when the default is older, for example
-  `CC=clang cargo rustc --release --locked -p lancedb-c --features fp16kernels -- -C linker=./cmake/export-linker.sh`.
-
-## Prebuilt Shared-Library Packages
-
-The `Shared Library Packages` workflow builds and tests five native targets:
-`linux-amd64`, `linux-arm64`, `darwin-arm64` (Apple Silicon), `windows-amd64`
-and `windows-arm64`. macOS packages are Apple Silicon only; Intel macOS is not
-supported. The workflow runs for `v*` release tags and on explicit dispatch;
-the fast packaging fixture checks still run on pull requests through `CI`.
-Each package is named
-`lancedb-c-<commit>-<target>.tar.gz` and contains the shared library, the
-public header, the license, the Windows import library when the platform needs
-one, and a `manifest.json` describing the paths. A `SHA256SUMS` file covers the
-package contents; the archive has a sibling `.sha256` file.
-
-The shared library exports exactly the functions declared in `include/lancedb.h`.
-Earlier preview packages also exposed incidental symbols from statically linked
-dependencies (CRC, BLAKE3, and AWS-LC jitterentropy). Those were never part of
-the C API and are no longer exported. No documented C function is removed and
-the public header is unchanged; a caller that resolved an implementation symbol
-by name must provide its own copy. The next preview notes should mention this
-export-surface change.
-
-The C binding has its own version line, independent of the Cargo package and
-the pinned SDK. The Cargo package version is fixed at `0.0.0`; the release
-version comes from the Git tag. Pull-request and untagged local builds report
-`0.0.0-dev` in CMake, pkg-config, documentation and `manifest.json`.
-
-The public header exposes `LANCEDB_VERSION_MAJOR`, `LANCEDB_VERSION_MINOR`,
-`LANCEDB_VERSION_PATCH` and `LANCEDB_VERSION_STRING` (`LANCEDB_VERSION` is an
-alias for the string). The checked-in header reports `0.0.0-dev` so it remains
-usable directly without a generated file.
-CMake renders the installed header with the configure-time version, and the
-package builder renders the same block for release archives. `lancedb_version()`
-returns the built version from the loaded library as a static, NUL-terminated
-string owned by the library; the caller must not free it. Header, runtime string
-and package manifest therefore agree for a package built from the same source.
-A direct `cargo build` follows the same `LANCEDB_VERSION` override or exact-tag
-resolution for the runtime string, with `0.0.0-dev` when no tag is present. Use
-the CMake-installed or package-rendered header when a tagged direct Cargo build
-needs compile-time macros that match the runtime; the checked-in header
-deliberately stays at the development default.
-
-Tags use strict SemVer with a `v` prefix. If several valid tags point at the
-same commit, local builds prefer the last stable tag in Git's version sort,
-otherwise the last prerelease; a tag dispatch always uses the explicitly
-selected tag. `v0.0.0-dev` is reserved for the untagged fallback.
-
-To prepare a release, create an annotated or lightweight tag such as
-`v0.1.0-preview.1` on the exact commit and dispatch `Shared Library Packages`
-on that tag. The workflow fetches the tag, requires its peeled commit to be the
-checked-out commit, and uses the tag version for the build, package manifest and
-consumer verification. A tag on a parent or another branch is rejected. CMake
-reads the tag when it configures and records HEAD and tag refs as configure-time
-dependencies, so existing build directories reconfigure when they change. An
-environment override is not a file input; rerun the CMake configuration step
-after changing `LANCEDB_VERSION`. CMake passes its configure-time version to
-the docs target through a private variable, so a different build-time
-`LANCEDB_VERSION` does not change an already configured docs build.
-
-Tag pushes and dispatches without `publish_release` only build the CI
-artifacts. To publish, dispatch on the exact preview tag with the
-`publish_release` Boolean enabled. The workflow waits for all five package jobs,
-re-verifies every archive and checksum against the tag, creates a draft release,
-uploads the five archives, their `.sha256` files and combined `SHA256SUMS`, and
-only then publishes it. It records the tag ref object, peeled commit, locked
-LanceDB and Lance revisions and every archive checksum. Publication is limited
-to preview tags; stable releases remain a manual decision for Xuanwo. A retry
-reuses a draft, and a published release is never replaced.
-
-If an upload is interrupted after GitHub creates an empty `starter` asset, the
-workflow fails closed and names the placeholder. Inspect the exact draft with
-`gh release view <tag> --json databaseId,isDraft,assets`; confirm the named
-asset is the empty `starter` (`size` 0, no digest), then remove only that asset
-with `gh release delete-asset <tag> <name> --yes`. Keep every other draft asset
-and re-dispatch the same exact tag; the workflow uploads only missing assets.
-
-Tag ref reads and release writes are separate GitHub operations. The workflow
-rechecks the exact remote tag before draft writes and again before publication,
-but a tag move in the remaining interval cannot be made atomic from the
-workflow. An atomic guarantee needs a tag ruleset that blocks updates and
-deletions together with release immutability; this repository does not
-currently enable those protections.
-
-The `target` names match Go's `GOOS-GOARCH` spelling and the manifest is the
-contract the future pure-Go loader will consume. Release notes for a published
-preview record the tag ref object and peeled commit, the pinned SDK revision and
-the SHA-256 of each archive.
-
-## Tests
-
-### Prerequisites
-
-- CMake 3.22 or later and a C++20 compiler
-- Apache Arrow C++ development headers and libraries
-- A C17 compiler for `check-c17` and `examples/hello.c`
-- Tests use the Catch2 framework. It is fetched automatically when no suitable package is installed.
-- If valgrind is installed, some tests run under valgrind and fail on memory errors or definite memory leaks.
-
-### Building and Running Tests
-
-1. **Build Tests**
-   ```bash
-   mkdir -p build
-   cd build
-   cmake .. -DBUILD_TESTS=ON
-   make
-   ```
-
-2. **Run Tests**
-   ```bash
-   ctest -j 6
-   ```
-
-### C ABI Declarations
-
-The public header is hand-written and must match the Rust FFI. Generate
-declarations from the Rust source with the pinned `cbindgen` and compare them
-with the header using `clang`:
-
-```bash
-cargo install cbindgen --version =0.29.4 --locked
-ninja -C build check-abi
-```
-
-The check compares the host data model and the Windows MSVC LLP64 model using
-Clang target headers; it does not build a Windows Rust library. It also runs
-temporary signature, layout and enum drift fixtures to show that a mismatch is
-reported with the affected function, argument, struct field or enumerator.
-Native C17 consumers remain platform runtime smoke tests rather than full
-declaration coverage. Native Windows MSVC runs the C17 consumer and the
-package consumer in CI.
-
-## Documentation
-
-The LanceDB C API has comprehensive documentation generated from the header file comments.
-
-### Viewing Documentation Online
-
-The documentation is automatically published to **GitHub Pages** on every push to main:
-- **URL**: https://lancedb.github.io/lancedb-c/
-
-The API reference is generated from the Doxygen groups in `include/lancedb.h` and
-organized by module under `docs/api/`. The public contracts are documented in
-`docs/versioning.rst`, `docs/ownership.rst`, and `docs/threading.rst`.
-
-### Building Documentation Locally
-
-1. **Install documentation tools:**
-   - Install Doxygen (extracts API documentation from `include/lancedb.h`)
-   - Install Sphinx and Breathe (generate HTML documentation):
-   ```bash
-   pip install -r docs/requirements.txt
-   ```
-
-2. **Build the documentation:**
-   ```bash
-   mkdir -p build
-   cd build
-   cmake .. -DBUILD_DOCS=ON
-   make docs
-   ```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, C17, ABI and
-documentation checks used by CI.
-
+Arrow C++ is required only to build the examples and tests or to prepare Arrow
+data in the caller. The C library itself does not link Arrow C++.
+
+### Examples
+
+| File | What it demonstrates | Extra requirements |
+| --- | --- | --- |
+| [`examples/hello.c`](examples/hello.c) | Minimal C17 connect, version, error and handle cleanup | C17 compiler |
+| [`examples/simple.cpp`](examples/simple.cpp) | Create, insert, vector index and nearest-neighbor search | C++20, Arrow C++ |
+| [`examples/full.cpp`](examples/full.cpp) | Broader CRUD, scalar and vector indexes, merge-insert, optimize, stats and index metadata | C++20, Arrow C++ |
+| [`examples/s3.cpp`](examples/s3.cpp) | Connect to S3 with storage options | C++20, Arrow C++, S3 endpoint and credentials |
+| [`examples/asio_coroutine.cpp`](examples/asio_coroutine.cpp) | Structure upsert, delete and query work as Boost.Asio coroutines | C++20, Arrow C++, Boost coroutine/context, `BUILD_ASIO_COROUTINE_EXAMPLE` |
+| [`examples/lancedb_registry.cpp`](examples/lancedb_registry.cpp) | Custom object-store registry and session | C++20, Arrow C++, external provider crate |
+| [`examples/external_provider/`](examples/external_provider/) | Rust `ObjectStoreProvider` used by the registry example | Rust |
+
+## API conventions
+
+### Errors
+
+Fallible functions return `LanceDBError`; `LANCEDB_SUCCESS` is zero. Check the
+return code before using any output. A function with a `char** error_message`
+parameter may return a heap-allocated message; free it with
+`lancedb_free_string()`, which accepts `NULL`. Use
+`lancedb_error_to_message()` when no detailed message is available. Do not
+assume every function clears an existing error slot; follow the comment above
+the function.
+
+### Ownership and lifetimes
+
+Opaque handles are freed by their matching `*_free()` function. Builder setters
+consume the builder and return the replacement, so assign the return value back
+to the same variable. Executing a builder consumes it on success and failure.
+`lancedb_connect_builder_execute()` consumes a non-NULL builder on both paths;
+the connection output is written only on success.
+
+Record-batch readers are transferred only by the entry points that document it.
+`lancedb_table_create()`, `lancedb_table_add()`, `lancedb_table_add_with_options()`
+and the `lancedb_table_merge_insert*` functions consume a non-NULL reader on
+their documented paths; after a successful transfer, do not free the reader
+again. The full per-function rules, including the Arrow array split at schema
+import, are in [Memory ownership](docs/ownership.rst) and the header comments.
+
+### Arrow interchange
+
+The public header defines `ArrowSchema`, `ArrowArray` and `ArrowArrayStream`, so
+pure C consumers do not need Arrow C++ headers.
+
+- **Arrow C Data Interface** is the zero-copy path for record batches produced by
+  Arrow C++, nanoarrow, DuckDB or another Arrow implementation. Import with
+  `lancedb_record_batch_reader_from_arrow()`. If schema import fails, the array
+  is still caller-owned; once schema import succeeds, the binding owns the
+  array even if a later conversion fails. The schema stays caller-owned.
+- **Arrow C Stream** is for a producer that supplies batches lazily. Import with
+  `lancedb_record_batch_reader_from_arrow_stream()`; the schema is read
+  synchronously, and later callbacks may run on SDK worker threads.
+- **Arrow IPC** is for bytes already encoded as an IPC file. Use
+  `lancedb_record_batch_reader_from_ipc_file()` to read batches and/or a schema.
+  Query results can be converted to Arrow arrays or to an IPC buffer with the
+  result conversion functions.
+
+See [Arrow interoperability](docs/api/arrow.rst) and
+[Memory ownership](docs/ownership.rst).
+
+### Threading and unwinding
+
+The API does not define a general rule for sharing a handle between threads. Do
+not share a handle or mutable input unless the function comment permits it.
+Exported entry points are non-unwinding `extern "C"` functions; a Rust panic
+that reaches the boundary aborts the process. Do not let C++ exceptions or
+`longjmp` escape a callback. Arrow C Stream callbacks may run on SDK worker
+threads. See [Threading and unwinding](docs/threading.rst).
+
+### Versioning
+
+The release version comes from the Git tag; the Cargo package version stays
+`0.0.0`. The installed header exposes `LANCEDB_VERSION_MAJOR`,
+`LANCEDB_VERSION_MINOR`, `LANCEDB_VERSION_PATCH` and `LANCEDB_VERSION_STRING`;
+`lancedb_version()` returns the runtime version from the loaded library. The
+checked-in header reports `0.0.0-dev`. See
+[Versioning and ABI](docs/versioning.rst).
+
+## Documentation and resources
+
+- Hosted API documentation: <https://lancedb.github.io/lancedb-c/>
+- Public header: [`include/lancedb.h`](include/lancedb.h)
+- Ownership: [docs/ownership.rst](docs/ownership.rst)
+- Threading: [docs/threading.rst](docs/threading.rst)
+- Versioning and ABI: [docs/versioning.rst](docs/versioning.rst)
+- Cloud storage and feature flags: [docs/cloud-storage.rst](docs/cloud-storage.rst)
+- Issues and feature requests: <https://github.com/lancedb/lancedb-c/issues>
+
+## Development
+
+Build, test and documentation checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
+The release workflow, package contract, retry recovery and tag-immutability
+rules are in [RELEASING.md](RELEASING.md).
+
+## License
+
+[Apache-2.0](LICENSE).
