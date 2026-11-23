@@ -895,6 +895,14 @@ TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured match full text",
 
     auto fuzzy = run_match_query(table(), "alpa", "text", &options);
     REQUIRE(ids_of(fuzzy) == std::set<int32_t>{0, 1, 2});
+
+    options.max_expansions = 0;
+    auto no_expansions = run_match_query(table(), "alpa", "text", &options);
+    REQUIRE(no_expansions.num_rows() == 0);
+
+    options.max_expansions = 1;
+    auto one_expansion = run_match_query(table(), "alpa", "text", &options);
+    REQUIRE(ids_of(one_expansion) == std::set<int32_t>{0, 1, 2});
   }
 
   SECTION("NULL options and the default helper agree") {

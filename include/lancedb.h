@@ -4160,9 +4160,12 @@ typedef enum {
  * `boost` is a score multiplier. The constructor forwards it unchanged; the SDK
  * requires a finite, non-negative value when the query is planned.
  *
- * `max_expansions` is the maximum final vocabulary size for this Match leaf,
- * shared across its query positions and selected physical segments. Every
- * sibling Match leaf has its own budget.
+ * `max_expansions` is the maximum final vocabulary size for this Match leaf.
+ * The ordinary embedded planner shares one budget across its query positions and
+ * selected physical segments. The pinned MemWAL path applies the budget
+ * separately to the base table, each SSTable and each in-memory source, using
+ * each source's own vocabulary, so its effective total can exceed one budget.
+ * Every sibling Match leaf has its own budget.
  *
  * `term_operator` must be a LanceDBFtsOperator value. Any other integer is
  * rejected by the constructor rather than converted to an SDK operator.
@@ -4198,10 +4201,20 @@ typedef struct {
  * backend. A namespace QueryTable pushdown sends a root OR Match as text and
  * column only, so its fuzziness, boost, max_expansions, prefix_length and OR
  * operator are not transmitted; a root AND Match keeps the structured node.
- * This also applies to a pushed-down hybrid query's full-text branch. LanceDB
- * Enterprise servers 0.3.0 and later accept the structured query. Older
- * Enterprise servers receive only text and column, so those options are not
- * transmitted, and a root AND Match returns LANCEDB_NOT_SUPPORTED.
+ * The namespace model stores fuzziness, max_expansions and prefix_length as
+ * signed 32-bit values. Values above INT32_MAX still construct, but an AND
+ * pushdown fails during execution with LANCEDB_INVALID_INPUT. This also applies
+ * to a pushed-down hybrid query's full-text branch.
+ *
+ * A MemWAL LSM query requires an explicit single text column; automatic
+ * discovery through a NULL or empty column does not satisfy this requirement.
+ * The write spec must maintain that column's FTS index, and every resident
+ * MemTable must carry it. Otherwise the query fails with
+ * LANCEDB_NOT_SUPPORTED rather than silently omitting un-compacted documents.
+ *
+ * LanceDB Enterprise servers 0.3.0 and later accept the structured query.
+ * Older Enterprise servers receive only text and column, so those options are
+ * not transmitted, and a root AND Match returns LANCEDB_NOT_SUPPORTED.
  *
  * On entry `*query_out` and the error message are cleared. On success
  * `*query_out` owns a handle that the caller frees with

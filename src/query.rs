@@ -94,7 +94,11 @@ impl From<LanceDBFtsOperator> for Operator {
 /// `fuzziness` uses -1 for the SDK's automatic choice and 0 through
 /// `UINT32_MAX` for an explicit edit distance. `operator` holds a raw
 /// `LanceDBFtsOperator` value so an out-of-range C value can be rejected before
-/// it becomes a Rust enum.
+/// it becomes a Rust enum. The ordinary embedded planner shares one
+/// max_expansions budget across a Match leaf's query positions and selected
+/// physical segments; the pinned MemWAL path applies it separately to the base
+/// table, each SSTable and each in-memory source, using each source's own
+/// vocabulary.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct LanceDBFtsMatchOptions {
@@ -1018,7 +1022,12 @@ pub unsafe extern "C" fn lancedb_query_full_text_search(
 /// MemWAL paths currently resolve automatic fuzziness to exact matching.
 /// Options that are constructed successfully still depend on the selected
 /// backend: a namespace QueryTable pushdown sends a root OR Match as text and
-/// column only, while a root AND Match keeps the structured node. Enterprise
+/// column only, while a root AND Match keeps the structured node. The namespace
+/// model stores fuzziness, max_expansions and prefix_length as signed 32-bit
+/// values, so values above INT32_MAX fail an AND pushdown during execution with
+/// `LANCEDB_INVALID_INPUT`. A MemWAL LSM query requires an explicit single text
+/// column whose FTS index is maintained by the write spec and carried by every
+/// resident MemTable; otherwise it returns `LANCEDB_NOT_SUPPORTED`. Enterprise
 /// servers 0.3.0 and later receive the structured query; older servers receive
 /// only text and column, so those options are not transmitted, and a root AND
 /// Match returns `LANCEDB_NOT_SUPPORTED`.
