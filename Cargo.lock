@@ -4688,6 +4688,7 @@ dependencies = [
  "arrow-schema",
  "datafusion-functions-json",
  "futures",
+ "half",
  "lance",
  "lance-io",
  "lance-namespace",

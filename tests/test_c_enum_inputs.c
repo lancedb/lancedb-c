@@ -17,6 +17,8 @@
  */
 _Static_assert(sizeof(LanceDBError) == sizeof(int), "LanceDBError must have the C int ABI");
 _Static_assert(sizeof(LanceDBDistanceType) == sizeof(int), "LanceDBDistanceType must have the C int ABI");
+_Static_assert(sizeof(LanceDBQueryVectorType) == sizeof(int),
+               "LanceDBQueryVectorType must have the C int ABI");
 _Static_assert(sizeof(LanceDBNormalizeMethod) == sizeof(int), "LanceDBNormalizeMethod must have the C int ABI");
 _Static_assert(sizeof(LanceDBIndexType) == sizeof(int), "LanceDBIndexType must have the C int ABI");
 _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType must have the C int ABI");
@@ -33,6 +35,12 @@ _Static_assert(offsetof(LanceDBVectorIndexConfig, distance_type) == 4 * sizeof(i
                "LanceDBVectorIndexConfig layout changed");
 _Static_assert(sizeof(LanceDBVectorIndexConfig) == 5 * sizeof(int) + sizeof(float),
                "LanceDBVectorIndexConfig layout changed");
+_Static_assert(offsetof(LanceDBQueryVector, data) == 2 * sizeof(int),
+               "LanceDBQueryVector layout changed");
+_Static_assert(offsetof(LanceDBQueryVector, dimension) == sizeof(void*) + 2 * sizeof(int),
+               "LanceDBQueryVector layout changed");
+_Static_assert(sizeof(LanceDBQueryVector) == 2 * sizeof(void*) + 2 * sizeof(int),
+               "LanceDBQueryVector layout changed");
 
 /*
  * C callers can hold enum values that are not one of the header's enumerators,

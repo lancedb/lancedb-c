@@ -308,6 +308,7 @@ class Allow:
 ENUM_PREFIXES = {
     "LanceDBError": "LANCEDB_",
     "LanceDBDistanceType": "LANCEDB_DISTANCE_",
+    "LanceDBQueryVectorType": "LANCEDB_QUERY_VECTOR_",
     "LanceDBNormalizeMethod": "LANCEDB_NORMALIZE_",
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
@@ -386,6 +387,7 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     ("LanceDBIndexStatistics", "distance_type"): Allow(allow_const=True),
     # Rust stores the raw integer and validates it before converting to an
     # enum, avoiding undefined behavior for an out-of-range C value.
+    ("LanceDBQueryVector", "kind"): Allow(enum_int="LanceDBQueryVectorType"),
     ("LanceDBVectorIndexConfig", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
     ("LanceDBBranchSource", "kind"): Allow(enum_int="LanceDBBranchSourceKind"),
     ("LanceDBDeltaRef", "kind"): Allow(enum_int="LanceDBDeltaRefType"),
