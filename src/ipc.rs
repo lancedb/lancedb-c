@@ -16,10 +16,9 @@ use std::ptr;
 use std::sync::Arc;
 
 use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_ipc::reader::FileReader;
-use arrow_ipc::writer::FileWriter;
 use arrow_schema::{ArrowError, Schema};
 use futures::TryStreamExt;
+use lancedb::arrow::arrow_ipc::{self, reader::FileReader, writer::FileWriter};
 use lancedb::arrow::SendableRecordBatchStream;
 
 use crate::error::{

@@ -43,7 +43,6 @@ lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta
 lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.27" }
 lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.27" }
 arrow-array = "59.2.0"
-arrow-ipc = "59.2.0"
 arrow-schema = "59.2.0"
 datafusion-functions-json = "0.55"
 futures = "0"
