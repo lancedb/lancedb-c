@@ -19,7 +19,7 @@ use half::f16;
 use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
-use lancedb::index::scalar::{FullTextSearchQuery, PhraseQuery};
+use lancedb::index::scalar::{FullTextSearchQuery, MatchQuery, Operator, PhraseQuery};
 use lancedb::query::{
     ColumnOrdering, ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
 };
@@ -59,6 +59,82 @@ pub struct LanceDBQuery {
 #[repr(C)]
 pub struct LanceDBFtsQuery {
     inner: FullTextSearchQuery,
+}
+
+/// Term combination operator for a structured Match query
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBFtsOperator {
+    Or = 0,
+    And = 1,
+}
+
+impl LanceDBFtsOperator {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::Or),
+            1 => Some(Self::And),
+            _ => None,
+        }
+    }
+}
+
+impl From<LanceDBFtsOperator> for Operator {
+    fn from(operator: LanceDBFtsOperator) -> Self {
+        match operator {
+            LanceDBFtsOperator::Or => Self::Or,
+            LanceDBFtsOperator::And => Self::And,
+        }
+    }
+}
+
+/// Options for a structured Match query
+///
+/// `fuzziness` uses -1 for the SDK's automatic choice and 0 through
+/// `UINT32_MAX` for an explicit edit distance. `operator` holds a raw
+/// `LanceDBFtsOperator` value so an out-of-range C value can be rejected before
+/// it becomes a Rust enum. The ordinary embedded planner shares one
+/// max_expansions budget across a Match leaf's query positions and selected
+/// physical segments; the pinned MemWAL path applies it separately to the base
+/// table, each SSTable and each in-memory source, using each source's own
+/// vocabulary.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBFtsMatchOptions {
+    pub fuzziness: i64,
+    pub boost: f32,
+    pub max_expansions: usize,
+    pub term_operator: c_int,
+    pub prefix_length: u32,
+}
+
+impl Default for LanceDBFtsMatchOptions {
+    fn default() -> Self {
+        // Read the defaults from the SDK constructor so this struct stays in
+        // sync with the SDK instead of repeating its values in C.
+        let defaults = MatchQuery::new(String::new());
+        Self {
+            fuzziness: defaults.fuzziness.map(i64::from).unwrap_or(-1),
+            boost: defaults.boost,
+            max_expansions: defaults.max_expansions,
+            term_operator: match defaults.operator {
+                Operator::Or => LanceDBFtsOperator::Or as c_int,
+                Operator::And => LanceDBFtsOperator::And as c_int,
+            },
+            prefix_length: defaults.prefix_length,
+        }
+    }
+}
+
+/// Return the default structured Match query options
+///
+/// The values come from the SDK's `MatchQuery::new`: OR term combination,
+/// boost 1.0, exact matching (`fuzziness = 0`), 50 maximum expansions, and
+/// prefix length 0.
+#[no_mangle]
+pub extern "C" fn lancedb_fts_match_options_default() -> LanceDBFtsMatchOptions {
+    LanceDBFtsMatchOptions::default()
 }
 
 /// One borrowed typed query vector
@@ -497,6 +573,56 @@ unsafe fn full_text_search_from_c(
     Ok(search)
 }
 
+/// Build a structured Match query from C text, column, and optional options
+///
+/// A NULL options pointer uses the SDK's `MatchQuery::new` defaults. The
+/// fuzziness and operator values are representational choices, so they are
+/// validated here; score and planner validation stay in the SDK.
+///
+/// # Safety
+/// See `full_text_search_parts_from_c`. `options` may be NULL or point to a
+/// readable `LanceDBFtsMatchOptions`.
+unsafe fn match_query_from_c(
+    text: *const c_char,
+    column: *const c_char,
+    options: *const LanceDBFtsMatchOptions,
+) -> Result<MatchQuery, String> {
+    let (text, column) = full_text_search_parts_from_c(text, column)?;
+    let mut query = MatchQuery::new(text);
+    if let Some(column) = column {
+        query = query.with_column(Some(column));
+    }
+
+    if options.is_null() {
+        return Ok(query);
+    }
+
+    let options = &*options;
+    let fuzziness = match options.fuzziness {
+        -1 => None,
+        value if (0..=i64::from(u32::MAX)).contains(&value) => Some(value as u32),
+        value => {
+            return Err(format!(
+                "fuzziness must be -1 for automatic matching or between 0 and {}, got {value}",
+                u32::MAX
+            ));
+        }
+    };
+    let operator = LanceDBFtsOperator::from_c_int(options.term_operator).ok_or_else(|| {
+        format!(
+            "operator must be a LanceDBFtsOperator value, got {}",
+            options.term_operator
+        )
+    })?;
+
+    Ok(query
+        .with_fuzziness(fuzziness)
+        .with_boost(options.boost)
+        .with_max_expansions(options.max_expansions)
+        .with_operator(operator.into())
+        .with_prefix_length(options.prefix_length))
+}
+
 /// Read parallel C arrays into the SDK's ordered dynamic projection pairs.
 ///
 /// The first array names each output column and the second holds its SQL
@@ -883,6 +1009,70 @@ pub unsafe extern "C" fn lancedb_query_full_text_search(
     }
 }
 
+/// Create a structured Match full-text query
+///
+/// The text is tokenized by the target index at execution time. A NULL options
+/// pointer uses the SDK defaults; `lancedb_fts_match_options_default()` returns
+/// the same values for callers that want to change individual fields. The
+/// text and column are copied. A NULL or empty column leaves the choice to the
+/// index.
+///
+/// `fuzziness = -1` forwards the SDK's automatic mode, while 0 through
+/// `UINT32_MAX` selects an explicit edit distance. The pinned embedded and
+/// MemWAL paths currently resolve automatic fuzziness to exact matching.
+/// Options that are constructed successfully still depend on the selected
+/// backend: a namespace QueryTable pushdown sends a root OR Match as text and
+/// column only, while a root AND Match keeps the structured node. The namespace
+/// model stores fuzziness, max_expansions and prefix_length as signed 32-bit
+/// values, so values above INT32_MAX fail an AND pushdown during execution with
+/// `LANCEDB_INVALID_INPUT`. A MemWAL LSM query requires an explicit single text
+/// column whose FTS index is maintained by the write spec and carried by every
+/// resident MemTable; otherwise it returns `LANCEDB_NOT_SUPPORTED`. Enterprise
+/// servers 0.3.0 and later receive the structured query; older servers receive
+/// only text and column, so those options are not transmitted, and a root AND
+/// Match returns `LANCEDB_NOT_SUPPORTED`.
+///
+/// # Safety
+/// - `text` must be a valid null-terminated UTF-8 string
+/// - `column` may be NULL or a valid null-terminated UTF-8 string naming the
+///   text column; an empty string means automatic discovery
+/// - `options` may be NULL or point to initialized `LanceDBFtsMatchOptions`
+/// - `query_out` must be a valid pointer to receive the created handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry `*query_out` and the error message are cleared. On success the
+/// caller owns the handle and frees it with `lancedb_fts_query_free()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_new_match(
+    text: *const c_char,
+    column: *const c_char,
+    options: *const LanceDBFtsMatchOptions,
+    query_out: *mut *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !query_out.is_null() {
+        *query_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let query = match match_query_from_c(text, column, options) {
+        Ok(query) => query,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+    let search = FullTextSearchQuery::new_query(query.into());
+
+    *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
 /// Create a structured phrase full-text query
 ///
 /// The phrase text and column are copied, and `slop` is forwarded unchanged to
@@ -949,7 +1139,7 @@ pub unsafe extern "C" fn lancedb_fts_query_new_phrase(
 ///
 /// # Safety
 /// - `query` must be NULL or a valid pointer returned from
-///   `lancedb_fts_query_new_phrase`
+///   `lancedb_fts_query_new_match` or `lancedb_fts_query_new_phrase`
 /// - `query` must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
@@ -968,7 +1158,8 @@ pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_query_new`
 /// - `full_text_query` must be a valid pointer returned from
-///   `lancedb_fts_query_new_phrase`; it is borrowed, not consumed
+///   `lancedb_fts_query_new_match` or `lancedb_fts_query_new_phrase`; it is
+///   borrowed, not consumed
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
 /// On failure, including a NULL handle, the builder keeps its previous
@@ -1416,7 +1607,8 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
 /// - `full_text_query` must be a valid pointer returned from
-///   `lancedb_fts_query_new_phrase`; it is borrowed, not consumed
+///   `lancedb_fts_query_new_match` or `lancedb_fts_query_new_phrase`; it is
+///   borrowed, not consumed
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
 /// On failure, including a NULL handle, the builder keeps its previous

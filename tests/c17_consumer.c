@@ -308,6 +308,211 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
 
   lancedb_fts_query_free(NULL);
 
+  /* A structured Match query uses the SDK's OR default when options is NULL.
+   * The two rows share no terms, so OR matches both and AND matches none. */
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_fts_query_new_match(
+          "alpha gamma", "text", NULL, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 default Match query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 2) {
+    first = NULL;
+    result = fail("the C17 default Match query did not use OR");
+    goto cleanup;
+  }
+  first = NULL;
+
+  LanceDBFtsMatchOptions match_options = lancedb_fts_match_options_default();
+  if (match_options.fuzziness != 0 || match_options.boost != 1.0f ||
+      match_options.max_expansions != 50 ||
+      match_options.term_operator != LANCEDB_FTS_OPERATOR_OR ||
+      match_options.prefix_length != 0) {
+    result = fail("the C17 Match option defaults changed");
+    goto cleanup;
+  }
+
+  match_options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_fts_query_new_match(
+          "alpha gamma", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 AND Match query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 0) {
+    first = NULL;
+    result = fail("the C17 AND Match query did not require every term");
+    goto cleanup;
+  }
+  first = NULL;
+
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_fts_query_new_match(
+          "alpha beta", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 matching AND query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the C17 matching AND query returned the wrong row count");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* Explicit distance 1 matches a typo that the default exact Match rejects. */
+  match_options = lancedb_fts_match_options_default();
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_fts_query_new_match(
+          "alpa", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 exact Match query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 0) {
+    first = NULL;
+    result = fail("the C17 exact Match query matched a typo");
+    goto cleanup;
+  }
+  first = NULL;
+
+  match_options.fuzziness = 1;
+  first = lancedb_query_new(table);
+  if (first == NULL ||
+      lancedb_fts_query_new_match(
+          "alpa", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL ||
+      lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 fuzzy Match query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the C17 fuzzy Match query did not match the typo");
+    goto cleanup;
+  }
+  first = NULL;
+
+  /* Match copies its inputs. Mutating the source strings after construction
+   * and freeing the handle after both setters must not change either query. */
+  char match_text[] = "alpha";
+  char match_column[] = "text";
+  match_options = lancedb_fts_match_options_default();
+  if (lancedb_fts_query_new_match(
+          match_text, match_column, &match_options, &fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 copied Match query failed");
+    goto cleanup;
+  }
+  match_text[0] = 'z';
+  match_column[0] = 'x';
+
+  first = lancedb_query_new(table);
+  second = lancedb_query_new(table);
+  if (first == NULL || second == NULL) {
+    result = fail("creating the C17 copied Match builders failed");
+    goto cleanup;
+  }
+  if (lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL ||
+      lancedb_query_full_text_search_query(second, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 copied Match query failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the first C17 Match builder did not copy its inputs");
+    goto cleanup;
+  }
+  first = NULL;
+  if (execute_query_rows(second, &rows) != 0 || rows != 1) {
+    second = NULL;
+    result = fail("the second C17 Match builder did not copy its inputs");
+    goto cleanup;
+  }
+  second = NULL;
+
+  /* Invalid representation values are rejected at construction. */
+  match_options = lancedb_fts_match_options_default();
+  match_options.fuzziness = -2;
+  fts_query = NULL;
+  error_message = NULL;
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("an out-of-range C17 Match fuzziness must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
+  match_options.fuzziness = 0;
+  match_options.term_operator = (LanceDBFtsOperator)2;
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("an out-of-range C17 Match operator must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
+  match_options.term_operator = LANCEDB_FTS_OPERATOR_OR;
+  match_options.fuzziness = 4294967296LL;
+  if (lancedb_fts_query_new_match(
+          "alpha", "text", &match_options, &fts_query, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("an unrepresentable C17 Match fuzziness must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
   /* Typed query vectors are borrowed for the constructor and add call and
    * copied before those calls return. The phrase table has no vector column,
    * so this checks the ABI and ownership path without executing the query. */

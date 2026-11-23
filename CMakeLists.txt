@@ -727,6 +727,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_fts_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_fts.cpp
   )
   target_link_libraries(lancedb_fts_tests
@@ -773,7 +774,14 @@ if(BUILD_TESTS)
   # C_STANDARD is a target property. Apply strict C17 only to the targets that
   # compile the C consumer helper; each has no other C sources, so the C++
   # sources and all other targets keep their existing flags.
-  foreach(target lancedb_index_tests lancedb_df_query_tests lancedb_vector_query_tests lancedb_table_tests lancedb_delta_tests)
+  foreach(target
+    lancedb_index_tests
+    lancedb_df_query_tests
+    lancedb_vector_query_tests
+    lancedb_table_tests
+    lancedb_delta_tests
+    lancedb_fts_tests
+  )
     set_target_properties(${target} PROPERTIES
       C_STANDARD 17
       C_STANDARD_REQUIRED ON
