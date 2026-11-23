@@ -749,30 +749,7 @@ unsafe fn multi_match_parts_from_c(
         .map_err(|_| "multi-match text is not valid UTF-8".to_string())?
         .to_string();
 
-    let columns = if num_columns == 0 {
-        Vec::new()
-    } else {
-        if columns.is_null() {
-            return Err(
-                "multi-match columns are required when num_columns is not zero".to_string(),
-            );
-        }
-
-        let mut parsed = Vec::with_capacity(num_columns);
-        for index in 0..num_columns {
-            let column = *columns.add(index);
-            if column.is_null() {
-                return Err(format!("multi-match column {index} is required"));
-            }
-            parsed.push(
-                CStr::from_ptr(column)
-                    .to_str()
-                    .map_err(|_| format!("multi-match column {index} is not valid UTF-8"))?
-                    .to_string(),
-            );
-        }
-        parsed
-    };
+    let columns = fts_columns_from_c(columns, num_columns, "multi-match")?;
 
     let (boosts, term_operator) = if options.is_null() {
         (None, None)
@@ -804,6 +781,46 @@ unsafe fn multi_match_parts_from_c(
         boosts,
         term_operator,
     })
+}
+
+/// Copy selected full-text column names from a C string array
+///
+/// A zero count describes an empty selection, so the array may be NULL. A
+/// positive count requires an array whose entries are non-NULL and valid UTF-8.
+/// Empty strings are copied unchanged; the SDK decides how to resolve them.
+/// `role` names the caller in diagnostics.
+///
+/// # Safety
+/// `columns` may be NULL only when `num_columns` is zero. Otherwise it must
+/// point to `num_columns` readable null-terminated strings.
+unsafe fn fts_columns_from_c(
+    columns: *const *const c_char,
+    num_columns: usize,
+    role: &str,
+) -> Result<Vec<String>, String> {
+    if num_columns == 0 {
+        return Ok(Vec::new());
+    }
+    if columns.is_null() {
+        return Err(format!(
+            "{role} columns are required when num_columns is not zero"
+        ));
+    }
+
+    let mut parsed = Vec::with_capacity(num_columns);
+    for index in 0..num_columns {
+        let column = *columns.add(index);
+        if column.is_null() {
+            return Err(format!("{role} column {index} is required"));
+        }
+        parsed.push(
+            CStr::from_ptr(column)
+                .to_str()
+                .map_err(|_| format!("{role} column {index} is not valid UTF-8"))?
+                .to_string(),
+        );
+    }
+    Ok(parsed)
 }
 
 /// Clone one borrowed handle's structured query node
@@ -1621,6 +1638,82 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boost(
     let search = FullTextSearchQuery::new_query(query.into());
 
     *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
+/// Replace the column selection of a structured full-text query
+///
+/// This applies the SDK's `FullTextSearchQuery::with_columns` to a copy and
+/// publishes the result only after the SDK accepts it, so a failure leaves the
+/// previous query and settings unchanged. The operation replaces the columns of
+/// every Match and Phrase leaf; it does not fill only leaves that lack a
+/// column.
+///
+/// A Match leaf becomes one leaf per selected column. Several columns therefore
+/// turn it into a MultiMatch, and every scalar setting of the original leaf
+/// (boost, fuzziness, max_expansions, operator, prefix_length and document
+/// granularity) is copied to each new leaf. A Phrase leaf accepts exactly one
+/// column; zero or several columns fail with `LANCEDB_INVALID_INPUT`. Boolean
+/// nodes recurse into must, should and must_not, and Boost nodes recurse into
+/// both legs. A MultiMatch expands each existing Match leaf by every selected
+/// column, so N existing leaves produce N * M leaves and each copy keeps its
+/// original scalar settings. Prefer constructing a MultiMatch with its columns;
+/// this operation is intended for trees whose leaves have not selected columns.
+/// A selection that makes the tree span several columns follows the existing
+/// MultiMatch backend limits: native MemWAL requires one explicit column. An
+/// empty Boolean has no leaves and succeeds unchanged.
+///
+/// A zero column count is forwarded as an empty selection and normally fails
+/// with `LANCEDB_INVALID_INPUT`. Empty strings are forwarded as named columns
+/// rather than automatic discovery, and the SDK reports their resolution error
+/// when the query runs. A NULL array with a nonzero count, a NULL entry or
+/// invalid UTF-8 returns `LANCEDB_INVALID_ARGUMENT`.
+///
+/// Backend routing follows the rewritten tree. A namespace QueryTable pushdown
+/// sends a root OR Match as a string query, with the selected columns in
+/// `string_query.columns`. A root MultiMatch, including a Match that this call
+/// rewrote because several columns were selected, and a root AND Match, Phrase,
+/// Boolean or Boost use the structured node form, where the selected columns
+/// live inside the Match leaves instead. Enterprise 0.3.0 and later receive the
+/// structured node; older Enterprise projections remain the ones documented on
+/// the constructors.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from an
+///   `lancedb_fts_query_new_*` constructor
+/// - `columns` may be NULL only when `num_columns` is zero; otherwise it must
+///   point to `num_columns` readable null-terminated UTF-8 strings
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_with_columns(
+    query: *mut LanceDBFtsQuery,
+    columns: *const *const c_char,
+    num_columns: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let columns = match fts_columns_from_c(columns, num_columns, "full-text") {
+        Ok(columns) => columns,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let updated = match (*query).inner.clone().with_columns(&columns) {
+        Ok(updated) => updated,
+        Err(error) => {
+            let error = lancedb::error::Error::from(error);
+            return handle_error(&error, error_message);
+        }
+    };
+    (*query).inner = updated;
     LanceDBError::Success
 }
 

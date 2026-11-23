@@ -4687,9 +4687,9 @@ LanceDBError lancedb_fts_query_new_boolean(
  *
  * `positive` and `negative` are required borrowed handles; the constructor
  * copies each handle's structured query node, so the caller may reuse or free
- * the handles after this call returns. `negative_boost` may be NULL, which
- * passes "unset" to the SDK constructor so the SDK supplies its default of
- * 0.5. A pointed-to value is forwarded unchanged. The embedded dataset
+ * the handles after this call returns. `negative_boost` may be
+ * NULL, which passes "unset" to the SDK constructor so the SDK supplies its
+ * default of 0.5. A pointed-to value is forwarded unchanged. The embedded dataset
  * scanner requires a finite, non-negative multiplier when it plans the query
  * and otherwise fails with LANCEDB_INVALID_INPUT. A MemWAL LSM query runs its
  * column checks before that validation, and a namespace or Enterprise
@@ -4752,6 +4752,62 @@ LanceDBError lancedb_fts_query_new_boost(
     const LanceDBFtsQuery* negative,
     const float* negative_boost,
     LanceDBFtsQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Replace the column selection of a structured full-text query
+ *
+ * This applies the pinned SDK's `FullTextSearchQuery::with_columns` to a copy
+ * and publishes the result only after the SDK accepts it. A failure leaves the
+ * handle's previous query and settings unchanged. The operation replaces the
+ * columns of every Match and Phrase leaf; it does not fill only leaves that
+ * lack a column.
+ *
+ * A Match leaf becomes one leaf per selected column. Several columns therefore
+ * turn it into a MultiMatch, and every scalar setting of the original leaf
+ * (boost, fuzziness, max_expansions, operator, prefix_length and document
+ * granularity) is copied to each new leaf. A Phrase leaf accepts exactly one
+ * selected column; zero or several columns fail with
+ * LANCEDB_INVALID_INPUT. Boolean nodes recurse into must, should and must_not,
+ * and Boost nodes recurse into both legs. A MultiMatch expands each existing
+ * Match leaf by every selected column, so N existing leaves produce N * M
+ * leaves and each copy keeps its original scalar settings. Prefer constructing
+ * a MultiMatch with its columns; this operation is intended for trees whose
+ * leaves have not selected columns. A selection that makes the tree span
+ * several columns follows the existing MultiMatch backend limits: native
+ * MemWAL requires one explicit column. An empty Boolean has no leaves and
+ * succeeds unchanged.
+ *
+ * A zero column count is forwarded as an empty selection and normally fails
+ * with LANCEDB_INVALID_INPUT, except for an empty Boolean. Empty strings are
+ * forwarded as named columns rather than automatic discovery; the SDK reports
+ * their resolution error when the query runs. A NULL array with a nonzero
+ * count, a NULL entry or invalid UTF-8 returns LANCEDB_INVALID_ARGUMENT and
+ * leaves the handle usable. SDK errors keep their mapped status.
+ *
+ * Backend routing follows the rewritten tree. A namespace QueryTable pushdown
+ * sends a root OR Match as a string query, with the selected columns in
+ * `string_query.columns`. A root MultiMatch, including a Match that this call
+ * rewrote because several columns were selected, and a root AND Match, Phrase,
+ * Boolean or Boost use the structured node form, where the selected columns
+ * live inside the Match leaves instead. Enterprise 0.3.0 and later receive the
+ * structured node; older Enterprise projections remain the ones documented on
+ * the constructors.
+ *
+ * @param query - pointer to LanceDBFtsQuery
+ * @param columns - ordered column names, or NULL when num_columns is zero
+ * @param num_columns - number of column names
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_with_columns(
+    LanceDBFtsQuery* query,
+    const char* const* columns,
+    size_t num_columns,
     char** error_message
 );
 
