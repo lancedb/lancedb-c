@@ -30,8 +30,8 @@ VERSION = "0.1.0-preview.1"
 TAG = f"v{VERSION}"
 TAG_OBJECT = "a" * 40
 COMMIT = "b" * 40
-LANCEDB_REVISION = "21f074cb02a682ab883c24dc319c61d6914471c7"
-LANCE_REVISION = "f9fd19edfb14e43d3981b20dfaf183672751414b"
+LANCEDB_REVISION = "f38d42e9db229c3f552415e30fcbeba9ee3d5607"
+LANCE_REVISION = "c76f845da048c282ea2e22442171cb2a84a40d98"
 
 
 def cargo_lock() -> str:
@@ -47,26 +47,26 @@ def cargo_lock() -> str:
     return (
         block(
             "lancedb",
-            "0.42.0-beta.22",
-            "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.22#"
+            "0.42.0-beta.24",
+            "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.24#"
             + LANCEDB_REVISION,
         )
         + block(
             "lance",
-            "15.0.0-beta.26",
-            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.26#"
+            "15.0.0-beta.27",
+            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.27#"
             + LANCE_REVISION,
         )
         + block(
             "lance-io",
-            "15.0.0-beta.26",
-            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.26#"
+            "15.0.0-beta.27",
+            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.27#"
             + LANCE_REVISION,
         )
         + block(
             "lance-namespace",
-            "15.0.0-beta.26",
-            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.26#"
+            "15.0.0-beta.27",
+            "git+https://github.com/lance-format/lance.git?tag=v15.0.0-beta.27#"
             + LANCE_REVISION,
         )
         + block("arrow", "59.2.0", "registry+https://github.com/rust-lang/crates.io-index")
@@ -229,6 +229,8 @@ class PrepareTests(ReleaseFixture):
         self.assertIn(LANCEDB_REVISION, notes)
         self.assertIn(LANCE_REVISION, notes)
         self.assertIn("preview release", notes)
+        self.assertIn("only functions declared in `include/lancedb.h`", notes)
+        self.assertIn("AWS-LC jitterentropy", notes)
         for entry in metadata["packages"]:
             self.assertIn(entry["archive"], notes)
             self.assertIn(entry["sha256"], notes)

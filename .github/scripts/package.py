@@ -35,6 +35,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+from check_exports import verify_library
 from version import DEV_VERSION, parse_resolved, resolve_version, soversion
 
 
@@ -685,6 +686,18 @@ def verify_package(args: argparse.Namespace) -> None:
         print(f"Library architecture: {actual_arch}")
 
         print_runtime_dependencies(target, library, manifest["version"])
+        import_library = (
+            package_root / manifest["importLibrary"]
+            if manifest["importLibrary"]
+            else None
+        )
+        verify_library(
+            library,
+            package_header,
+            target.os,
+            manifest["version"],
+            import_library,
+        )
         consumer_source = Path(args.consumer_source)
         if not consumer_source.is_absolute():
             consumer_source = repo_root / consumer_source

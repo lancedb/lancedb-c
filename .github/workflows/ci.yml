@@ -137,7 +137,7 @@ jobs:
         shell: pwsh
         run: git config --global core.longpaths true
 
-      # The locked Lance v15.0.0-beta.26 fixture contains a 188-character
+      # The locked Lance v15.0.0-beta.27 fixture contains a 188-character
       # relative test-data path. C:\c keeps Cargo's git checkout under MAX_PATH.
       - name: Use short Cargo home on Windows
         shell: bash
