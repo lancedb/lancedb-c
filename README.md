@@ -6,22 +6,14 @@ This repository contains comprehensive C FFI bindings for LanceDB, allowing you 
 
 ```
 ├── src/                    # Rust FFI implementation
-│   ├── lib.rs              # Main library entry point
-│   ├── connection.rs       # Connection management
-│   ├── table.rs            # Table operations and data manipulation
-│   ├── query.rs            # Complete query API implementation
-│   ├── index.rs            # Index management
-│   ├── error.rs            # Error handling and reporting
-│   └── types.rs            # Type definitions and conversions
 ├── include/
-│   └── lancedb.h           # Complete C header file with Arrow C ABI
-├── examples/
-│   ├── full.cpp            # C++ example using Arrow. Covering most of the API
-│   └── simple.cpp          # C++ example using Arrow. Similar to rust/examples/simple.rs
-├── tests/                  # C++ unit tests using Catch2
-├── docs/                   # Documentation definitions
+│   └── lancedb.h           # Public C17 header with Arrow C ABI types
+├── examples/               # C17 and C++ examples
+├── tests/                  # Catch2 suites and C17 consumers
+├── docs/                   # Sphinx documentation and API group pages
+├── .github/                # CI, packaging, and release workflows
 ├── Cargo.toml              # Rust crate configuration
-├── CMakeLists.txt          # CMake build configuration
+├── CMakeLists.txt          # CMake build, install, and check targets
 └── README.md               # This file
 ```
 
@@ -29,27 +21,52 @@ This repository contains comprehensive C FFI bindings for LanceDB, allowing you 
 
 ### Prerequisites
 
+Building the library requires:
+
 - Rust 1.95.0 or newer (`rustc` and `cargo`; the minimum declared by the locked dependency graph)
-- CMake (3.22 or later)
-- C++ compiler with C++20 support (gcc, clang)
-- Apache Arrow C++ library
-- pkg-config
+- CMake 3.22 or later
+- A C and C++ compiler (CMake enables both languages even when examples are off)
+- A Protocol Buffers compiler (`protoc`) for the pinned Lance build
+- A C17 compiler for code that includes `include/lancedb.h`; this can be the same C compiler
+
+Building and running the C++ examples and tests additionally requires:
+
+- C++20 support in that compiler (gcc, clang, or MSVC)
+- Apache Arrow C++ development headers and libraries
+- pkg-config for the manual example command below
+- Boost coroutine and context only for the optional Asio example
+
+A program that only uses the C API needs the header and the shared library. It
+does not need the Arrow C++ library: `lancedb.h` defines the Arrow C Data and
+C Stream structures it uses.
 
 ### Quick Start
 
-1. **Build everything using CMake:**
-   ```bash
-   mkdir -p build
-   cd build
-   cmake ..
-   make
-   ```
+Build the shared library:
 
-2. **Run the examples:**
-   ```bash
-   ./simple
-   ./full
-   ```
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+`BUILD_EXAMPLES` and `BUILD_TESTS` default to `OFF`, so the library build does
+not require Apache Arrow C++. To build the C++ examples as well:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON
+cmake --build build
+./build/simple
+./build/full
+./build/s3
+```
+
+Those paths are for Unix single-config generators such as Makefiles or Ninja.
+With Visual Studio or Xcode, build with
+`cmake --build build --config Release` and run the executables from
+`build/Release`. On Windows the build-tree DLL stays in
+`build/target/release`; add that directory to `PATH` before running. CMake sets
+the build-tree RPATH on Unix only; installed consumers still need the loader
+setup described below.
 
 The Boost.Asio coroutine example is optional because it needs Boost. Enable it
 with `-DBUILD_ASIO_COROUTINE_EXAMPLE=ON` in addition to `-DBUILD_EXAMPLES=ON`.
@@ -78,6 +95,14 @@ CMake cannot express a prerelease in a version request, so a numeric
 requirement such as `find_package(lancedb 0.1.0)` is rejected for a preview
 package. Use unversioned discovery for previews.
 
+The imported target handles compile and link paths; it does not add an install
+RPATH to the consuming executable. On Unix, install into a loader path, set an
+RPATH in the consumer, or set `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` at runtime.
+On Windows, the target links `lancedb.dll.lib` from the installation `lib`
+directory, but the loader still has to find `lancedb.dll` in the installation
+`bin` directory. Copy the DLL next to the executable or add that `bin` directory
+to `PATH` before running.
+
 The package config and version file are installed under
 `${CMAKE_INSTALL_LIBDIR}/cmake/lancedb` and use paths relative to the installed
 prefix. For Unix-like and GNU-style toolchains, pkg-config works from
@@ -91,11 +116,51 @@ MSVC shared consumers should use the `lancedb::lancedb` CMake target. The MSVC
 import library is named `lancedb.dll.lib`, which the conventional `-llancedb`
 pkg-config spelling does not select.
 
-On Linux the installed shared library records a SONAME derived from the binding
-version: before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the
-major version is. The unversioned `liblancedb.so` linker name remains available.
-On macOS the library records `@rpath/liblancedb.dylib`. Prebuilt packages keep
-the same metadata and package the unversioned library path used by consumers.
+On Linux, CMake shared-library builds from this revision and release packages
+from `v0.1.0-preview.2` onward record a SONAME derived from the binding version:
+before 1.0 the major.minor pair is the ABI boundary, and from 1.0 the major
+version is. The unversioned `liblancedb.so` linker name remains available. The
+published `v0.1.0-preview.1` Linux package predates this and has no SONAME.
+CMake shared-library builds and packages from preview.2 use
+`@rpath/liblancedb.dylib` on macOS. Prebuilt packages from preview.2 keep the
+same metadata and package the unversioned library path used by consumers.
+
+### Minimal C17 program
+
+`examples/hello.c` is a complete C17 program that connects to a local database
+and prints the runtime version. It includes only `lancedb.h`, so it does not
+need the C++ compiler or the Arrow C++ library.
+
+After installing into a prefix as shown above:
+
+```bash
+export PKG_CONFIG_PATH=/opt/lancedb/lib64/pkgconfig
+lancedb_libdir="$(pkg-config --variable=libdir lancedb)"
+cc -std=c17 -Wall -Wextra -Werror examples/hello.c \
+  $(pkg-config --cflags --libs lancedb) \
+  -Wl,-rpath,"$lancedb_libdir" -o hello
+./hello ./example-db
+```
+
+`pkg-config` supplies the link-time `-L` and `-l` flags. The explicit rpath
+lets the loader find the shared library after linking; alternatively set
+`LD_LIBRARY_PATH` on Linux or `DYLD_LIBRARY_PATH` on macOS when running the
+program.
+
+A CMake consumer can build the same file as C17:
+
+```cmake
+cmake_minimum_required(VERSION 3.22)
+project(hello C)
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+find_package(lancedb CONFIG REQUIRED)
+add_executable(hello hello.c)
+target_link_libraries(hello PRIVATE lancedb::lancedb)
+```
+
+The installed target supplies the include path, library and runtime lookup.
+Use unversioned `find_package` for preview packages.
 
 ### Manual Build Process
 
@@ -120,9 +185,8 @@ If you prefer to build manually:
 
 2. **Compile the C++ simple example with Arrow:**
    ```bash
-   g++ -std=c++20 -Wall -Wextra -O2 \
+   g++ $(pkg-config --cflags arrow) -std=c++20 -Wall -Wextra -O2 \
        -I./include \
-       $(pkg-config --cflags arrow) \
        -o examples/simple examples/simple.cpp \
        -L./target/release -llancedb \
        $(pkg-config --libs arrow) \
@@ -317,8 +381,11 @@ the SHA-256 of each archive.
 
 ### Prerequisites
 
-- Tests use the Catch2 framework. No need to install it as it will be fetched as part of the build process
-- If valgrind is installed, some tests will run under valgrind and will fail on memory errors or definite memory leaks
+- CMake 3.22 or later and a C++20 compiler
+- Apache Arrow C++ development headers and libraries
+- A C17 compiler for `check-c17` and `examples/hello.c`
+- Tests use the Catch2 framework. It is fetched automatically when no suitable package is installed.
+- If valgrind is installed, some tests run under valgrind and fail on memory errors or definite memory leaks.
 
 ### Building and Running Tests
 
@@ -351,7 +418,8 @@ Clang target headers; it does not build a Windows Rust library. It also runs
 temporary signature, layout and enum drift fixtures to show that a mismatch is
 reported with the affected function, argument, struct field or enumerator.
 Native C17 consumers remain platform runtime smoke tests rather than full
-declaration coverage, and MSVC C17 CI is owned by #107.
+declaration coverage. Native Windows MSVC runs the C17 consumer and the
+package consumer in CI.
 
 ## Documentation
 
@@ -361,6 +429,10 @@ The LanceDB C API has comprehensive documentation generated from the header file
 
 The documentation is automatically published to **GitHub Pages** on every push to main:
 - **URL**: https://lancedb.github.io/lancedb-c/
+
+The API reference is generated from the Doxygen groups in `include/lancedb.h` and
+organized by module under `docs/api/`. The public contracts are documented in
+`docs/versioning.rst`, `docs/ownership.rst`, and `docs/threading.rst`.
 
 ### Building Documentation Locally
 
@@ -378,4 +450,9 @@ The documentation is automatically published to **GitHub Pages** on every push t
    cmake .. -DBUILD_DOCS=ON
    make docs
    ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, C17, ABI and
+documentation checks used by CI.
 

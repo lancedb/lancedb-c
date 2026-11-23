@@ -9,6 +9,9 @@ a developer-friendly, serverless vector database for AI applications.
    :caption: Contents:
 
    api/index
+   versioning
+   ownership
+   threading
 
 Overview
 --------
@@ -24,133 +27,175 @@ The LanceDB C API provides a complete interface to LanceDB functionality includi
 Quick Start
 -----------
 
-This example shows how to create a LanceDB table with vector data using Apache Arrow.
+The smallest C17 program includes only ``lancedb.h``. The repository's
+``examples/hello.c`` connects to a local database and prints the runtime
+version:
 
-**1. Connect to a database:**
+.. literalinclude:: ../examples/hello.c
+   :language: c
+   :linenos:
 
-.. code-block:: c
+Build it against an installed package:
+
+.. code-block:: bash
+
+   lancedb_libdir="$(pkg-config --variable=libdir lancedb)"
+   cc -std=c17 -Wall -Wextra -Werror hello.c \
+     $(pkg-config --cflags --libs lancedb) \
+     -Wl,-rpath,"$lancedb_libdir" -o hello
+
+See the repository README for build and installation commands.
+
+Creating a table with Arrow C++
+-------------------------------
+
+The program below uses Arrow C++ to build one record batch, exports it through
+the Arrow C Data interface, and adds it to a new table. It is a complete C++20
+translation unit; compile it with the same compiler and Arrow installation used
+to build the examples. Link it against both the installed ``lancedb::lancedb``
+target and Arrow C++ (for example, ``pkg-config --libs arrow``). The lancedb
+package does not carry the Arrow C++ link dependencies. Use the same runtime
+loader setup as the Quick Start.
+
+.. code-block:: cpp
 
    #include <lancedb.h>
-   #include <arrow/c/bridge.h>
+
    #include <arrow/api.h>
+   #include <arrow/c/bridge.h>
 
-   // Create a connection to a local database
-   LanceDBConnectBuilder* builder = lancedb_connect("./my_database");
-   LanceDBConnection* db = lancedb_connect_builder_execute(builder);
+   #include <cstdio>
+   #include <memory>
 
-.. note::
+   namespace {
 
-   You can optionally configure session cache sizes and attach the session to
-   the connection builder:
-
-   .. code-block:: c
-
-      LanceDBSessionOptions options = {0};
-      options.index_cache_bytes = 512 * 1024 * 1024;
-      options.metadata_cache_bytes = 256 * 1024 * 1024;
-
-      LanceDBSession* session = lancedb_session_new(&options);
-
-      LanceDBConnectBuilder* builder = lancedb_connect("./my_database");
-      builder = lancedb_connect_builder_session(builder, session);
-      LanceDBConnection* db = lancedb_connect_builder_execute(builder);
-
-**2. Create Arrow schema (using Arrow C++ API):**
-
-.. code-block:: cpp
-
-   // Define schema with id and vector columns
-   auto id_field = arrow::field("id", arrow::int32());
-   auto vector_field = arrow::field("vector",
-                                    arrow::fixed_size_list(arrow::float32(), 128));
-   auto schema = arrow::schema({id_field, vector_field});
-
-   // Export to C ABI
-   struct ArrowSchema c_schema;
-   arrow::ExportSchema(*schema, &c_schema);
-
-**3. Create data (using Arrow builders):**
-
-.. code-block:: cpp
-
-   arrow::Int32Builder id_builder;
-   arrow::FixedSizeListBuilder vector_builder(
-       arrow::default_memory_pool(),
-       std::make_unique<arrow::FloatBuilder>(),
-       128  // dimension
-   );
-
-   // Add 100 rows
-   for (int i = 0; i < 100; i++) {
-       id_builder.Append(i);
-
-       auto* float_builder = static_cast<arrow::FloatBuilder*>(
-           vector_builder.value_builder());
-       for (int j = 0; j < 128; j++) {
-           float_builder->Append(i * 0.1f + j);
-       }
-       vector_builder.Append();
+   void print_error(const char* step, LanceDBError code,
+                    const char* error_message) {
+     std::fprintf(stderr, "%s: %s\n", step,
+                  error_message != nullptr ? error_message
+                                           : lancedb_error_to_message(code));
    }
 
-   // Build arrays
-   std::shared_ptr<arrow::Array> id_array, vector_array;
-   id_builder.Finish(&id_array);
-   vector_builder.Finish(&vector_array);
+   }  // namespace
 
-   // Create RecordBatch
-   auto batch = arrow::RecordBatch::Make(schema, 100, {id_array, vector_array});
+   int main() {
+     LanceDBConnectBuilder* builder = lancedb_connect("./my_database");
+     if (builder == nullptr) {
+       std::fprintf(stderr, "failed to create a connection builder\n");
+       return 1;
+     }
 
-   // Export to C ABI
-   struct ArrowArray c_array;
-   arrow::ExportRecordBatch(*batch, &c_array, &c_schema);
-
-**4. Create table with schema and data:**
-
-.. code-block:: c
-
-   LanceDBError result;
-   char* error_message = NULL;
-
-   // Create reader from Arrow C ABI
-   LanceDBRecordBatchReader* reader;
-
-   result = lancedb_record_batch_reader_from_arrow(
-       (FFI_ArrowArray*)&c_array,
-       (FFI_ArrowSchema*)&c_schema,
-       &reader,
-       &error_message
-   );
-
-   if (result != LANCEDB_SUCCESS) {
-       fprintf(stderr, "Error: %s\n", error_message);
+     LanceDBConnection* db = nullptr;
+     char* error_message = nullptr;
+     LanceDBError result =
+         lancedb_connect_builder_execute(builder, &db, &error_message);
+     if (result != LANCEDB_SUCCESS) {
+       print_error("connect", result, error_message);
        lancedb_free_string(error_message);
-       if (c_array.release) {
+       return 1;
+     }
+
+     auto id_field = arrow::field("id", arrow::int32());
+     auto vector_field = arrow::field(
+         "vector", arrow::fixed_size_list(arrow::float32(), 128));
+     auto schema = arrow::schema({id_field, vector_field});
+
+     arrow::Int32Builder id_builder;
+     arrow::FixedSizeListBuilder vector_builder(
+         arrow::default_memory_pool(),
+         std::make_unique<arrow::FloatBuilder>(), 128);
+     for (int i = 0; i < 100; ++i) {
+       id_builder.Append(i).ok();
+       auto* values =
+           static_cast<arrow::FloatBuilder*>(vector_builder.value_builder());
+       for (int j = 0; j < 128; ++j) {
+         values->Append(static_cast<float>(i) * 0.1f +
+                        static_cast<float>(j)).ok();
+       }
+       vector_builder.Append().ok();
+     }
+
+     std::shared_ptr<arrow::Array> id_array;
+     std::shared_ptr<arrow::Array> vector_array;
+     id_builder.Finish(&id_array).ok();
+     vector_builder.Finish(&vector_array).ok();
+     auto batch = arrow::RecordBatch::Make(
+         schema, 100, {id_array, vector_array});
+
+     struct ArrowArray c_array{};
+     struct ArrowSchema c_schema{};
+     const auto export_status =
+         arrow::ExportRecordBatch(*batch, &c_array, &c_schema);
+     if (!export_status.ok()) {
+       std::fprintf(stderr, "failed to export Arrow record batch: %s\n",
+                    export_status.ToString().c_str());
+       if (c_array.release != nullptr) {
          c_array.release(&c_array);
        }
-   }
+       if (c_schema.release != nullptr) {
+         c_schema.release(&c_schema);
+       }
+       lancedb_connection_free(db);
+       return 1;
+     }
 
-   // Create table
-   LanceDBTable* table;
-
-   result = lancedb_table_create(
-       db,
-       "my_vectors",
-       (FFI_ArrowSchema*)&c_schema,
-       reader,
-       &table,
-       &error_message
-   );
-
-   if (result == LANCEDB_SUCCESS) {
-       printf("Table created with %lu rows\n", lancedb_table_count_rows(table));
-       lancedb_table_free(table);
-   } else {
-       fprintf(stderr, "Error: %s\n", error_message);
+     LanceDBRecordBatchReader* reader = nullptr;
+     result = lancedb_record_batch_reader_from_arrow(
+         reinterpret_cast<FFI_ArrowArray*>(&c_array),
+         reinterpret_cast<FFI_ArrowSchema*>(&c_schema), &reader,
+         &error_message);
+     if (result != LANCEDB_SUCCESS) {
+       // This schema comes from Arrow C++, so the C API accepts it and owns
+       // c_array once this call starts converting the batch. Do not release
+       // c_array again, and do not continue with the null reader.
+       print_error("import record batch", result, error_message);
        lancedb_free_string(error_message);
+       if (c_schema.release != nullptr) {
+         c_schema.release(&c_schema);
+       }
+       lancedb_connection_free(db);
+       return 1;
+     }
+
+     LanceDBTable* table = nullptr;
+     result = lancedb_table_create(
+         db, "my_vectors", reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
+         nullptr, &table, &error_message);
+     if (c_schema.release != nullptr) {
+       c_schema.release(&c_schema);
+     }
+     if (result != LANCEDB_SUCCESS) {
+       print_error("create table", result, error_message);
+       lancedb_free_string(error_message);
+       lancedb_record_batch_reader_free(reader);
+       lancedb_connection_free(db);
+       return 1;
+     }
+
+     result = lancedb_table_add(table, reader, &error_message);
+     reader = nullptr;  // add consumes a non-NULL reader on every path
+     if (result != LANCEDB_SUCCESS) {
+       print_error("add rows", result, error_message);
+       lancedb_free_string(error_message);
+       lancedb_table_free(table);
+       lancedb_connection_free(db);
+       return 1;
+     }
+
+     std::printf("table has %llu rows\n", lancedb_table_count_rows(table));
+     lancedb_table_free(table);
+     lancedb_connection_free(db);
+     return 0;
    }
 
-   // Clean up
-   lancedb_connection_free(db);
+The reader import splits ownership at schema import. If the schema import fails,
+``c_array`` is still caller-owned and must be released. Once the schema imports,
+the C API owns the array and a later batch-conversion failure still consumes it.
+The schema itself is only read and remains caller-owned. The example creates an
+empty table first and then calls ``lancedb_table_add()``, whose non-NULL reader
+is consumed on every path after its null check. Creating the table with a reader
+instead is also supported; its ownership split is documented in
+:doc:`ownership`.
 
 Waiting for an index
 --------------------
@@ -170,10 +215,11 @@ build takes:
        fprintf(stderr, "the index is not fully built yet\n");
    } else if (result != LANCEDB_SUCCESS) {
        fprintf(stderr, "Error: %s\n", error_message);
-       lancedb_free_string(error_message);
    }
+   lancedb_free_string(error_message);
 
-The budget is a polling budget in milliseconds and must be greater than zero: the SDK
+Free the optional message after either branch; ``lancedb_free_string()`` accepts
+NULL. The budget is a polling budget in milliseconds and must be greater than zero: the SDK
 starts a polling round while less than that much time has elapsed, sleeping one second
 between rounds, and caps the budget at two hours, rejecting a longer one with the maximum
 it accepts. It is not a wall-clock bound: the listing and statistics requests of a round,
