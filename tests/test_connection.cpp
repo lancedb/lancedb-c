@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -438,6 +439,23 @@ TEST_CASE("LanceDB Remote Client Configuration", "[connection]") {
     REQUIRE(outputs.connection == nullptr);
     REQUIRE(outputs.error_message != nullptr);
     REQUIRE(std::string(outputs.error_message).find("invalid HTTP status code") !=
+            std::string::npos);
+  }
+
+  SECTION("Oversized blob concurrency is a typed execute-time error") {
+    LanceDBClientConfig config{};
+    config.set_fields = LANCEDB_CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY;
+    config.blob_request_concurrency = std::numeric_limits<size_t>::max();
+
+    LanceDBConnectBuilder* builder =
+        make_builder("http://127.0.0.1:1", &config);
+    Outputs outputs;
+    REQUIRE(lancedb_connect_builder_execute(
+                builder, &outputs.connection, &outputs.error_message)
+            == LANCEDB_INVALID_INPUT);
+    REQUIRE(outputs.connection == nullptr);
+    REQUIRE(outputs.error_message != nullptr);
+    REQUIRE(std::string(outputs.error_message).find("blob request concurrency") !=
             std::string::npos);
   }
 #else

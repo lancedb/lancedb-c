@@ -1114,8 +1114,9 @@ typedef enum {
  * only when both are configured; a lone client certificate or key path is not
  * read. tls_ssl_ca_cert is read when configured. Missing or unreadable configured
  * files, invalid certificate contents, invalid header names or values, an
- * unsupported id_delimiter, a zero blob request concurrency and invalid retry
- * status codes are reported by lancedb_connect_builder_execute().
+ * unsupported id_delimiter, a blob request concurrency outside the SDK's
+ * positive semaphore range (including an environment-derived value) and invalid
+ * retry status codes are reported by lancedb_connect_builder_execute().
  *
  * Callback-based header providers are not part of this plain-data structure.
  * Native (non-db://) connections ignore the configuration, matching the other
