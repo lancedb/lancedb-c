@@ -928,8 +928,14 @@ LanceDBConnectBuilder* lancedb_connect(const char* uri);
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * On success, the builder is consumed by this function and must not be used after calling.
- * The returned connection must be freed with lancedb_connection_free().
+ * A non-NULL builder is consumed on every path and must not be used after
+ * calling. connection is written only on success, when it receives a handle
+ * that must be freed with lancedb_connection_free(); on failure a non-NULL
+ * connection slot is left unchanged. An existing *error_message value is
+ * preserved on success, consistent with
+ * lancedb_connect_namespace_builder_execute(). On error, a non-NULL
+ * error_message receives a message that the caller frees with
+ * lancedb_free_string().
  */
 LanceDBError lancedb_connect_builder_execute( LanceDBConnectBuilder* builder,
 		    LanceDBConnection** connection, char** error_message);
