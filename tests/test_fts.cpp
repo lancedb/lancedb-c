@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -122,6 +123,45 @@ std::shared_ptr<arrow::RecordBatch> create_phrase_test_record_batch() {
 
   return arrow::RecordBatch::Make(
       schema, static_cast<int64_t>(texts.size()), {id_array, text_array, data_array});
+}
+
+std::shared_ptr<arrow::Schema> create_multi_match_test_schema() {
+  return arrow::schema({
+      arrow::field("id", arrow::int32()),
+      arrow::field("title", arrow::utf8()),
+      arrow::field("body", arrow::utf8()),
+  });
+}
+
+// The two text columns have identical term and length distributions, so a
+// shared term scores the same in either field. Rows 1 and 2 isolate the two
+// fields, row 3 matches both terms in both fields, and row 4 matches neither.
+std::shared_ptr<arrow::RecordBatch> create_multi_match_test_record_batch() {
+  auto schema = create_multi_match_test_schema();
+  const std::vector<std::pair<std::string, std::string>> texts = {
+      {"alpha", "alpha"},
+      {"alpha", "beta"},
+      {"beta", "alpha"},
+      {"alpha beta", "alpha beta"},
+      {"gamma delta", "gamma delta"},
+  };
+
+  arrow::Int32Builder id_builder;
+  arrow::StringBuilder title_builder;
+  arrow::StringBuilder body_builder;
+  for (size_t i = 0; i < texts.size(); i++) {
+    REQUIRE(id_builder.Append(static_cast<int32_t>(i)).ok());
+    REQUIRE(title_builder.Append(texts[i].first).ok());
+    REQUIRE(body_builder.Append(texts[i].second).ok());
+  }
+
+  std::shared_ptr<arrow::Array> id_array, title_array, body_array;
+  REQUIRE(id_builder.Finish(&id_array).ok());
+  REQUIRE(title_builder.Finish(&title_array).ok());
+  REQUIRE(body_builder.Finish(&body_array).ok());
+
+  return arrow::RecordBatch::Make(
+      schema, static_cast<int64_t>(texts.size()), {id_array, title_array, body_array});
 }
 
 struct QueryResultBatches {
@@ -385,6 +425,64 @@ public:
       : FtsFixture("fts_phrase_test", create_phrase_test_record_batch(), true) {}
 };
 
+class MultiMatchFtsFixture : public LanceDBFixture {
+public:
+  MultiMatchFtsFixture() : table_(create_table()) {
+    for (const char* column : {"title", "body"}) {
+      char* error_message = nullptr;
+      REQUIRE(lancedb_table_create_fts_index(
+          table_.get(), &column, 1, nullptr, &error_message) == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+    }
+  }
+
+  LanceDBTable* table() const {
+    return table_.get();
+  }
+
+private:
+  LanceDBTablePtr create_table() {
+    auto schema = create_multi_match_test_schema();
+    auto batch = create_multi_match_test_record_batch();
+    auto reader = create_reader_from_batch(batch);
+    REQUIRE(reader != nullptr);
+
+    struct ArrowSchema c_schema;
+    REQUIRE(arrow::ExportSchema(*schema, &c_schema).ok());
+
+    LanceDBTable* raw_table = nullptr;
+    char* error_message = nullptr;
+    const auto status = lancedb_table_create(
+        db,
+        "fts_multi_match_test",
+        reinterpret_cast<FFI_ArrowSchema*>(&c_schema),
+        reader,
+        &raw_table,
+        &error_message);
+
+    if (c_schema.release) {
+      c_schema.release(&c_schema);
+    }
+
+    if (status != LANCEDB_SUCCESS || error_message != nullptr || raw_table == nullptr) {
+      const bool had_error_message = error_message != nullptr;
+      if (had_error_message) {
+        lancedb_free_string(error_message);
+      }
+      if (raw_table != nullptr) {
+        lancedb_table_free(raw_table);
+      }
+      REQUIRE(status == LANCEDB_SUCCESS);
+      REQUIRE(!had_error_message);
+      REQUIRE(raw_table != nullptr);
+    }
+
+    return LanceDBTablePtr(raw_table, lancedb_table_free);
+  }
+
+  LanceDBTablePtr table_;
+};
+
 LanceDBFtsQuery* make_phrase_query(const char* text, const char* column, uint32_t slop) {
   LanceDBFtsQuery* fts_query = nullptr;
   char* error_message = nullptr;
@@ -491,6 +589,52 @@ QueryResultBatches run_structured_query(
   REQUIRE(error_message == nullptr);
 
   return collect_query_result(lancedb_query_execute(query));
+}
+
+LanceDBFtsQuery* make_multi_match_query(
+    const char* text,
+    const std::vector<std::string>& columns,
+    const std::vector<float>& boosts = {},
+    LanceDBFtsOperator term_operator = LANCEDB_FTS_OPERATOR_OR) {
+  REQUIRE(!columns.empty());
+  std::vector<const char*> column_names;
+  column_names.reserve(columns.size());
+  for (const auto& column : columns) {
+    column_names.push_back(column.c_str());
+  }
+
+  auto options = lancedb_fts_multi_match_options_default();
+  options.term_operator = term_operator;
+  if (!boosts.empty()) {
+    options.boosts = boosts.data();
+    options.num_boosts = boosts.size();
+  }
+
+  LanceDBFtsQuery* fts_query = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_new_multi_match(
+      text,
+      column_names.data(),
+      column_names.size(),
+      &options,
+      &fts_query,
+      &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(fts_query != nullptr);
+  return fts_query;
+}
+
+QueryResultBatches run_multi_match_query(
+    LanceDBTable* table,
+    const char* text,
+    const std::vector<std::string>& columns,
+    const std::vector<float>& boosts = {},
+    LanceDBFtsOperator term_operator = LANCEDB_FTS_OPERATOR_OR,
+    size_t limit = 10) {
+  auto* fts_query = make_multi_match_query(text, columns, boosts, term_operator);
+  auto result = run_structured_query(table, fts_query, limit);
+  lancedb_fts_query_free(fts_query);
+  return result;
 }
 
 QueryResultBatches run_vector_leg_query(
@@ -1070,6 +1214,199 @@ TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured match invalid inp
     REQUIRE(fts_query == nullptr);
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
+  }
+}
+
+TEST_CASE_METHOD(MultiMatchFtsFixture, "LanceDB Query - structured multi-match full text",
+                 "[fts]") {
+  const std::vector<std::string> columns = {"title", "body"};
+
+  SECTION("returns each matching row once with the best field score") {
+    auto result = run_multi_match_query(table(), "alpha", columns);
+    REQUIRE(result.num_rows() == 4);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2, 3});
+
+    // Row 0 matches in both fields, row 1 only in title, and row 2 only in body.
+    // Their fields have identical term and length distributions, so the best
+    // field score equals the single matching field score; summing the fields
+    // would make row 0 twice as large.
+    REQUIRE(std::abs(float_column_of(result, "_score", 0) -
+                     float_column_of(result, "_score", 1)) < 1e-5F);
+    REQUIRE(std::abs(float_column_of(result, "_score", 0) -
+                     float_column_of(result, "_score", 2)) < 1e-5F);
+  }
+
+  SECTION("uses the SDK defaults when options is NULL") {
+    const char* column_names[] = {"title", "body"};
+    LanceDBFtsQuery* fts_query = nullptr;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", column_names, 2, nullptr, &fts_query, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(fts_query != nullptr);
+
+    auto result = run_structured_query(table(), fts_query);
+    lancedb_fts_query_free(fts_query);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2, 3});
+  }
+
+  SECTION("applies boosts in column order") {
+    auto title_boosted = run_multi_match_query(
+        table(), "alpha", columns, {2.0F, 1.0F});
+    auto body_boosted = run_multi_match_query(
+        table(), "alpha", columns, {1.0F, 2.0F});
+
+    REQUIRE(float_column_of(title_boosted, "_score", 1) >
+            float_column_of(title_boosted, "_score", 2));
+    REQUIRE(float_column_of(body_boosted, "_score", 2) >
+            float_column_of(body_boosted, "_score", 1));
+  }
+
+  SECTION("applies the shared operator to every column") {
+    auto any = run_multi_match_query(table(), "alpha beta", columns);
+    REQUIRE(ids_of(any) == std::set<int32_t>{0, 1, 2, 3});
+
+    auto all = run_multi_match_query(
+        table(), "alpha beta", columns, {}, LANCEDB_FTS_OPERATOR_AND);
+    REQUIRE(ids_of(all) == std::set<int32_t>{3});
+  }
+}
+
+TEST_CASE_METHOD(MultiMatchFtsFixture, "LanceDB Query - structured multi-match invalid input",
+                 "[fts]") {
+  const char* columns[] = {"title", "body"};
+  const char invalid_utf8[] = {static_cast<char>(0xff), '\0'};
+  char* error_message = nullptr;
+  LanceDBFtsQuery* fts_query = nullptr;
+
+  SECTION("rejects missing text, columns, output and boosts") {
+    REQUIRE(lancedb_fts_multi_match_options_default().term_operator ==
+            LANCEDB_FTS_OPERATOR_OR);
+
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        nullptr, columns, 2, nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", nullptr, 2, nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const char* null_column[] = {"title", nullptr};
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", null_column, 2, nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", columns, 2, nullptr, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    auto options = lancedb_fts_multi_match_options_default();
+    options.num_boosts = 1;
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", columns, 2, &options, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("rejects invalid UTF-8 and out-of-range operators") {
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        invalid_utf8, columns, 2, nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const char* invalid_columns[] = {invalid_utf8, "body"};
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", invalid_columns, 2, nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    REQUIRE(lancedb_test_fts_query_new_multi_match_with_operator(
+        "alpha", columns, 2, 2, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("maps SDK constructor errors to invalid input") {
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", nullptr, 0, nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::strstr(error_message, "no columns") != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    const float one_boost = 1.0F;
+    auto options = lancedb_fts_multi_match_options_default();
+    options.boosts = &one_boost;
+    options.num_boosts = 1;
+    REQUIRE(lancedb_fts_query_new_multi_match(
+        "alpha", columns, 2, &options, &fts_query, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::strstr(error_message, "number of boosts") != nullptr);
+    lancedb_free_string(error_message);
+  }
+
+  SECTION("non-finite or negative boosts fail when executed") {
+    for (const float boost : {-1.0F, std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::infinity()}) {
+      const float boosts[] = {boost, 1.0F};
+      auto options = lancedb_fts_multi_match_options_default();
+      options.boosts = boosts;
+      options.num_boosts = 2;
+      REQUIRE(lancedb_fts_query_new_multi_match(
+          "alpha", columns, 2, &options, &fts_query, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(fts_query != nullptr);
+      REQUIRE(error_message == nullptr);
+
+      LanceDBQuery* query = lancedb_query_new(table());
+      REQUIRE(query != nullptr);
+      REQUIRE(lancedb_query_full_text_search_query(query, fts_query, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+      lancedb_fts_query_free(fts_query);
+      fts_query = nullptr;
+
+      LanceDBQueryResult* result = nullptr;
+      error_message = nullptr;
+      REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message)
+          == LANCEDB_INVALID_INPUT);
+      REQUIRE(result == nullptr);
+      REQUIRE(error_message != nullptr);
+      REQUIRE(std::strstr(error_message, "MultiMatchQuery boost") != nullptr);
+      lancedb_free_string(error_message);
+      error_message = nullptr;
+      // execute_with_status consumes the builder on every path.
+    }
   }
 }
 

@@ -604,6 +604,72 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   }
   first = NULL;
 
+  /* MultiMatch copies the shared text, ordered columns and boosts, so the
+   * caller can release all three after construction. One handle serves two
+   * builders and is freed before either executes. */
+  char multi_text[] = "alpha";
+  const char* multi_columns[] = {"text", "text"};
+  float multi_boosts[] = {1.0F, 2.0F};
+  LanceDBFtsMultiMatchOptions multi_options =
+      lancedb_fts_multi_match_options_default();
+  multi_options.boosts = multi_boosts;
+  multi_options.num_boosts = 2;
+  multi_options.term_operator = LANCEDB_FTS_OPERATOR_OR;
+  if (lancedb_fts_query_new_multi_match(
+          multi_text, multi_columns, 2, &multi_options, &fts_query,
+          &error_message) != LANCEDB_SUCCESS ||
+      fts_query == NULL || error_message != NULL) {
+    result = fail("creating the C17 MultiMatch query failed");
+    goto cleanup;
+  }
+  multi_text[0] = 'z';
+  multi_columns[0] = "missing";
+  /* A borrowed boost array would now make planning fail. The finite negative
+   * value makes the successful executions prove the constructor copied it. */
+  multi_boosts[0] = -1.0F;
+
+  first = lancedb_query_new(table);
+  second = lancedb_query_new(table);
+  if (first == NULL || second == NULL) {
+    result = fail("creating C17 MultiMatch builders failed");
+    goto cleanup;
+  }
+  if (lancedb_query_full_text_search_query(first, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL ||
+      lancedb_query_full_text_search_query(second, fts_query, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("attaching the C17 MultiMatch query to both builders failed");
+    goto cleanup;
+  }
+  lancedb_fts_query_free(fts_query);
+  fts_query = NULL;
+  if (execute_query_rows(first, &rows) != 0 || rows != 1) {
+    first = NULL;
+    result = fail("the first C17 MultiMatch builder did not copy its inputs");
+    goto cleanup;
+  }
+  first = NULL;
+  if (execute_query_rows(second, &rows) != 0 || rows != 1) {
+    second = NULL;
+    result = fail("the second C17 MultiMatch builder did not copy its inputs");
+    goto cleanup;
+  }
+  second = NULL;
+
+  /* A NULL column array with a nonzero count is rejected as representation,
+   * and the output stays NULL. */
+  if (lancedb_fts_query_new_multi_match(
+          "alpha", NULL, 1, NULL, &fts_query, &error_message)
+          != LANCEDB_INVALID_ARGUMENT ||
+      fts_query != NULL || error_message == NULL) {
+    result = fail("a NULL C17 MultiMatch column array must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+
   /* An empty Boolean constructs but the SDK rejects it when planned: the
    * query has no leaf for granularity resolution. */
   if (lancedb_fts_query_new_boolean(

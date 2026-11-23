@@ -172,11 +172,11 @@ typedef struct LanceDBExpr LanceDBExpr;
 /**
  * Opaque handle to a structured full-text query
  *
- * Create with lancedb_fts_query_new_match(), lancedb_fts_query_new_phrase(),
- * lancedb_fts_query_new_boolean() or lancedb_fts_query_new_boost() and free
- * with lancedb_fts_query_free(). Builders clone the handle's query when it is
- * set, so one handle can be attached to several builders and freed immediately
- * after the setters return.
+ * Create with lancedb_fts_query_new_match(), lancedb_fts_query_new_multi_match(),
+ * lancedb_fts_query_new_phrase(), lancedb_fts_query_new_boolean() or
+ * lancedb_fts_query_new_boost() and free with lancedb_fts_query_free().
+ * Builders clone the handle's query when it is set, so one handle can be
+ * attached to several builders and freed immediately after the setters return.
  */
 typedef struct LanceDBFtsQuery LanceDBFtsQuery;
 
@@ -4262,7 +4262,8 @@ LanceDBError lancedb_query_full_text_search(
 );
 
 /**
- * Term combination operator for lancedb_fts_query_new_match()
+ * Term combination operator for lancedb_fts_query_new_match() and
+ * lancedb_fts_query_new_multi_match()
  *
  * LANCEDB_FTS_OPERATOR_OR matches documents containing any query term and is
  * the SDK default. LANCEDB_FTS_OPERATOR_AND requires every term.
@@ -4380,6 +4381,139 @@ LanceDBError lancedb_fts_query_new_match(
  * @return Default options for lancedb_fts_query_new_match()
  */
 LanceDBFtsMatchOptions lancedb_fts_match_options_default(void);
+
+/**
+ * Options for lancedb_fts_query_new_multi_match()
+ *
+ * `boosts` points to `num_boosts` per-column score multipliers in column order.
+ * `num_boosts == 0` uses the SDK default of 1.0 for every column and does not
+ * read `boosts`; otherwise `boosts` must be non-NULL and `num_boosts` must
+ * equal the constructor's `num_columns`. The constructor forwards values
+ * unchanged; the embedded planner requires each to be finite and non-negative
+ * and otherwise fails with LANCEDB_INVALID_INPUT.
+ *
+ * `term_operator` is the shared term combination operator applied to the Match
+ * leaf for every column. It must be a LanceDBFtsOperator value; any other
+ * integer is rejected by the constructor. The SDK default is OR, which is also
+ * returned by lancedb_fts_multi_match_options_default().
+ */
+typedef struct {
+    const float* boosts;              // Per-column multipliers; NULL with num_boosts 0 for defaults
+    size_t num_boosts;                // Number of entries in boosts
+    LanceDBFtsOperator term_operator; // Shared term operator for every column
+} LanceDBFtsMultiMatchOptions;
+
+/**
+ * Create a structured MultiMatch full-text query
+ *
+ * One Match leaf is created for every column, in the order given, and all
+ * leaves share the text and the operator. The constructor copies `text`, the
+ * column name array and any boosts, so the caller may change or free them
+ * after this call returns. `columns` may be NULL only when `num_columns` is 0;
+ * an empty column list is rejected by the SDK constructor with
+ * LANCEDB_INVALID_INPUT. A NULL options pointer uses the SDK defaults: no
+ * per-column boosts and OR term combination, which are also returned by
+ * lancedb_fts_multi_match_options_default().
+ *
+ * Every row is scored independently by each leaf and returned once with the
+ * highest leaf score (best fields), so a row matching several columns is not
+ * duplicated. A per-column boost multiplies that leaf's score, and the shared
+ * operator applies to every leaf. The SDK defaults for fuzziness (exact),
+ * max_expansions (50) and prefix_length (0) apply to every leaf; each leaf has
+ * its own max_expansions budget.
+ *
+ * Embedded LanceDB rejects a MultiMatch that resolves to ListElement documents,
+ * including a single-column or nested MultiMatch. Lance reports the rejection as
+ * its internal Error::NotSupported; the pinned SDK wraps that variant as
+ * Error::Lance, so the C status is LANCEDB_LANCE with the "MultiMatch does not
+ * support ListElement document granularity" diagnostic, not
+ * LANCEDB_NOT_SUPPORTED. That is an embedded dataset-scanner check and is
+ * separate from the MemWAL routing limits below.
+ *
+ * The constructor validates representation only and leaves semantics to the
+ * SDK. A nonzero boost count that differs from the column count fails here with
+ * LANCEDB_INVALID_INPUT. Boost values are not checked here: the embedded
+ * dataset scanner requires each to be finite and non-negative when it plans
+ * the query and otherwise fails with LANCEDB_INVALID_INPUT.
+ *
+ * A namespace QueryTable pushdown sends MultiMatch as a structured node rather
+ * than as text, because only a root OR Match uses the string form. The
+ * namespace `multi_match` model carries the ordered `match_queries` leaves
+ * with their per-leaf boost and operator, so those settings survive the
+ * pushdown. The namespace Match model stores fuzziness, max_expansions and
+ * prefix_length as signed 32-bit values; this constructor leaves them at the
+ * SDK defaults, so it cannot exceed those ranges. A non-finite boost becomes
+ * JSON null in the intermediate value and then an unset optional in the
+ * namespace model, so the REST request omits it and the server applies its
+ * default instead of failing locally. A finite negative boost is forwarded
+ * unchanged; the server determines whether to accept it.
+ *
+ * LanceDB Enterprise servers 0.3.0 and later receive the structured node with
+ * every leaf, so ordered columns, per-column boosts and the shared operator
+ * are preserved. A non-finite boost stays an explicit JSON null in that
+ * request; the client does not reject it and the server determines the
+ * outcome. Older Enterprise servers reject AND only for a root Match or
+ * MultiMatch, including a hybrid query's full-text leg, with
+ * LANCEDB_NOT_SUPPORTED. A MultiMatch nested under Boolean or Boost is not
+ * inspected by that check; it follows the parent's legacy text projection,
+ * which can lose the AND constraint. For example, a Boost whose positive leg
+ * is an AND MultiMatch sends the positive leg's shared text over the union of
+ * the columns, so the server can treat it as OR. With a root OR MultiMatch, an
+ * older server receives the shared text and the union of the columns; every
+ * per-column boost is dropped, and the client does not guarantee the resulting
+ * membership or ranking. The server determines the result from that
+ * projection.
+ *
+ * A MemWAL LSM full-text query first checks the table's unenforced primary
+ * key, and a table without one fails with LANCEDB_INVALID_INPUT before FTS
+ * planning. The pinned SDK then requires the whole full-text tree to name
+ * exactly one explicit column, and that column's FTS index must be maintained
+ * by the write spec and carried by every resident MemTable; otherwise the
+ * query fails with LANCEDB_NOT_SUPPORTED. A MultiMatch spanning several
+ * columns fails that check even when the table has a primary key, before
+ * Lance's lower-level cross-column path is reached. The same single-column
+ * check applies to a hybrid query's full-text leg. Every leaf keeps its own
+ * max_expansions budget.
+ *
+ * On entry `*query_out` and the error message are cleared. On success
+ * `*query_out` owns a handle that the caller frees with
+ * lancedb_fts_query_free(). On failure `*query_out` stays NULL. A missing text,
+ * output, or columns pointer with a nonzero count, a NULL column entry, invalid
+ * UTF-8, a NULL boost array with a nonzero count, or an operator outside
+ * LanceDBFtsOperator returns LANCEDB_INVALID_ARGUMENT. An empty column list or
+ * a nonzero boost count that differs from the column count returns
+ * LANCEDB_INVALID_INPUT from the SDK.
+ *
+ * @param text - text matched against every column, a valid null-terminated UTF-8 string
+ * @param columns - ordered array of column names, or NULL when num_columns is 0
+ * @param num_columns - number of column names
+ * @param options - MultiMatch options, or NULL for the SDK defaults
+ * @param query_out - pointer to receive the structured full-text query
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_new_multi_match(
+    const char* text,
+    const char* const* columns,
+    size_t num_columns,
+    const LanceDBFtsMultiMatchOptions* options,
+    LanceDBFtsQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Return the default structured MultiMatch query options
+ *
+ * The SDK default is OR term combination for every leaf and no per-column
+ * boost, so every leaf uses the MatchQuery defaults. The returned struct is a
+ * value; no free function is needed.
+ *
+ * @return Default options for lancedb_fts_query_new_multi_match()
+ */
+LanceDBFtsMultiMatchOptions lancedb_fts_multi_match_options_default(void);
 
 /**
  * Create a structured phrase full-text query
@@ -4627,7 +4761,9 @@ LanceDBError lancedb_fts_query_new_boost(
  * @param query - pointer to LanceDBFtsQuery, or NULL
  *
  * The handle is independent of every builder it was attached to, so freeing it
- * does not change those builders.
+ * does not change those builders. Create it with lancedb_fts_query_new_match(),
+ * lancedb_fts_query_new_multi_match(), lancedb_fts_query_new_phrase(),
+ * lancedb_fts_query_new_boolean() or lancedb_fts_query_new_boost().
  */
 void lancedb_fts_query_free(LanceDBFtsQuery* query);
 
@@ -4980,10 +5116,10 @@ LanceDBError lancedb_vector_query_full_text_search(
  * stays unchanged.
  *
  * The SDK's default RRF reranker applies when no reranker is set explicitly.
- * Match, phrase, Boolean and Boost evaluation, including backend limitations,
- * are described on lancedb_fts_query_new_match(),
- * lancedb_fts_query_new_phrase(), lancedb_fts_query_new_boolean() and
- * lancedb_fts_query_new_boost().
+ * Match, MultiMatch, phrase, Boolean and Boost evaluation, including backend
+ * limitations, are described on lancedb_fts_query_new_match(),
+ * lancedb_fts_query_new_multi_match(), lancedb_fts_query_new_phrase(),
+ * lancedb_fts_query_new_boolean() and lancedb_fts_query_new_boost().
  *
  * If the vector leg returns batch results with `query_index` and the full-text
  * leg returns matches, the pinned SDK beta.26 RRF merge fails with an Arrow

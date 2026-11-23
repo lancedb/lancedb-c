@@ -20,8 +20,8 @@ use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
 use lancedb::index::scalar::{
-    BooleanQuery, BoostQuery, FtsQuery, FullTextSearchQuery, MatchQuery, Occur, Operator,
-    PhraseQuery,
+    BooleanQuery, BoostQuery, FtsQuery, FullTextSearchQuery, MatchQuery, MultiMatchQuery, Occur,
+    Operator, PhraseQuery,
 };
 use lancedb::query::{
     ColumnOrdering, ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
@@ -59,14 +59,14 @@ pub struct LanceDBQuery {
 /// The constructor copies its inputs. Builder setters clone the stored SDK
 /// query, so one handle can be attached to several builders and freed as soon
 /// as the setters return. Create with lancedb_fts_query_new_match(),
-/// lancedb_fts_query_new_phrase(), lancedb_fts_query_new_boolean() or
-/// lancedb_fts_query_new_boost().
+/// lancedb_fts_query_new_multi_match(), lancedb_fts_query_new_phrase(),
+/// lancedb_fts_query_new_boolean() or lancedb_fts_query_new_boost().
 #[repr(C)]
 pub struct LanceDBFtsQuery {
     inner: FullTextSearchQuery,
 }
 
-/// Term combination operator for a structured Match query
+/// Term combination operator for a structured Match or MultiMatch query
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub enum LanceDBFtsOperator {
@@ -182,6 +182,48 @@ impl Default for LanceDBFtsMatchOptions {
 #[no_mangle]
 pub extern "C" fn lancedb_fts_match_options_default() -> LanceDBFtsMatchOptions {
     LanceDBFtsMatchOptions::default()
+}
+
+/// Options for a structured MultiMatch query
+///
+/// `boosts` points to `num_boosts` per-column multipliers in column order. A
+/// zero `num_boosts` uses the SDK default for every column and does not read
+/// `boosts`; otherwise `boosts` must be non-NULL and `num_boosts` must equal
+/// the constructor's column count. `term_operator` holds a raw
+/// `LanceDBFtsOperator` value so an out-of-range C value can be rejected before
+/// it becomes a Rust enum.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBFtsMultiMatchOptions {
+    pub boosts: *const f32,
+    pub num_boosts: usize,
+    pub term_operator: c_int,
+}
+
+impl Default for LanceDBFtsMultiMatchOptions {
+    fn default() -> Self {
+        // Read the default operator from the same SDK constructor that
+        // MultiMatchQuery::try_new uses for every leaf.
+        let defaults = MatchQuery::new(String::new());
+        Self {
+            boosts: ptr::null(),
+            num_boosts: 0,
+            term_operator: match defaults.operator {
+                Operator::Or => LanceDBFtsOperator::Or as c_int,
+                Operator::And => LanceDBFtsOperator::And as c_int,
+            },
+        }
+    }
+}
+
+/// Return the default structured MultiMatch query options
+///
+/// The SDK default is OR term combination for every leaf and no per-column
+/// boost, so every leaf uses the `MatchQuery::new` defaults. The returned
+/// struct is a value; no free function is needed.
+#[no_mangle]
+pub extern "C" fn lancedb_fts_multi_match_options_default() -> LanceDBFtsMultiMatchOptions {
+    LanceDBFtsMultiMatchOptions::default()
 }
 
 /// One borrowed typed query vector
@@ -668,6 +710,100 @@ unsafe fn match_query_from_c(
         .with_max_expansions(options.max_expansions)
         .with_operator(operator.into())
         .with_prefix_length(options.prefix_length))
+}
+
+/// Copied inputs of a structured MultiMatch query
+struct MultiMatchParts {
+    text: String,
+    columns: Vec<String>,
+    boosts: Option<Vec<f32>>,
+    term_operator: Option<Operator>,
+}
+
+/// Build the copied inputs of a structured MultiMatch query
+///
+/// Text, ordered columns and per-column boosts are copied so the caller can
+/// reuse or free them after the constructor returns. A zero boost count uses
+/// the SDK defaults and does not read the boost pointer. An empty column list
+/// and a boost count that differs from the column count are left to the SDK
+/// constructors, which reject them as invalid input. Representation values are
+/// validated here.
+///
+/// # Safety
+/// `text` must be a valid null-terminated UTF-8 string. `columns` may be NULL
+/// only when `num_columns` is zero; otherwise it must point to `num_columns`
+/// readable null-terminated strings. `options` may be NULL or point to a
+/// readable options struct whose boost array, when `num_boosts` is nonzero,
+/// has that many readable entries.
+unsafe fn multi_match_parts_from_c(
+    text: *const c_char,
+    columns: *const *const c_char,
+    num_columns: usize,
+    options: *const LanceDBFtsMultiMatchOptions,
+) -> Result<MultiMatchParts, String> {
+    if text.is_null() {
+        return Err("multi-match text is required".to_string());
+    }
+    let text = CStr::from_ptr(text)
+        .to_str()
+        .map_err(|_| "multi-match text is not valid UTF-8".to_string())?
+        .to_string();
+
+    let columns = if num_columns == 0 {
+        Vec::new()
+    } else {
+        if columns.is_null() {
+            return Err(
+                "multi-match columns are required when num_columns is not zero".to_string(),
+            );
+        }
+
+        let mut parsed = Vec::with_capacity(num_columns);
+        for index in 0..num_columns {
+            let column = *columns.add(index);
+            if column.is_null() {
+                return Err(format!("multi-match column {index} is required"));
+            }
+            parsed.push(
+                CStr::from_ptr(column)
+                    .to_str()
+                    .map_err(|_| format!("multi-match column {index} is not valid UTF-8"))?
+                    .to_string(),
+            );
+        }
+        parsed
+    };
+
+    let (boosts, term_operator) = if options.is_null() {
+        (None, None)
+    } else {
+        let options = &*options;
+        let term_operator =
+            LanceDBFtsOperator::from_c_int(options.term_operator).ok_or_else(|| {
+                format!(
+                    "operator must be a LanceDBFtsOperator value, got {}",
+                    options.term_operator
+                )
+            })?;
+        let boosts = if options.num_boosts == 0 {
+            None
+        } else {
+            if options.boosts.is_null() {
+                return Err(
+                    "multi-match boosts are required when num_boosts is not zero".to_string(),
+                );
+            }
+            Some(std::slice::from_raw_parts(options.boosts, options.num_boosts).to_vec())
+        };
+        (boosts, Some(term_operator.into()))
+    };
+
+    Ok(MultiMatchParts {
+        text,
+        columns,
+        boosts,
+        term_operator,
+    })
 }
 
 /// Clone one borrowed handle's structured query node
@@ -1201,6 +1337,106 @@ pub unsafe extern "C" fn lancedb_fts_query_new_match(
     LanceDBError::Success
 }
 
+/// Create a structured MultiMatch full-text query
+///
+/// One Match leaf is created for every column, in the order given, and all
+/// leaves share the text and the operator. Text, columns and boosts are
+/// copied, so the caller may reuse or free them after this call returns. A NULL
+/// options pointer uses the SDK defaults: no per-column boosts and OR term
+/// combination. Per-column boosts multiply the matching leaf's score, and a
+/// row matching several columns is returned once with the highest leaf score.
+///
+/// Only representation values are checked here. An empty column list and a
+/// boost count that differs from the column count are rejected by the SDK and
+/// map to `LANCEDB_INVALID_INPUT`; per-column boost values are checked when the
+/// embedded planner runs.
+///
+/// Embedded LanceDB rejects a MultiMatch that resolves to ListElement
+/// documents, including single-column and nested cases. Lance's internal
+/// `Error::NotSupported` is wrapped by the pinned SDK as `Error::Lance`, so the
+/// C status is `LANCEDB_LANCE` with the "MultiMatch does not support
+/// ListElement document granularity" diagnostic, not `LANCEDB_NOT_SUPPORTED`.
+/// A MemWAL LSM full-text query first requires an unenforced primary
+/// key (`LANCEDB_INVALID_INPUT` when absent), then requires the whole full-text
+/// tree to name one explicit column whose FTS index the write spec maintains
+/// and every resident MemTable carries; a cross-column MultiMatch fails with
+/// `LANCEDB_NOT_SUPPORTED` even with a primary key, and the same check applies
+/// to a hybrid query's full-text leg. Older Enterprise servers
+/// reject AND only at a root Match or MultiMatch; a MultiMatch nested under
+/// Boolean or Boost follows the parent's legacy text projection and can lose
+/// AND. A root OR MultiMatch is sent as the shared text over the union of the
+/// columns, with every per-column boost dropped and the result left to the
+/// server. The C declaration has the full backend contract.
+///
+/// # Safety
+/// - `text` must be a valid null-terminated UTF-8 string
+/// - `columns` may be NULL only when `num_columns` is zero; otherwise it must
+///   point to `num_columns` readable null-terminated UTF-8 strings
+/// - `options` may be NULL or point to initialized
+///   `LanceDBFtsMultiMatchOptions`
+/// - `query_out` must be a valid pointer to receive the created handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry `*query_out` and the error message are cleared. On success the
+/// caller owns the handle and frees it with `lancedb_fts_query_free()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_new_multi_match(
+    text: *const c_char,
+    columns: *const *const c_char,
+    num_columns: usize,
+    options: *const LanceDBFtsMultiMatchOptions,
+    query_out: *mut *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !query_out.is_null() {
+        *query_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let MultiMatchParts {
+        text,
+        columns,
+        boosts,
+        term_operator,
+    } = match multi_match_parts_from_c(text, columns, num_columns, options) {
+        Ok(parts) => parts,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let mut query = match MultiMatchQuery::try_new(text, columns) {
+        Ok(query) => query,
+        Err(error) => {
+            let error = lancedb::error::Error::from(error);
+            return handle_error(&error, error_message);
+        }
+    };
+    if let Some(boosts) = boosts {
+        query = match query.try_with_boosts(boosts) {
+            Ok(query) => query,
+            Err(error) => {
+                let error = lancedb::error::Error::from(error);
+                return handle_error(&error, error_message);
+            }
+        };
+    }
+    if let Some(term_operator) = term_operator {
+        query = query.with_operator(term_operator);
+    }
+
+    let search = FullTextSearchQuery::new_query(query.into());
+
+    *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
 /// Create a structured phrase full-text query
 ///
 /// The phrase text and column are copied, and `slop` is forwarded unchanged to
@@ -1392,8 +1628,9 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boost(
 ///
 /// # Safety
 /// - `query` must be NULL or a valid pointer returned from
-///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_phrase`,
-///   `lancedb_fts_query_new_boolean` or `lancedb_fts_query_new_boost`
+///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_multi_match`,
+///   `lancedb_fts_query_new_phrase`, `lancedb_fts_query_new_boolean` or
+///   `lancedb_fts_query_new_boost`
 /// - `query` must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
@@ -1412,9 +1649,9 @@ pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_query_new`
 /// - `full_text_query` must be a valid pointer returned from
-///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_phrase`,
-///   `lancedb_fts_query_new_boolean` or `lancedb_fts_query_new_boost`; it is
-///   borrowed, not consumed
+///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_multi_match`,
+///   `lancedb_fts_query_new_phrase`, `lancedb_fts_query_new_boolean` or
+///   `lancedb_fts_query_new_boost`; it is borrowed, not consumed
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
 /// On failure, including a NULL handle, the builder keeps its previous
@@ -1862,9 +2099,9 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
 /// - `full_text_query` must be a valid pointer returned from
-///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_phrase`,
-///   `lancedb_fts_query_new_boolean` or `lancedb_fts_query_new_boost`; it is
-///   borrowed, not consumed
+///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_multi_match`,
+///   `lancedb_fts_query_new_phrase`, `lancedb_fts_query_new_boolean` or
+///   `lancedb_fts_query_new_boost`; it is borrowed, not consumed
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
 /// On failure, including a NULL handle, the builder keeps its previous

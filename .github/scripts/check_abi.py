@@ -394,6 +394,7 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     # enum, avoiding undefined behavior for an out-of-range C value.
     ("LanceDBQueryVector", "kind"): Allow(enum_int="LanceDBQueryVectorType"),
     ("LanceDBFtsMatchOptions", "term_operator"): Allow(enum_int="LanceDBFtsOperator"),
+    ("LanceDBFtsMultiMatchOptions", "term_operator"): Allow(enum_int="LanceDBFtsOperator"),
     ("LanceDBFtsClause", "occur"): Allow(enum_int="LanceDBFtsOccur"),
     ("LanceDBVectorIndexConfig", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
     ("LanceDBBranchSource", "kind"): Allow(enum_int="LanceDBBranchSourceKind"),

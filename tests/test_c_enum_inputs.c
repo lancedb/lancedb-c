@@ -170,6 +170,19 @@ LanceDBError lancedb_test_fts_query_new_match_with_operator(
   return lancedb_fts_query_new_match(text, column, &options, query_out, error_message);
 }
 
+LanceDBError lancedb_test_fts_query_new_multi_match_with_operator(
+    const char* text,
+    const char* const* columns,
+    size_t num_columns,
+    int operator_value,
+    LanceDBFtsQuery** query_out,
+    char** error_message) {
+  LanceDBFtsMultiMatchOptions options = lancedb_fts_multi_match_options_default();
+  options.term_operator = (LanceDBFtsOperator)operator_value;
+  return lancedb_fts_query_new_multi_match(
+      text, columns, num_columns, &options, query_out, error_message);
+}
+
 LanceDBError lancedb_test_fts_query_new_boolean_with_occur(
     const LanceDBFtsQuery* query,
     int occur_value,
