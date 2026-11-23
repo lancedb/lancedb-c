@@ -394,6 +394,19 @@ LanceDBFtsQuery* make_phrase_query(const char* text, const char* column, uint32_
   return fts_query;
 }
 
+LanceDBFtsQuery* make_match_query(
+    const char* text,
+    const char* column,
+    const LanceDBFtsMatchOptions* options = nullptr) {
+  LanceDBFtsQuery* fts_query = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_new_match(
+      text, column, options, &fts_query, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(fts_query != nullptr);
+  return fts_query;
+}
+
 QueryResultBatches run_phrase_query(
     LanceDBTable* table,
     const char* text,
@@ -403,6 +416,27 @@ QueryResultBatches run_phrase_query(
   LanceDBQuery* query = lancedb_query_new(table);
   REQUIRE(query != nullptr);
   auto* fts_query = make_phrase_query(text, column, slop);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_full_text_search_query(query, fts_query, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  lancedb_fts_query_free(fts_query);
+  REQUIRE(lancedb_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  return collect_query_result(lancedb_query_execute(query));
+}
+
+QueryResultBatches run_match_query(
+    LanceDBTable* table,
+    const char* text,
+    const char* column,
+    const LanceDBFtsMatchOptions* options = nullptr,
+    size_t limit = 10) {
+  LanceDBQuery* query = lancedb_query_new(table);
+  REQUIRE(query != nullptr);
+  auto* fts_query = make_match_query(text, column, options);
 
   char* error_message = nullptr;
   REQUIRE(lancedb_query_full_text_search_query(query, fts_query, &error_message)
@@ -812,6 +846,181 @@ TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured phrase invalid in
   }
 }
 
+TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured match full text", "[fts]") {
+  SECTION("the default operator matches any term") {
+    auto result = run_match_query(table(), "alpha gap", "text");
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+  }
+
+  SECTION("AND requires every term") {
+    auto options = lancedb_fts_match_options_default();
+    options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+
+    auto result = run_match_query(table(), "alpha gap", "text", &options);
+    REQUIRE(ids_of(result) == std::set<int32_t>{1});
+  }
+
+  SECTION("boost scales the full-text score") {
+    auto baseline = run_match_query(table(), "alpha", "text");
+
+    auto options = lancedb_fts_match_options_default();
+    options.boost = 2.0F;
+    auto boosted = run_match_query(table(), "alpha", "text", &options);
+
+    for (const int32_t id : {0, 1, 2}) {
+      REQUIRE(std::abs(float_column_of(boosted, "_score", id) -
+                       2.0F * float_column_of(baseline, "_score", id)) < 1e-5F);
+    }
+  }
+
+  SECTION("prefix_length keeps the leading characters exact") {
+    auto options = lancedb_fts_match_options_default();
+    options.fuzziness = 1;
+
+    auto fuzzy = run_match_query(table(), "xlpha", "text", &options);
+    REQUIRE(ids_of(fuzzy) == std::set<int32_t>{0, 1, 2});
+
+    options.prefix_length = 1;
+    auto prefixed = run_match_query(table(), "xlpha", "text", &options);
+    REQUIRE(prefixed.num_rows() == 0);
+  }
+
+  SECTION("explicit distance 1 matches a typo that the exact default rejects") {
+    auto exact = run_match_query(table(), "alpa", "text");
+    REQUIRE(exact.num_rows() == 0);
+
+    auto options = lancedb_fts_match_options_default();
+    REQUIRE(options.fuzziness == 0);
+    options.fuzziness = 1;
+
+    auto fuzzy = run_match_query(table(), "alpa", "text", &options);
+    REQUIRE(ids_of(fuzzy) == std::set<int32_t>{0, 1, 2});
+  }
+
+  SECTION("NULL options and the default helper agree") {
+    auto defaults = lancedb_fts_match_options_default();
+    REQUIRE(defaults.fuzziness == 0);
+    REQUIRE(defaults.boost == 1.0F);
+    REQUIRE(defaults.max_expansions == 50);
+    REQUIRE(defaults.term_operator == LANCEDB_FTS_OPERATOR_OR);
+    REQUIRE(defaults.prefix_length == 0);
+
+    auto null_options = run_match_query(table(), "alpa", "text");
+    auto explicit_defaults = run_match_query(table(), "alpa", "text", &defaults);
+    REQUIRE(null_options.num_rows() == 0);
+    REQUIRE(explicit_defaults.num_rows() == 0);
+  }
+
+  SECTION("an empty column uses the indexed text column") {
+    auto result = run_match_query(table(), "alpha gap", "");
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+  }
+
+  SECTION("the constructor copies its inputs and the setters clone the handle") {
+    char text[] = "alpha gap";
+    char column[] = "text";
+    auto options = lancedb_fts_match_options_default();
+    options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+
+    auto* fts_query = make_match_query(text, column, &options);
+    text[0] = 'z';
+    column[0] = 'x';
+
+    LanceDBQuery* first = lancedb_query_new(table());
+    LanceDBQuery* second = lancedb_query_new(table());
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search_query(first, fts_query, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_full_text_search_query(second, fts_query, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_fts_query_free(fts_query);
+
+    REQUIRE(ids_of(collect_query_result(lancedb_query_execute(first)))
+        == std::set<int32_t>{1});
+    REQUIRE(ids_of(collect_query_result(lancedb_query_execute(second)))
+        == std::set<int32_t>{1});
+  }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured match invalid input", "[fts]") {
+  SECTION("rejects an out-of-range operator and clears the output") {
+    auto* valid = make_match_query("alpha", "text");
+    LanceDBFtsQuery* fts_query = valid;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_test_fts_query_new_match_with_operator(
+        "alpha", "text", 2, &fts_query, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    lancedb_fts_query_free(valid);
+  }
+
+  SECTION("rejects fuzziness outside -1 through UINT32_MAX") {
+    auto options = lancedb_fts_match_options_default();
+    char* error_message = nullptr;
+
+    options.fuzziness = -2;
+    LanceDBFtsQuery* fts_query = nullptr;
+    REQUIRE(lancedb_fts_query_new_match(
+        "alpha", "text", &options, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    options.fuzziness = 4294967296LL;
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_match(
+        "alpha", "text", &options, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    options.fuzziness = -1;
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_match(
+        "alpha", "text", &options, &fts_query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(fts_query != nullptr);
+    REQUIRE(error_message == nullptr);
+    lancedb_fts_query_free(fts_query);
+
+    options.fuzziness = UINT32_MAX;
+    fts_query = nullptr;
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_match(
+        "alpha", "text", &options, &fts_query, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(fts_query != nullptr);
+    REQUIRE(error_message == nullptr);
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("rejects NULL and invalid UTF-8 text and clears the output") {
+    char* error_message = nullptr;
+    LanceDBFtsQuery* fts_query = nullptr;
+    REQUIRE(lancedb_fts_query_new_match(
+        nullptr, "text", nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    const char invalid_utf8[] = {static_cast<char>(0xff), '\0'};
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_match(
+        invalid_utf8, "text", nullptr, &fts_query, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+  }
+}
+
 TEST_CASE_METHOD(FtsFixture, "LanceDB Query - phrase EXPLAIN requires indexed positions",
                  "[fts]") {
   LanceDBQuery* query = lancedb_query_new(table());
@@ -878,6 +1087,36 @@ TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Vector Query - structured phrase hyb
   // Rows 0 and 1 appear in both legs; row 2 only appears in the vector leg.
   REQUIRE(relevance_score_of(result, 0) > 1.0F / (kDefaultRrfK + 1.0F));
   REQUIRE(relevance_score_of(result, 1) > 1.0F / (kDefaultRrfK + 1.0F));
+}
+
+TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - structured match hybrid", "[fts][vector_query]") {
+  auto options = lancedb_fts_match_options_default();
+  options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+
+  const auto fts_result = run_match_query(table(), "common doc7", "text", &options);
+  REQUIRE(ids_of(fts_result) == std::set<int32_t>{7});
+
+  const auto query_vector = vector_for_row(0);
+  LanceDBVectorQuery* query = lancedb_vector_query_new(
+      table(), query_vector.data(), query_vector.size());
+  REQUIRE(query != nullptr);
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_vector_query_limit(query, 2, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  auto* fts_query = make_match_query("common doc7", "text", &options);
+  REQUIRE(lancedb_vector_query_full_text_search_query(query, fts_query, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  lancedb_fts_query_free(fts_query);
+
+  auto result = collect_query_result(lancedb_vector_query_execute(query));
+  REQUIRE(result.num_rows() == 2);
+  REQUIRE(ids_of(result) == std::set<int32_t>{0, 7});
+  REQUIRE(result.schema->GetFieldByName("_relevance_score") != nullptr);
 }
 
 TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text ordering", "[fts][order_by]") {

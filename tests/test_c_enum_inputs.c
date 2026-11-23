@@ -19,6 +19,8 @@ _Static_assert(sizeof(LanceDBError) == sizeof(int), "LanceDBError must have the 
 _Static_assert(sizeof(LanceDBDistanceType) == sizeof(int), "LanceDBDistanceType must have the C int ABI");
 _Static_assert(sizeof(LanceDBQueryVectorType) == sizeof(int),
                "LanceDBQueryVectorType must have the C int ABI");
+_Static_assert(sizeof(LanceDBFtsOperator) == sizeof(int),
+               "LanceDBFtsOperator must have the C int ABI");
 _Static_assert(sizeof(LanceDBNormalizeMethod) == sizeof(int), "LanceDBNormalizeMethod must have the C int ABI");
 _Static_assert(sizeof(LanceDBIndexType) == sizeof(int), "LanceDBIndexType must have the C int ABI");
 _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType must have the C int ABI");
@@ -139,4 +141,15 @@ LanceDBExpr* lancedb_test_expr_binary(
     int op,
     LanceDBExpr* right) {
   return lancedb_expr_binary(left, (LanceDBBinaryOp)op, right);
+}
+
+LanceDBError lancedb_test_fts_query_new_match_with_operator(
+    const char* text,
+    const char* column,
+    int operator_value,
+    LanceDBFtsQuery** query_out,
+    char** error_message) {
+  LanceDBFtsMatchOptions options = lancedb_fts_match_options_default();
+  options.term_operator = (LanceDBFtsOperator)operator_value;
+  return lancedb_fts_query_new_match(text, column, &options, query_out, error_message);
 }

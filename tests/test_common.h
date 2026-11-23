@@ -74,6 +74,12 @@ LanceDBExpr* lancedb_test_expr_binary(
     LanceDBExpr* left,
     int op,
     LanceDBExpr* right);
+LanceDBError lancedb_test_fts_query_new_match_with_operator(
+    const char* text,
+    const char* column,
+    int operator_value,
+    LanceDBFtsQuery** query_out,
+    char** error_message);
 }
 
 // Helper function to check if directory exists

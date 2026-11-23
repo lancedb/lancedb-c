@@ -172,10 +172,10 @@ typedef struct LanceDBExpr LanceDBExpr;
 /**
  * Opaque handle to a structured full-text query
  *
- * Create with lancedb_fts_query_new_phrase() and free with
- * lancedb_fts_query_free(). Builders clone the handle's query when it is set,
- * so one handle can be attached to several builders and freed immediately after
- * the setters return.
+ * Create with lancedb_fts_query_new_match() or
+ * lancedb_fts_query_new_phrase() and free with lancedb_fts_query_free().
+ * Builders clone the handle's query when it is set, so one handle can be
+ * attached to several builders and freed immediately after the setters return.
  */
 typedef struct LanceDBFtsQuery LanceDBFtsQuery;
 
@@ -3993,6 +3993,113 @@ LanceDBError lancedb_query_full_text_search(
 );
 
 /**
+ * Term combination operator for lancedb_fts_query_new_match()
+ *
+ * LANCEDB_FTS_OPERATOR_OR matches documents containing any query term and is
+ * the SDK default. LANCEDB_FTS_OPERATOR_AND requires every term.
+ */
+typedef enum {
+    LANCEDB_FTS_OPERATOR_OR = 0,
+    LANCEDB_FTS_OPERATOR_AND = 1
+} LanceDBFtsOperator;
+
+/**
+ * Options for lancedb_fts_query_new_match()
+ *
+ * Initialize with lancedb_fts_match_options_default() and change only the
+ * fields that need a non-default value. The defaults come from the SDK's
+ * MatchQuery constructor: OR matching, boost 1.0, fuzziness 0 (exact),
+ * max_expansions 50, and prefix_length 0.
+ *
+ * `fuzziness` is -1 to pass the SDK's automatic choice, or 0 through UINT32_MAX
+ * for an explicit maximum edit distance. Keeping -1 distinct from 0 preserves
+ * the SDK's automatic-versus-exact distinction. With the pinned Lance version,
+ * embedded and MemWAL queries currently treat automatic matching as exact.
+ *
+ * `boost` is a score multiplier. The constructor forwards it unchanged; the SDK
+ * requires a finite, non-negative value when the query is planned.
+ *
+ * `max_expansions` is the maximum final vocabulary size for this Match leaf,
+ * shared across its query positions and selected physical segments. Every
+ * sibling Match leaf has its own budget.
+ *
+ * `term_operator` must be a LanceDBFtsOperator value. Any other integer is
+ * rejected by the constructor rather than converted to an SDK operator.
+ *
+ * `prefix_length` is the number of leading characters kept unchanged during
+ * fuzzy matching.
+ */
+typedef struct {
+    int64_t fuzziness;                // -1 = SDK automatic; 0..UINT32_MAX = explicit distance
+    float boost;                      // Score multiplier; validated by the SDK at query time
+    size_t max_expansions;            // Maximum final vocabulary size for this Match leaf
+    LanceDBFtsOperator term_operator; // Term combination; out-of-range values are rejected
+    uint32_t prefix_length;           // Leading characters unchanged for fuzzy matching
+} LanceDBFtsMatchOptions;
+
+/**
+ * Create a structured Match full-text query
+ *
+ * The text is tokenized by the target index at execution time, and empty text
+ * is passed through unchanged. `options == NULL` uses the SDK's MatchQuery
+ * defaults, which are also returned by lancedb_fts_match_options_default().
+ * The constructor copies `text` and `column`, so the caller may change or free
+ * them after this call returns. A NULL or empty column leaves the choice to the
+ * index.
+ *
+ * `fuzziness` uses -1 for the SDK's automatic mode and 0 through UINT32_MAX for
+ * an explicit edit distance. The pinned embedded and MemWAL paths currently
+ * resolve automatic fuzziness to exact matching. `boost`, `max_expansions` and
+ * `prefix_length` are forwarded to the SDK without additional validation;
+ * `boost` is checked when the query is planned.
+ *
+ * A successfully constructed query can still be limited by the selected
+ * backend. A namespace QueryTable pushdown sends a root OR Match as text and
+ * column only, so its fuzziness, boost, max_expansions, prefix_length and OR
+ * operator are not transmitted; a root AND Match keeps the structured node.
+ * This also applies to a pushed-down hybrid query's full-text branch. LanceDB
+ * Enterprise servers 0.3.0 and later accept the structured query. Older
+ * Enterprise servers receive only text and column, so those options are not
+ * transmitted, and a root AND Match returns LANCEDB_NOT_SUPPORTED.
+ *
+ * On entry `*query_out` and the error message are cleared. On success
+ * `*query_out` owns a handle that the caller frees with
+ * lancedb_fts_query_free(). On failure `*query_out` stays NULL and the error is
+ * LANCEDB_INVALID_ARGUMENT for a missing text or output pointer, invalid UTF-8,
+ * an operator outside LanceDBFtsOperator, or a fuzziness outside -1 through
+ * UINT32_MAX.
+ *
+ * @param text - Match text, a valid null-terminated UTF-8 string
+ * @param column - text column name, or NULL/empty for automatic discovery
+ * @param options - Match options, or NULL for the SDK defaults
+ * @param query_out - pointer to receive the structured full-text query
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_fts_query_new_match(
+    const char* text,
+    const char* column,
+    const LanceDBFtsMatchOptions* options,
+    LanceDBFtsQuery** query_out,
+    char** error_message
+);
+
+/**
+ * Return the default structured Match query options
+ *
+ * The values are read from the SDK's MatchQuery constructor: OR term
+ * combination, boost 1.0, exact matching (fuzziness 0), 50 maximum expansions,
+ * and prefix length 0. The returned struct is a value; no free function is
+ * needed.
+ *
+ * @return Default options for lancedb_fts_query_new_match()
+ */
+LanceDBFtsMatchOptions lancedb_fts_match_options_default(void);
+
+/**
  * Create a structured phrase full-text query
  *
  * The phrase text is tokenized by the target index at execution time.
@@ -4410,8 +4517,8 @@ LanceDBError lancedb_vector_query_full_text_search(
  * stays unchanged.
  *
  * The SDK's default RRF reranker applies when no reranker is set explicitly.
- * Phrase evaluation and index-position requirements are described on
- * lancedb_fts_query_new_phrase().
+ * Match and phrase evaluation, including backend limitations, are described on
+ * lancedb_fts_query_new_match() and lancedb_fts_query_new_phrase().
  *
  * If the vector leg returns batch results with `query_index` and the full-text
  * leg returns matches, the pinned SDK beta.25 RRF merge fails with an Arrow

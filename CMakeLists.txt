@@ -727,6 +727,7 @@ if(BUILD_TESTS)
   add_executable(lancedb_fts_tests
     tests/test_main.cpp
     tests/test_common.cpp
+    tests/test_c_enum_inputs.c
     tests/test_fts.cpp
   )
   target_link_libraries(lancedb_fts_tests
