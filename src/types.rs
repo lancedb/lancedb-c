@@ -100,7 +100,11 @@ impl LanceDBRecordBatchReader {
 ///
 /// The values mirror the SDK's `CreateTableMode`. A value outside these
 /// enumerators is rejected with `LANCEDB_INVALID_ARGUMENT` instead of becoming
-/// an invalid Rust enum.
+/// an invalid Rust enum. For `ExistOk`, a root listing compares the request
+/// schema and reopens through the callback with the supplied location and
+/// storage options; nonempty namespace paths and direct namespace connections
+/// open through the namespace backend without the C callback or a schema
+/// comparison; the remote client compares only on its AlreadyExists reopen path.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LanceDBCreateTableMode {
@@ -109,6 +113,11 @@ pub enum LanceDBCreateTableMode {
     /// Replace the existing table with the supplied data
     Overwrite = 1,
     /// Open the existing table and ignore the supplied data
+    ///
+    /// A root listing compares the request schema and uses the supplied
+    /// location and storage options in the reopen callback. Namespace backends
+    /// open directly without the C callback or a schema comparison; the remote
+    /// client compares only on its AlreadyExists reopen path.
     ExistOk = 2,
 }
 
@@ -187,7 +196,9 @@ impl Default for LanceDBWriteOptions {
 /// `namespace_path_len` borrowed strings; NULL with length 0 means the root
 /// namespace. `storage_keys` and `storage_values` are parallel arrays of
 /// `storage_count` borrowed strings for this table only. An empty storage array
-/// leaves the SDK's per-table storage options unset.
+/// leaves the SDK's per-table storage options unset. A root listing passes the
+/// location and storage options to the SDK `ExistOk` reopen callback; namespace
+/// and remote backends resolve their own table access.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct LanceDBCreateTableOptions {

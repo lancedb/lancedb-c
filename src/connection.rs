@@ -2120,6 +2120,13 @@ unsafe fn create_location(options: &LanceDBCreateTableOptions) -> Result<Option<
 ///   unknown write option bit, an out-of-range mode or an invalid boolean
 /// - The SDK error code for a rejected create
 ///
+/// For `ExistOk`, the SDK behavior is backend-dependent. A root listing compares
+/// the request schema (the reader schema when supplied, otherwise `schema_ptr`)
+/// and reopens through the callback with the supplied location and storage
+/// options. Nonempty namespaces and direct namespace connections open through
+/// the namespace backend without the C callback or a schema comparison. The
+/// remote client compares only on its AlreadyExists reopen path.
+///
 /// The Arrow schema stays owned by the caller. On entry the error message slot
 /// is cleared; free a returned message with `lancedb_free_string()`.
 #[no_mangle]

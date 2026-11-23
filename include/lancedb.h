@@ -2297,10 +2297,16 @@ void lancedb_run_on_stack(void (*callback)(void*), void* user_data, size_t red_z
  * The values mirror the LanceDB SDK's CreateTableMode. Create returns
  * LANCEDB_TABLE_ALREADY_EXISTS when the table exists, Overwrite replaces it with
  * the supplied data, and ExistOk opens the existing table and ignores the
- * supplied data. For ExistOk the SDK validates that the existing schema matches
- * the supplied schema. On a listing database the SDK reopens through its ExistOk
- * callback; this binding supplies the custom location and per-table storage
- * options to that callback so a same-name default table is not opened instead.
+ * supplied data. ExistOk schema and reopen behavior is backend-dependent:
+ * - A root listing connection compares the existing table schema with the
+ *   request schema (the reader schema when a reader is supplied, otherwise
+ *   schema_ptr) and reopens through the SDK ExistOk callback. This binding
+ *   supplies the custom location and per-table storage options to that callback
+ *   so a same-name default table is not opened instead.
+ * - Nonempty namespace paths and direct namespace connections ask the
+ *   namespace backend to open the existing table; the pinned SDK does not call
+ *   the C callback or compare schemas on that path.
+ * - The remote client compares the schema only on its AlreadyExists reopen path.
  */
 typedef enum {
     LANCEDB_CREATE_TABLE_MODE_CREATE = 0,
@@ -2353,16 +2359,16 @@ typedef struct {
  * namespace. A positive length with a NULL array, a NULL part or a part that is
  * not valid UTF-8 is rejected with LANCEDB_INVALID_ARGUMENT. location is an
  * optional borrowed custom table location; NULL derives it from the database
- * URI and the table name. On a listing database it is also the location used by
- * ExistOk when reopening the existing table. Namespace and remote backends
- * resolve table locations themselves and may reject or ignore it according to
- * the SDK.
+ * URI and the table name. On a root listing database it is also the location
+ * used by the ExistOk callback when reopening the existing table. Namespace and
+ * remote backends resolve table locations themselves and may reject or ignore
+ * it according to the SDK.
  *
  * storage_keys and storage_values are parallel arrays of storage_count borrowed
  * strings for this table only. An empty array leaves the SDK's per-table storage
- * options unset. The same options are passed to the SDK ExistOk callback when an
- * existing listing table is reopened. write_options is NULL for the SDK defaults
- * or points to a readable LanceDBWriteOptions. allow_external_blob_outside_bases
+ * options unset. The same options are passed to the SDK ExistOk callback when a
+ * root listing table is reopened. write_options is NULL for the SDK defaults or
+ * points to a readable LanceDBWriteOptions. allow_external_blob_outside_bases
  * must be 0 or 1. The SDK decides which options a backend supports and applies
  * its own precedence to overlapping create/open options and write parameters.
  */
@@ -2427,8 +2433,13 @@ LanceDBError lancedb_table_create(
  * parameters. The SDK decides which options a backend supports and may resolve
  * a table location from the backend instead of using location.
  *
- * For ExistOk, the SDK compares the existing table schema with schema_ptr and
- * returns its schema error when they differ.
+ * For ExistOk, the SDK behavior is backend-dependent. A root listing compares
+ * the request schema (the reader schema when a reader is supplied, otherwise
+ * schema_ptr) and reopens through the callback with the supplied location and
+ * storage options. Nonempty namespaces and direct namespace connections open the
+ * existing table through the namespace backend without calling the C callback or
+ * comparing schemas. The remote client compares the schema only on its
+ * AlreadyExists reopen path.
  *
  * On entry, a non-NULL table_out is set to NULL. It is written only on success,
  * so a failure leaves it NULL. The caller is responsible for freeing the
