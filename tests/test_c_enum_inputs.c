@@ -21,6 +21,8 @@ _Static_assert(sizeof(LanceDBQueryVectorType) == sizeof(int),
                "LanceDBQueryVectorType must have the C int ABI");
 _Static_assert(sizeof(LanceDBFtsOperator) == sizeof(int),
                "LanceDBFtsOperator must have the C int ABI");
+_Static_assert(sizeof(LanceDBFtsOccur) == sizeof(int),
+               "LanceDBFtsOccur must have the C int ABI");
 _Static_assert(sizeof(LanceDBNormalizeMethod) == sizeof(int), "LanceDBNormalizeMethod must have the C int ABI");
 _Static_assert(sizeof(LanceDBIndexType) == sizeof(int), "LanceDBIndexType must have the C int ABI");
 _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType must have the C int ABI");
@@ -49,6 +51,10 @@ _Static_assert(offsetof(LanceDBQueryVector, dimension) == sizeof(void*) + 2 * si
                "LanceDBQueryVector layout changed");
 _Static_assert(sizeof(LanceDBQueryVector) == 2 * sizeof(void*) + 2 * sizeof(int),
                "LanceDBQueryVector layout changed");
+_Static_assert(offsetof(LanceDBFtsClause, occur) == sizeof(void*),
+               "LanceDBFtsClause layout changed");
+_Static_assert(sizeof(LanceDBFtsClause) == 2 * sizeof(void*),
+               "LanceDBFtsClause layout changed");
 
 /*
  * C callers can hold enum values that are not one of the header's enumerators,
@@ -162,4 +168,14 @@ LanceDBError lancedb_test_fts_query_new_match_with_operator(
   LanceDBFtsMatchOptions options = lancedb_fts_match_options_default();
   options.term_operator = (LanceDBFtsOperator)operator_value;
   return lancedb_fts_query_new_match(text, column, &options, query_out, error_message);
+}
+
+LanceDBError lancedb_test_fts_query_new_boolean_with_occur(
+    const LanceDBFtsQuery* query,
+    int occur_value,
+    LanceDBFtsQuery** query_out,
+    char** error_message) {
+  const LanceDBFtsClause clause = {
+      .query = query, .occur = (LanceDBFtsOccur)occur_value};
+  return lancedb_fts_query_new_boolean(&clause, 1, query_out, error_message);
 }

@@ -6,6 +6,7 @@
 #include "test_common.h"
 
 #include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -443,6 +444,49 @@ QueryResultBatches run_match_query(
       == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
   lancedb_fts_query_free(fts_query);
+  REQUIRE(lancedb_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  return collect_query_result(lancedb_query_execute(query));
+}
+
+LanceDBFtsQuery* make_boolean_query(const std::vector<LanceDBFtsClause>& clauses) {
+  LanceDBFtsQuery* fts_query = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_new_boolean(
+      clauses.empty() ? nullptr : clauses.data(), clauses.size(), &fts_query,
+      &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(fts_query != nullptr);
+  return fts_query;
+}
+
+LanceDBFtsQuery* make_boost_query(
+    const LanceDBFtsQuery* positive,
+    const LanceDBFtsQuery* negative,
+    const float* negative_boost = nullptr) {
+  LanceDBFtsQuery* fts_query = nullptr;
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_new_boost(
+      positive, negative, negative_boost, &fts_query, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(fts_query != nullptr);
+  return fts_query;
+}
+
+// Run one already-built structured query. The handle is borrowed, so the caller
+// keeps ownership and decides when to free it.
+QueryResultBatches run_structured_query(
+    LanceDBTable* table,
+    LanceDBFtsQuery* fts_query,
+    size_t limit = 10) {
+  LanceDBQuery* query = lancedb_query_new(table);
+  REQUIRE(query != nullptr);
+  char* error_message = nullptr;
+  REQUIRE(lancedb_query_full_text_search_query(query, fts_query, &error_message)
+      == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
   REQUIRE(lancedb_query_limit(query, limit, &error_message) == LANCEDB_SUCCESS);
   REQUIRE(error_message == nullptr);
 
@@ -1027,6 +1071,378 @@ TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured match invalid inp
     REQUIRE(error_message != nullptr);
     lancedb_free_string(error_message);
   }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured boolean full text", "[fts]") {
+  SECTION("MUST requires every clause") {
+    auto* alpha = make_match_query("alpha", "text");
+    auto* gap = make_match_query("gap", "text");
+    std::vector<LanceDBFtsClause> clauses = {
+        {alpha, LANCEDB_FTS_OCCUR_MUST},
+        {gap, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* boolean = make_boolean_query(clauses);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(gap);
+
+    auto result = run_structured_query(table(), boolean);
+    lancedb_fts_query_free(boolean);
+    REQUIRE(ids_of(result) == std::set<int32_t>{1});
+  }
+
+  SECTION("the constructor copies borrowed children before they are freed") {
+    auto* alpha = make_match_query("alpha", "text");
+    auto* beta = make_match_query("beta", "text");
+    std::vector<LanceDBFtsClause> clauses = {
+        {alpha, LANCEDB_FTS_OCCUR_MUST},
+        {beta, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* boolean = make_boolean_query(clauses);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(beta);
+
+    LanceDBQuery* first = lancedb_query_new(table());
+    LanceDBQuery* second = lancedb_query_new(table());
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search_query(first, boolean, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(first, 10, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_full_text_search_query(second, boolean, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(second, 10, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_fts_query_free(boolean);
+
+    REQUIRE(ids_of(collect_query_result(lancedb_query_execute(first)))
+        == std::set<int32_t>{0, 1, 2});
+    REQUIRE(ids_of(collect_query_result(lancedb_query_execute(second)))
+        == std::set<int32_t>{0, 1, 2});
+  }
+
+  SECTION("an empty or MUST_NOT-only query constructs but fails when executed") {
+    auto* alpha = make_match_query("alpha", "text");
+    std::vector<LanceDBFtsClause> must_not_only = {
+        {alpha, LANCEDB_FTS_OCCUR_MUST_NOT},
+    };
+    auto* empty = make_boolean_query({});
+    auto* negative = make_boolean_query(must_not_only);
+    lancedb_fts_query_free(alpha);
+
+    const std::pair<LanceDBFtsQuery*, const char*> cases[] = {
+        {empty, "at least one leaf query"},
+        {negative, "at least one should/must query"},
+    };
+    for (const auto& [fts_query, expected_message] : cases) {
+      LanceDBQuery* query = lancedb_query_new(table());
+      REQUIRE(query != nullptr);
+      char* error_message = nullptr;
+      REQUIRE(lancedb_query_full_text_search_query(query, fts_query, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+
+      LanceDBQueryResult* result = nullptr;
+      error_message = nullptr;
+      REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message)
+          == LANCEDB_INVALID_INPUT);
+      REQUIRE(result == nullptr);
+      REQUIRE(error_message != nullptr);
+      REQUIRE(std::strstr(error_message, expected_message) != nullptr);
+      lancedb_free_string(error_message);
+    }
+    lancedb_fts_query_free(empty);
+    lancedb_fts_query_free(negative);
+  }
+
+  SECTION("SHOULD sums the matching clauses") {
+    auto* alpha = make_match_query("alpha", "text");
+    auto* gap = make_match_query("gap", "text");
+    std::vector<LanceDBFtsClause> alpha_only = {{alpha, LANCEDB_FTS_OCCUR_SHOULD}};
+    std::vector<LanceDBFtsClause> gap_only = {{gap, LANCEDB_FTS_OCCUR_SHOULD}};
+    std::vector<LanceDBFtsClause> both = {
+        {alpha, LANCEDB_FTS_OCCUR_SHOULD},
+        {gap, LANCEDB_FTS_OCCUR_SHOULD},
+    };
+    auto* alpha_query = make_boolean_query(alpha_only);
+    auto* gap_query = make_boolean_query(gap_only);
+    auto* both_query = make_boolean_query(both);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(gap);
+
+    auto alpha_result = run_structured_query(table(), alpha_query);
+    auto gap_result = run_structured_query(table(), gap_query);
+    auto both_result = run_structured_query(table(), both_query);
+    lancedb_fts_query_free(alpha_query);
+    lancedb_fts_query_free(gap_query);
+    lancedb_fts_query_free(both_query);
+
+    REQUIRE(ids_of(both_result) == std::set<int32_t>{0, 1, 2});
+    REQUIRE(ids_of(gap_result) == std::set<int32_t>{1});
+    for (const int32_t id : {0, 2}) {
+      REQUIRE(std::abs(float_column_of(both_result, "_score", id) -
+                       float_column_of(alpha_result, "_score", id)) < 1e-5F);
+    }
+    // Row 1 matches both SHOULD clauses, so both scores contribute.
+    REQUIRE(std::abs(float_column_of(both_result, "_score", 1) -
+                     (float_column_of(alpha_result, "_score", 1) +
+                      float_column_of(gap_result, "_score", 1))) < 1e-5F);
+  }
+
+  SECTION("MUST sums the clause scores") {
+    auto* alpha = make_match_query("alpha", "text");
+    auto* beta = make_match_query("beta", "text");
+    std::vector<LanceDBFtsClause> alpha_only = {{alpha, LANCEDB_FTS_OCCUR_MUST}};
+    std::vector<LanceDBFtsClause> beta_only = {{beta, LANCEDB_FTS_OCCUR_MUST}};
+    std::vector<LanceDBFtsClause> both = {
+        {alpha, LANCEDB_FTS_OCCUR_MUST},
+        {beta, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* alpha_query = make_boolean_query(alpha_only);
+    auto* beta_query = make_boolean_query(beta_only);
+    auto* both_query = make_boolean_query(both);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(beta);
+
+    auto alpha_result = run_structured_query(table(), alpha_query);
+    auto beta_result = run_structured_query(table(), beta_query);
+    auto both_result = run_structured_query(table(), both_query);
+    lancedb_fts_query_free(alpha_query);
+    lancedb_fts_query_free(beta_query);
+    lancedb_fts_query_free(both_query);
+
+    REQUIRE(ids_of(both_result) == std::set<int32_t>{0, 1, 2});
+    for (const int32_t id : {0, 1, 2}) {
+      REQUIRE(std::abs(float_column_of(both_result, "_score", id) -
+                       (float_column_of(alpha_result, "_score", id) +
+                        float_column_of(beta_result, "_score", id))) < 1e-5F);
+    }
+  }
+
+  SECTION("MUST_NOT excludes documents without contributing score") {
+    auto* alpha = make_match_query("alpha", "text");
+    auto* gap = make_match_query("gap", "text");
+    std::vector<LanceDBFtsClause> alpha_only = {{alpha, LANCEDB_FTS_OCCUR_SHOULD}};
+    std::vector<LanceDBFtsClause> excluded = {
+        {alpha, LANCEDB_FTS_OCCUR_SHOULD},
+        {gap, LANCEDB_FTS_OCCUR_MUST_NOT},
+    };
+    auto* alpha_query = make_boolean_query(alpha_only);
+    auto* excluded_query = make_boolean_query(excluded);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(gap);
+
+    auto alpha_result = run_structured_query(table(), alpha_query);
+    auto excluded_result = run_structured_query(table(), excluded_query);
+    lancedb_fts_query_free(alpha_query);
+    lancedb_fts_query_free(excluded_query);
+
+    REQUIRE(ids_of(excluded_result) == std::set<int32_t>{0, 2});
+    for (const int32_t id : {0, 2}) {
+      REQUIRE(std::abs(float_column_of(excluded_result, "_score", id) -
+                       float_column_of(alpha_result, "_score", id)) < 1e-5F);
+    }
+  }
+
+  SECTION("an empty child column is resolved against the indexed column") {
+    auto* alpha = make_match_query("alpha", "");
+    auto* gap = make_match_query("gap", "");
+    std::vector<LanceDBFtsClause> clauses = {
+        {alpha, LANCEDB_FTS_OCCUR_MUST},
+        {gap, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* boolean = make_boolean_query(clauses);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(gap);
+
+    auto result = run_structured_query(table(), boolean);
+    lancedb_fts_query_free(boolean);
+    REQUIRE(ids_of(result) == std::set<int32_t>{1});
+  }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured boolean invalid input", "[fts]") {
+  SECTION("rejects an out-of-range occurrence and keeps the child valid") {
+    auto* valid = make_match_query("alpha", "text");
+    LanceDBFtsQuery* fts_query = valid;
+    char* error_message = nullptr;
+    REQUIRE(lancedb_test_fts_query_new_boolean_with_occur(
+        valid, 3, &fts_query, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::strstr(error_message, "LanceDBFtsOccur") != nullptr);
+    lancedb_free_string(error_message);
+
+    // The failed constructor borrowed the child and must leave it usable.
+    std::vector<LanceDBFtsClause> clauses = {{valid, LANCEDB_FTS_OCCUR_MUST}};
+    auto* boolean = make_boolean_query(clauses);
+    lancedb_fts_query_free(valid);
+    auto result = run_structured_query(table(), boolean);
+    lancedb_fts_query_free(boolean);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+  }
+
+  SECTION("rejects NULL clause arrays and NULL child handles") {
+    auto* valid = make_match_query("alpha", "text");
+    LanceDBFtsQuery* fts_query = nullptr;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_fts_query_new_boolean(
+        nullptr, 1, &fts_query, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    const LanceDBFtsClause null_clause = {nullptr, LANCEDB_FTS_OCCUR_MUST};
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_boolean(
+        &null_clause, 1, &fts_query, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_fts_query_free(valid);
+  }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured boost full text", "[fts]") {
+  SECTION("the positive leg gates membership and the multiplier demotes") {
+    auto* alpha = make_match_query("alpha", "text");
+    auto* gap = make_match_query("gap", "text");
+
+    // The positive leg decides membership: only the row containing gap matches.
+    auto* gated = make_boost_query(gap, alpha, nullptr);
+    auto gated_result = run_structured_query(table(), gated);
+    lancedb_fts_query_free(gated);
+    REQUIRE(ids_of(gated_result) == std::set<int32_t>{1});
+
+    const float zero = 0.0F;
+    const float half = 0.5F;
+    const float one = 1.0F;
+    auto* none = make_boost_query(alpha, gap, &zero);
+    auto* defaulted = make_boost_query(alpha, gap, nullptr);
+    auto* explicit_half = make_boost_query(alpha, gap, &half);
+    auto* full = make_boost_query(alpha, gap, &one);
+    lancedb_fts_query_free(alpha);
+    lancedb_fts_query_free(gap);
+
+    auto none_result = run_structured_query(table(), none);
+    auto defaulted_result = run_structured_query(table(), defaulted);
+    auto half_result = run_structured_query(table(), explicit_half);
+    auto full_result = run_structured_query(table(), full);
+    lancedb_fts_query_free(none);
+    lancedb_fts_query_free(defaulted);
+    lancedb_fts_query_free(explicit_half);
+    lancedb_fts_query_free(full);
+
+    REQUIRE(ids_of(none_result) == std::set<int32_t>{0, 1, 2});
+    for (const int32_t id : {0, 1, 2}) {
+      REQUIRE(std::abs(float_column_of(defaulted_result, "_score", id) -
+                       float_column_of(half_result, "_score", id)) < 1e-5F);
+    }
+    for (const int32_t id : {0, 2}) {
+      REQUIRE(std::abs(float_column_of(none_result, "_score", id) -
+                       float_column_of(full_result, "_score", id)) < 1e-5F);
+    }
+    const float none_score = float_column_of(none_result, "_score", 1);
+    const float half_score = float_column_of(half_result, "_score", 1);
+    const float full_score = float_column_of(full_result, "_score", 1);
+    REQUIRE(half_score < none_score);
+    REQUIRE(full_score < half_score);
+    REQUIRE(std::abs((half_score - none_score) - 0.5F * (full_score - none_score)) < 1e-5F);
+  }
+
+  SECTION("a non-finite or negative multiplier fails when executed") {
+    for (const float multiplier : {-1.0F, std::numeric_limits<float>::quiet_NaN(),
+                                   std::numeric_limits<float>::infinity()}) {
+      auto* alpha = make_match_query("alpha", "text");
+      auto* gap = make_match_query("gap", "text");
+      auto* boost = make_boost_query(alpha, gap, &multiplier);
+      lancedb_fts_query_free(alpha);
+      lancedb_fts_query_free(gap);
+
+      LanceDBQuery* query = lancedb_query_new(table());
+      REQUIRE(query != nullptr);
+      char* error_message = nullptr;
+      REQUIRE(lancedb_query_full_text_search_query(query, boost, &error_message)
+          == LANCEDB_SUCCESS);
+      REQUIRE(error_message == nullptr);
+
+      LanceDBQueryResult* result = nullptr;
+      error_message = nullptr;
+      REQUIRE(lancedb_query_execute_with_status(query, &result, &error_message)
+          == LANCEDB_INVALID_INPUT);
+      REQUIRE(result == nullptr);
+      REQUIRE(error_message != nullptr);
+      REQUIRE(std::strstr(error_message, "negative_boost") != nullptr);
+      lancedb_free_string(error_message);
+      lancedb_fts_query_free(boost);
+    }
+  }
+
+  SECTION("rejects NULL legs and clears the output") {
+    auto* valid = make_match_query("alpha", "text");
+    LanceDBFtsQuery* fts_query = nullptr;
+    char* error_message = nullptr;
+
+    REQUIRE(lancedb_fts_query_new_boost(
+        nullptr, valid, nullptr, &fts_query, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    error_message = nullptr;
+    REQUIRE(lancedb_fts_query_new_boost(
+        valid, nullptr, nullptr, &fts_query, &error_message) == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(fts_query == nullptr);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    lancedb_fts_query_free(valid);
+  }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured boolean nesting", "[fts]") {
+  auto* alpha = make_match_query("alpha", "text");
+  auto* gap = make_match_query("gap", "text");
+  auto* beta = make_match_query("beta", "text");
+
+  const float zero = 0.0F;
+  const float one = 1.0F;
+  auto* plain = make_boost_query(alpha, gap, &zero);
+  auto* demoted = make_boost_query(alpha, gap, &one);
+  std::vector<LanceDBFtsClause> plain_clauses = {
+      {plain, LANCEDB_FTS_OCCUR_MUST},
+      {beta, LANCEDB_FTS_OCCUR_MUST},
+  };
+  std::vector<LanceDBFtsClause> demoted_clauses = {
+      {demoted, LANCEDB_FTS_OCCUR_MUST},
+      {beta, LANCEDB_FTS_OCCUR_MUST},
+  };
+  auto* plain_boolean = make_boolean_query(plain_clauses);
+  auto* demoted_boolean = make_boolean_query(demoted_clauses);
+  lancedb_fts_query_free(alpha);
+  lancedb_fts_query_free(gap);
+  lancedb_fts_query_free(beta);
+
+  auto plain_result = run_structured_query(table(), plain_boolean);
+  auto demoted_result = run_structured_query(table(), demoted_boolean);
+  lancedb_fts_query_free(plain);
+  lancedb_fts_query_free(demoted);
+  lancedb_fts_query_free(plain_boolean);
+  lancedb_fts_query_free(demoted_boolean);
+
+  REQUIRE(ids_of(plain_result) == std::set<int32_t>{0, 1, 2});
+  REQUIRE(ids_of(demoted_result) == std::set<int32_t>{0, 1, 2});
+  for (const int32_t id : {0, 2}) {
+    REQUIRE(std::abs(float_column_of(demoted_result, "_score", id) -
+                     float_column_of(plain_result, "_score", id)) < 1e-5F);
+  }
+  REQUIRE(float_column_of(demoted_result, "_score", 1) <
+          float_column_of(plain_result, "_score", 1));
 }
 
 TEST_CASE_METHOD(FtsFixture, "LanceDB Query - phrase EXPLAIN requires indexed positions",

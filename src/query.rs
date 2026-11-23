@@ -19,7 +19,10 @@ use half::f16;
 use lancedb::arrow::arrow_data::ArrayData;
 use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
-use lancedb::index::scalar::{FullTextSearchQuery, MatchQuery, Operator, PhraseQuery};
+use lancedb::index::scalar::{
+    BooleanQuery, BoostQuery, FtsQuery, FullTextSearchQuery, MatchQuery, Occur, Operator,
+    PhraseQuery,
+};
 use lancedb::query::{
     ColumnOrdering, ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
 };
@@ -55,7 +58,9 @@ pub struct LanceDBQuery {
 ///
 /// The constructor copies its inputs. Builder setters clone the stored SDK
 /// query, so one handle can be attached to several builders and freed as soon
-/// as the setters return.
+/// as the setters return. Create with lancedb_fts_query_new_match(),
+/// lancedb_fts_query_new_phrase(), lancedb_fts_query_new_boolean() or
+/// lancedb_fts_query_new_boost().
 #[repr(C)]
 pub struct LanceDBFtsQuery {
     inner: FullTextSearchQuery,
@@ -87,6 +92,48 @@ impl From<LanceDBFtsOperator> for Operator {
             LanceDBFtsOperator::And => Self::And,
         }
     }
+}
+
+/// Occurrence of one clause in a structured Boolean query
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBFtsOccur {
+    Should = 0,
+    Must = 1,
+    MustNot = 2,
+}
+
+impl LanceDBFtsOccur {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::Should),
+            1 => Some(Self::Must),
+            2 => Some(Self::MustNot),
+            _ => None,
+        }
+    }
+}
+
+impl From<LanceDBFtsOccur> for Occur {
+    fn from(occur: LanceDBFtsOccur) -> Self {
+        match occur {
+            LanceDBFtsOccur::Should => Self::Should,
+            LanceDBFtsOccur::Must => Self::Must,
+            LanceDBFtsOccur::MustNot => Self::MustNot,
+        }
+    }
+}
+
+/// One borrowed clause of a structured Boolean query
+///
+/// `query` is borrowed and its structured query node is copied into the Boolean
+/// query. `occur` holds a raw `LanceDBFtsOccur` value so an out-of-range C value
+/// can be rejected before it becomes a Rust enum.
+#[repr(C)]
+pub struct LanceDBFtsClause {
+    pub query: *const LanceDBFtsQuery,
+    pub occur: c_int,
 }
 
 /// Options for a structured Match query
@@ -623,6 +670,87 @@ unsafe fn match_query_from_c(
         .with_prefix_length(options.prefix_length))
 }
 
+/// Clone one borrowed handle's structured query node
+///
+/// Only the node is copied; the handle itself stays owned by the caller.
+///
+/// # Safety
+/// `query` must be a valid pointer returned from an `lancedb_fts_query_new_*`
+/// constructor.
+unsafe fn clone_fts_node(query: *const LanceDBFtsQuery, role: &str) -> Result<FtsQuery, String> {
+    if query.is_null() {
+        return Err(format!("the Boost {role} query is required"));
+    }
+    Ok((*query).inner.query.clone())
+}
+
+/// Build a structured Boolean query from a flat borrowed clause array
+///
+/// A NULL array with zero clauses builds an empty Boolean query, which the SDK
+/// rejects when the query is planned: it has no leaf for granularity and no
+/// SHOULD or MUST clause for scoring. Occurrence values are representational,
+/// so they are validated here; clause semantics, scoring and the non-empty
+/// requirements stay in the SDK.
+///
+/// # Safety
+/// `clauses` may be NULL only when `num_clauses` is zero. Otherwise it must
+/// point to `num_clauses` readable clauses whose `query` handles are valid.
+unsafe fn boolean_query_from_c(
+    clauses: *const LanceDBFtsClause,
+    num_clauses: usize,
+) -> Result<BooleanQuery, String> {
+    let clauses = if num_clauses == 0 {
+        &[]
+    } else {
+        if clauses.is_null() {
+            return Err("boolean clauses are required when num_clauses is not zero".to_string());
+        }
+        std::slice::from_raw_parts(clauses, num_clauses)
+    };
+
+    let mut entries = Vec::with_capacity(clauses.len());
+    for (index, clause) in clauses.iter().enumerate() {
+        let occur = LanceDBFtsOccur::from_c_int(clause.occur).ok_or_else(|| {
+            format!(
+                "clause {index} occurrence must be a LanceDBFtsOccur value, got {}",
+                clause.occur
+            )
+        })?;
+        if clause.query.is_null() {
+            return Err(format!("clause {index} query handle is required"));
+        }
+        entries.push((occur.into(), (*clause.query).inner.query.clone()));
+    }
+
+    Ok(BooleanQuery::new(entries))
+}
+
+/// Build a structured Boost query from borrowed positive and negative handles
+///
+/// A NULL multiplier pointer passes `None` to the SDK constructor, which
+/// supplies its default 0.5. The multiplier value, including its finite and
+/// non-negative requirement, is validated by the SDK when the query is planned.
+///
+/// # Safety
+/// `positive` and `negative` must be valid pointers returned from an
+/// `lancedb_fts_query_new_*` constructor; `negative_boost` may be NULL or point
+/// to a readable `f32`.
+unsafe fn boost_query_from_c(
+    positive: *const LanceDBFtsQuery,
+    negative: *const LanceDBFtsQuery,
+    negative_boost: *const f32,
+) -> Result<BoostQuery, String> {
+    let positive = clone_fts_node(positive, "positive")?;
+    let negative = clone_fts_node(negative, "negative")?;
+    let negative_boost = if negative_boost.is_null() {
+        None
+    } else {
+        Some(*negative_boost)
+    };
+
+    Ok(BoostQuery::new(positive, negative, negative_boost))
+}
+
 /// Read parallel C arrays into the SDK's ordered dynamic projection pairs.
 ///
 /// The first array names each output column and the second holds its SQL
@@ -1135,11 +1263,137 @@ pub unsafe extern "C" fn lancedb_fts_query_new_phrase(
     LanceDBError::Success
 }
 
+/// Create a structured Boolean full-text query
+///
+/// Clauses are a flat borrowed array; nesting is expressed by composing handles
+/// rather than by a recursive C representation. Each clause's structured query
+/// node is copied, so child handles can be reused or freed after this call
+/// returns.
+///
+/// SDK semantics apply unchanged. MUST clauses must all match and their scores
+/// are summed. SHOULD clauses are optional when a MUST clause exists and add
+/// their score when they match; without MUST clauses, at least one SHOULD must
+/// match and the matching SHOULD scores are summed. MUST_NOT clauses exclude
+/// matching documents and never contribute score. An empty Boolean query, and
+/// a query whose only clauses are MUST_NOT, construct successfully; the
+/// embedded dataset scanner rejects them at execution with
+/// `LANCEDB_INVALID_INPUT` because it requires a leaf for document-granularity
+/// resolution and a SHOULD or MUST clause for scoring. This constructor does
+/// not impose either requirement early. A MemWAL LSM query runs its column and
+/// maintained-index checks first, so a tree without a named column reports that
+/// column error before clause validation, and a negative-only query that passes
+/// the column checks is validated by the LSM path. A namespace QueryTable
+/// pushdown and Enterprise forward the structured tree instead of planning it
+/// locally, so the server determines the error after forwarding or projection.
+///
+/// Backend limitations are documented on the C declaration; they cover
+/// namespace int32 narrowing, the older Enterprise transport's empty query
+/// string and the MemWAL single explicit column requirement.
+///
+/// # Safety
+/// - `clauses` may be NULL only when `num_clauses` is zero; otherwise it must
+///   point to `num_clauses` readable `LanceDBFtsClause` entries
+/// - every clause's `query` must be a valid borrowed handle
+/// - `query_out` must be a valid pointer to receive the created handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry `*query_out` and the error message are cleared. On success the
+/// caller owns the handle and frees it with `lancedb_fts_query_free()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_new_boolean(
+    clauses: *const LanceDBFtsClause,
+    num_clauses: usize,
+    query_out: *mut *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !query_out.is_null() {
+        *query_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let query = match boolean_query_from_c(clauses, num_clauses) {
+        Ok(query) => query,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+    let search = FullTextSearchQuery::new_query(query.into());
+
+    *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
+/// Create a structured Boost full-text query
+///
+/// Both legs are required borrowed handles, and each leg's structured query
+/// node is copied so the handles can be reused or freed after this call
+/// returns. A NULL `negative_boost` passes `None` to the SDK constructor, which
+/// supplies its default 0.5; a pointed-to value is forwarded unchanged. The
+/// embedded dataset scanner requires it to be finite and non-negative and
+/// otherwise fails while planning with `LANCEDB_INVALID_INPUT`. A MemWAL LSM
+/// query runs its column checks first, and namespace or Enterprise execution
+/// determines the outcome after forwarding the structured tree.
+///
+/// The positive query drives iteration, so only its matches appear. When the
+/// negative query also matches a document, its score times the multiplier is
+/// subtracted from the positive score; otherwise the positive score is
+/// returned. Boost is a positive gate plus a demotion, not a disjunction.
+///
+/// Backend limitations are documented on the C declaration; they cover
+/// namespace int32 narrowing, the older Enterprise transport's positive-only
+/// flat query and the MemWAL single explicit column requirement.
+///
+/// # Safety
+/// - `positive` and `negative` must be valid borrowed handles
+/// - `negative_boost` may be NULL or point to a readable `f32`
+/// - `query_out` must be a valid pointer to receive the created handle
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// On entry `*query_out` and the error message are cleared. On success the
+/// caller owns the handle and frees it with `lancedb_fts_query_free()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_new_boost(
+    positive: *const LanceDBFtsQuery,
+    negative: *const LanceDBFtsQuery,
+    negative_boost: *const f32,
+    query_out: *mut *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !query_out.is_null() {
+        *query_out = ptr::null_mut();
+    }
+    clear_error_message(error_message);
+
+    if query_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let query = match boost_query_from_c(positive, negative, negative_boost) {
+        Ok(query) => query,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+    let search = FullTextSearchQuery::new_query(query.into());
+
+    *query_out = Box::into_raw(Box::new(LanceDBFtsQuery { inner: search }));
+    LanceDBError::Success
+}
+
 /// Free a structured full-text query
 ///
 /// # Safety
 /// - `query` must be NULL or a valid pointer returned from
-///   `lancedb_fts_query_new_match` or `lancedb_fts_query_new_phrase`
+///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_phrase`,
+///   `lancedb_fts_query_new_boolean` or `lancedb_fts_query_new_boost`
 /// - `query` must not be used after calling this function
 #[no_mangle]
 pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
@@ -1158,7 +1412,8 @@ pub unsafe extern "C" fn lancedb_fts_query_free(query: *mut LanceDBFtsQuery) {
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_query_new`
 /// - `full_text_query` must be a valid pointer returned from
-///   `lancedb_fts_query_new_match` or `lancedb_fts_query_new_phrase`; it is
+///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_phrase`,
+///   `lancedb_fts_query_new_boolean` or `lancedb_fts_query_new_boost`; it is
 ///   borrowed, not consumed
 /// - `error_message` can be NULL to ignore detailed error messages
 ///
@@ -1607,7 +1862,8 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
 /// - `full_text_query` must be a valid pointer returned from
-///   `lancedb_fts_query_new_match` or `lancedb_fts_query_new_phrase`; it is
+///   `lancedb_fts_query_new_match`, `lancedb_fts_query_new_phrase`,
+///   `lancedb_fts_query_new_boolean` or `lancedb_fts_query_new_boost`; it is
 ///   borrowed, not consumed
 /// - `error_message` can be NULL to ignore detailed error messages
 ///

@@ -80,6 +80,11 @@ LanceDBError lancedb_test_fts_query_new_match_with_operator(
     int operator_value,
     LanceDBFtsQuery** query_out,
     char** error_message);
+LanceDBError lancedb_test_fts_query_new_boolean_with_occur(
+    const LanceDBFtsQuery* query,
+    int occur_value,
+    LanceDBFtsQuery** query_out,
+    char** error_message);
 }
 
 // Helper function to check if directory exists

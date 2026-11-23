@@ -310,6 +310,7 @@ ENUM_PREFIXES = {
     "LanceDBDistanceType": "LANCEDB_DISTANCE_",
     "LanceDBQueryVectorType": "LANCEDB_QUERY_VECTOR_",
     "LanceDBFtsOperator": "LANCEDB_FTS_OPERATOR_",
+    "LanceDBFtsOccur": "LANCEDB_FTS_OCCUR_",
     "LanceDBNormalizeMethod": "LANCEDB_NORMALIZE_",
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
@@ -393,6 +394,7 @@ FIELD_EXCEPTIONS: Dict[Tuple[str, str], Allow] = {
     # enum, avoiding undefined behavior for an out-of-range C value.
     ("LanceDBQueryVector", "kind"): Allow(enum_int="LanceDBQueryVectorType"),
     ("LanceDBFtsMatchOptions", "term_operator"): Allow(enum_int="LanceDBFtsOperator"),
+    ("LanceDBFtsClause", "occur"): Allow(enum_int="LanceDBFtsOccur"),
     ("LanceDBVectorIndexConfig", "distance_type"): Allow(enum_int="LanceDBDistanceType"),
     ("LanceDBBranchSource", "kind"): Allow(enum_int="LanceDBBranchSourceKind"),
     ("LanceDBDeltaRef", "kind"): Allow(enum_int="LanceDBDeltaRefType"),
