@@ -4483,11 +4483,16 @@ typedef struct {
  * add their score when they match; without MUST clauses, at least one SHOULD
  * must match and the matching SHOULD scores are summed. MUST_NOT clauses
  * exclude matching documents and never contribute score. An empty Boolean
- * query, and a query whose only clauses are MUST_NOT, construct successfully
- * but fail when the query is executed with LANCEDB_INVALID_INPUT: the SDK
- * requires at least one leaf for document-granularity resolution and at least
- * one SHOULD or MUST clause for scoring. This constructor does not impose
- * either requirement early.
+ * query, and a query whose only clauses are MUST_NOT, construct successfully;
+ * the embedded dataset scanner rejects them at execution with
+ * LANCEDB_INVALID_INPUT because it requires a leaf for document-granularity
+ * resolution and a SHOULD or MUST clause for scoring. This constructor does
+ * not impose either requirement early. A MemWAL LSM query runs its column and
+ * maintained-index checks first, so a tree without a named column reports that
+ * column error before clause validation, and a negative-only query that passes
+ * the column checks is validated by the LSM path. A namespace QueryTable
+ * pushdown and Enterprise forward the structured tree instead of planning it
+ * locally, so the server determines the error after forwarding or projection.
  *
  * A successful construction can still be limited by the selected backend.
  * Embedded LanceDB evaluates the clauses directly, including across several
@@ -4495,11 +4500,14 @@ typedef struct {
  * text columns.
  *
  * A namespace QueryTable pushdown sends Boolean and Boost roots as structured
- * nodes rather than text. Child Match options are narrowed to the namespace
- * model's signed 32-bit fields, so a fuzziness, max_expansions or
- * prefix_length above INT32_MAX fails the pushdown with
- * LANCEDB_INVALID_INPUT. Non-finite boost or multiplier values are serialized
- * as JSON null and reach the server unset instead of being rejected locally.
+ * nodes rather than text. The tree is converted through the namespace model,
+ * whose Match fuzziness, max_expansions and prefix_length and Phrase slop are
+ * signed 32-bit, so any of those values above INT32_MAX fails the pushdown
+ * with LANCEDB_INVALID_INPUT before it is sent. A non-finite boost or
+ * multiplier becomes JSON null in the intermediate value and then an unset
+ * optional in the namespace model, so the REST request omits it and the
+ * server applies its default. A structured Enterprise request keeps the
+ * explicit JSON null instead.
  *
  * A MemWAL LSM query requires every clause to name the same explicit text
  * column: the union of the child columns must contain exactly one column whose
@@ -4547,9 +4555,11 @@ LanceDBError lancedb_fts_query_new_boolean(
  * copies each handle's structured query node, so the caller may reuse or free
  * the handles after this call returns. `negative_boost` may be NULL, which
  * passes "unset" to the SDK constructor so the SDK supplies its default of
- * 0.5. A pointed-to value is forwarded unchanged; the SDK requires a finite,
- * non-negative multiplier when the query is planned and otherwise fails with
- * LANCEDB_INVALID_INPUT.
+ * 0.5. A pointed-to value is forwarded unchanged. The embedded dataset
+ * scanner requires a finite, non-negative multiplier when it plans the query
+ * and otherwise fails with LANCEDB_INVALID_INPUT. A MemWAL LSM query runs its
+ * column checks before that validation, and a namespace or Enterprise
+ * execution determines the outcome after forwarding the structured tree.
  *
  * The positive query drives iteration: only documents matching it appear. When
  * the negative query also matches a document, its score times the multiplier
@@ -4562,11 +4572,14 @@ LanceDBError lancedb_fts_query_new_boolean(
  * resolves NULL or empty child columns against the indexed text columns.
  *
  * A namespace QueryTable pushdown sends Boolean and Boost roots as structured
- * nodes rather than text. Child Match options are narrowed to the namespace
- * model's signed 32-bit fields, so a fuzziness, max_expansions or
- * prefix_length above INT32_MAX fails the pushdown with
- * LANCEDB_INVALID_INPUT. Non-finite boost or multiplier values are serialized
- * as JSON null and reach the server unset instead of being rejected locally.
+ * nodes rather than text. The tree is converted through the namespace model,
+ * whose Match fuzziness, max_expansions and prefix_length and Phrase slop are
+ * signed 32-bit, so any of those values above INT32_MAX fails the pushdown
+ * with LANCEDB_INVALID_INPUT before it is sent. A non-finite boost or
+ * multiplier becomes JSON null in the intermediate value and then an unset
+ * optional in the namespace model, so the REST request omits it and the
+ * server applies its default. A structured Enterprise request keeps the
+ * explicit JSON null instead.
  *
  * A MemWAL LSM query requires both legs to name the same explicit text
  * column: the union of the leg columns must contain exactly one column whose

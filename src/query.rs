@@ -1275,10 +1275,16 @@ pub unsafe extern "C" fn lancedb_fts_query_new_phrase(
 /// their score when they match; without MUST clauses, at least one SHOULD must
 /// match and the matching SHOULD scores are summed. MUST_NOT clauses exclude
 /// matching documents and never contribute score. An empty Boolean query, and
-/// a query whose only clauses are MUST_NOT, construct successfully but fail at
-/// execution with `LANCEDB_INVALID_INPUT`: the SDK requires at least one leaf
-/// for document-granularity resolution and at least one SHOULD or MUST clause
-/// for scoring. This constructor does not impose either requirement early.
+/// a query whose only clauses are MUST_NOT, construct successfully; the
+/// embedded dataset scanner rejects them at execution with
+/// `LANCEDB_INVALID_INPUT` because it requires a leaf for document-granularity
+/// resolution and a SHOULD or MUST clause for scoring. This constructor does
+/// not impose either requirement early. A MemWAL LSM query runs its column and
+/// maintained-index checks first, so a tree without a named column reports that
+/// column error before clause validation, and a negative-only query that passes
+/// the column checks is validated by the LSM path. A namespace QueryTable
+/// pushdown and Enterprise forward the structured tree instead of planning it
+/// locally, so the server determines the error after forwarding or projection.
 ///
 /// Backend limitations are documented on the C declaration; they cover
 /// namespace int32 narrowing, the older Enterprise transport's empty query
@@ -1328,8 +1334,11 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boolean(
 /// Both legs are required borrowed handles, and each leg's structured query
 /// node is copied so the handles can be reused or freed after this call
 /// returns. A NULL `negative_boost` passes `None` to the SDK constructor, which
-/// supplies its default 0.5; a pointed-to value is forwarded unchanged and is
-/// validated by the SDK when the query is planned.
+/// supplies its default 0.5; a pointed-to value is forwarded unchanged. The
+/// embedded dataset scanner requires it to be finite and non-negative and
+/// otherwise fails while planning with `LANCEDB_INVALID_INPUT`. A MemWAL LSM
+/// query runs its column checks first, and namespace or Enterprise execution
+/// determines the outcome after forwarding the structured tree.
 ///
 /// The positive query drives iteration, so only its matches appear. When the
 /// negative query also matches a document, its score times the multiplier is
