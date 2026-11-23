@@ -165,12 +165,17 @@ architecture must match the package. The import library is `lancedb.dll.lib`;
 `-llancedb` does not select it under MSVC.
 
 ```bat
-set root=%CD%\lancedb-c-<commit>-<target>
+set "root=%CD%\lancedb-c-250aa95153848c6fc6f4af571af70e979fb89ce3-windows-amd64"
 cl /nologo /std:c17 /W4 /I"%root%\include" hello.c ^
   /Fe:hello.exe /link /LIBPATH:"%root%\lib" lancedb.dll.lib
 copy "%root%\lib\lancedb.dll" .
 hello.exe .\example-db
 ```
+
+The `windows-arm64` archive extracts to
+`lancedb-c-250aa95153848c6fc6f4af571af70e979fb89ce3-windows-arm64`; use that
+directory with the ARM64 prompt. For another release, replace the path with the
+directory actually extracted.
 
 The loader must find `lancedb.dll` at runtime. Copy it next to the executable
 (as above) or add `%root%\lib` to `PATH`. A CMake consumer of an installed
