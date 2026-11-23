@@ -408,6 +408,37 @@ typedef enum {
 } LanceDBNormalizeMethod;
 
 /**
+ * Element type of one typed query vector
+ *
+ * LANCEDB_QUERY_VECTOR_F16 points at uint16_t IEEE-754 binary16 bit patterns.
+ * LANCEDB_QUERY_VECTOR_F32 points at float, LANCEDB_QUERY_VECTOR_F64 at double,
+ * and LANCEDB_QUERY_VECTOR_BINARY at uint8_t. The binary form widens each byte
+ * to its numeric Float32 value before it reaches the SDK; the bytes are not
+ * reinterpreted as floats.
+ */
+typedef enum {
+    LANCEDB_QUERY_VECTOR_F16 = 0,
+    LANCEDB_QUERY_VECTOR_F32 = 1,
+    LANCEDB_QUERY_VECTOR_F64 = 2,
+    LANCEDB_QUERY_VECTOR_BINARY = 3
+} LanceDBQueryVectorType;
+
+/**
+ * One typed query vector for lancedb_vector_query_new_typed() and
+ * lancedb_vector_query_add_query_vector()
+ *
+ * This is a value description, not a builder handle. `data` is borrowed for
+ * the duration of the call and copied before the function returns. `dimension`
+ * is the number of elements in `data`; for LANCEDB_QUERY_VECTOR_BINARY it is
+ * the number of bytes. It must be greater than zero.
+ */
+typedef struct {
+    LanceDBQueryVectorType kind;
+    const void* data;
+    size_t dimension;
+} LanceDBQueryVector;
+
+/**
  * Index type enum
  */
 typedef enum {
@@ -3622,6 +3653,115 @@ LanceDBVectorQuery* lancedb_vector_query_new(
 );
 
 /**
+ * Create a vector query from one or more typed query vectors
+ *
+ * `vectors` is borrowed for this call and every input is copied before the
+ * function returns. The first vector becomes the nearest-neighbour query and
+ * each later vector is added as an SDK batch query vector. `num_vectors` must
+ * be at least one.
+ *
+ * F16, F32 and F64 inputs are passed to the SDK in their declared element
+ * type; the SDK converts F16 and F64 components to Float32 before planning. The
+ * binary form widens each byte to its numeric Float32 value, so a
+ * FixedSizeList<UInt8> column is cast back to UInt8 at planning time. Lance
+ * supports only LANCEDB_DISTANCE_HAMMING for such a column. No additional
+ * precision is preserved for F64 input.
+ *
+ * Against a fixed-size-list float vector column, multiple vectors produce one
+ * top-K result set per vector and the result adds an Int32 `query_index`
+ * column. Against a List<FixedSizeList<...>> multivector column, multiple
+ * vectors form one multivector search and no `query_index` column is added. A
+ * UInt8 fixed-size vector column keeps one plan per vector and also adds
+ * `query_index`; Hamming is the only supported distance.
+ *
+ * These batch contracts apply to an ordinary vector search, without a
+ * full-text query. `limit` and `offset` apply independently to each vector in a
+ * batch, and `query_index` is the zero-based position of that vector, not a
+ * rank. Rows for different indexes are not required to be grouped or ordered.
+ * On a multivector column, `limit` selects table rows in total and each row's
+ * `_distance` includes the contribution of every input vector.
+ *
+ * The pinned SDK beta.25 cannot merge a hybrid query whose vector leg returns
+ * batch results with `query_index` and whose full-text leg returns matches:
+ * the SDK's RRF merge combines the batch `query_index` column with the
+ * full-text schema and returns an Arrow schema error. This includes multiple
+ * vectors on a fixed-size-list float column and the per-vector UInt8/Hamming
+ * path. This binding forwards the configured SDK query; it does not split the
+ * batch, drop `query_index`, or run a C-side fusion. Use one query vector for
+ * that hybrid shape until the SDK supports it. A List<FixedSizeList<...>>
+ * multivector column adds no `query_index`, so it does not hit that merge
+ * shape.
+ *
+ * A vector-only query is planned locally by the native table, including on a
+ * native namespace connection. On a namespace connection with QueryTable
+ * pushdown, only an eligible hybrid full-text leg can use the namespace
+ * QueryTable path; the vector batch remains a locally planned query. This
+ * binding does not choose a different route.
+ *
+ * For a remote LanceDB, the SDK sends Float32 vectors. Enterprise server 0.2.0
+ * and later receive all input vectors in one request; older servers receive
+ * one request per vector and the SDK combines the responses with
+ * `query_index`. The server decides how it interprets the vector shape and
+ * distance and which schema it returns; this binding does not reshape or
+ * re-issue the result.
+ *
+ * A table routed through the pinned MemWAL LSM scanner rejects a single plan
+ * containing multiple query vectors, UInt8 vector search, or both vector and
+ * full-text search with LANCEDB_NOT_SUPPORTED. Hybrid execution does not build
+ * such a plan: it runs separate vector and full-text searches, and can fall
+ * back to primary-key fusion when the table rejects `_rowid`. An eligible
+ * single-vector hybrid query can therefore execute. This binding exposes no
+ * route override.
+ *
+ * This constructor only copies and checks the description. Like
+ * lancedb_vector_query_new(), the SDK reports non-finite values, F64 values
+ * that become non-finite after conversion, and mismatched dimensions when the
+ * query is executed or its plan or output schema is requested.
+ *
+ * @param table - pointer to LanceDBTable
+ * @param vectors - borrowed array of num_vectors typed vectors
+ * @param num_vectors - number of entries; must be at least 1
+ * @return Pointer to LanceDBVectorQuery on success, NULL when an argument is
+ *         missing, a kind is outside LanceDBQueryVectorType, or a vector has
+ *         NULL data or zero dimension.
+ *         Caller must free with lancedb_vector_query_free()
+ */
+LanceDBVectorQuery* lancedb_vector_query_new_typed(
+    const LanceDBTable* table,
+    const LanceDBQueryVector* vectors,
+    size_t num_vectors
+);
+
+/**
+ * Add a typed query vector to a vector query
+ *
+ * The vector is borrowed for this call and copied before it returns. On
+ * success it is appended to the SDK query as a batch query vector, with the
+ * same result schema and validation timing as lancedb_vector_query_new_typed().
+ * The builder may come from either constructor. Appending a second or later
+ * vector makes the query use the batch shape described there, including its
+ * ordinary-vector top-K/query_index contract and its hybrid and MemWAL
+ * limitations.
+ *
+ * A missing query or vector, NULL data, zero dimension, or a kind outside
+ * LanceDBQueryVectorType returns LANCEDB_INVALID_ARGUMENT without changing the
+ * builder, so it still executes with the vectors it already had.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param vector - borrowed typed vector
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_add_query_vector(
+    LanceDBVectorQuery* query,
+    const LanceDBQueryVector* vector,
+    char** error_message
+);
+
+/**
  * Set limit for query
  *
  * @param query - pointer to LanceDBQuery
@@ -4237,6 +4377,11 @@ LanceDBError lancedb_vector_query_where_filter(
  * lancedb_vector_query_analyze_plan() may return the SDK's unsupported-shape
  * error. Execute the query instead.
  *
+ * If the vector leg returns batch results with `query_index` and the full-text
+ * leg returns matches, the pinned SDK beta.25 RRF merge fails with an Arrow
+ * schema error. See lancedb_vector_query_new_typed() for the vector types and
+ * routing that produce `query_index`.
+ *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
  * @param column - text column name, or NULL/empty for automatic discovery
@@ -4267,6 +4412,11 @@ LanceDBError lancedb_vector_query_full_text_search(
  * The SDK's default RRF reranker applies when no reranker is set explicitly.
  * Phrase evaluation and index-position requirements are described on
  * lancedb_fts_query_new_phrase().
+ *
+ * If the vector leg returns batch results with `query_index` and the full-text
+ * leg returns matches, the pinned SDK beta.25 RRF merge fails with an Arrow
+ * schema error. See lancedb_vector_query_new_typed() for the vector types and
+ * routing that produce `query_index`.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param full_text_query - pointer to LanceDBFtsQuery (borrowed, not consumed)

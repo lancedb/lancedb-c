@@ -45,6 +45,29 @@ impl From<LanceDBDistanceType> for DistanceType {
     }
 }
 
+/// Element type of one typed query vector
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub enum LanceDBQueryVectorType {
+    F16 = 0,
+    F32 = 1,
+    F64 = 2,
+    Binary = 3,
+}
+
+impl LanceDBQueryVectorType {
+    /// Convert the raw C value, rejecting anything outside the public header.
+    pub(crate) fn from_c_int(value: c_int) -> Option<Self> {
+        match value {
+            0 => Some(Self::F16),
+            1 => Some(Self::F32),
+            2 => Some(Self::F64),
+            3 => Some(Self::Binary),
+            _ => None,
+        }
+    }
+}
+
 /// Score normalization method for hybrid search reranking
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

@@ -175,6 +175,7 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
   int result = 0;
   char* error_message = NULL;
   LanceDBFtsQuery* fts_query = NULL;
+  LanceDBVectorQuery* typed = NULL;
   LanceDBQuery* first = NULL;
   LanceDBQuery* second = NULL;
   size_t rows = 0;
@@ -307,9 +308,59 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
 
   lancedb_fts_query_free(NULL);
 
+  /* Typed query vectors are borrowed for the constructor and add call and
+   * copied before those calls return. The phrase table has no vector column,
+   * so this checks the ABI and ownership path without executing the query. */
+  const float first_vector[] = {1.0f, 2.0f, 3.0f, 4.0f,
+                                5.0f, 6.0f, 7.0f, 8.0f};
+  const double second_vector[] = {8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0};
+  const uint16_t third_vector[] = {0x3c00, 0x4000, 0x4200, 0x4400,
+                                   0x4500, 0x4600, 0x4700, 0x4800};
+  const LanceDBQueryVector typed_vectors[] = {
+      {.kind = LANCEDB_QUERY_VECTOR_F32,
+       .data = first_vector,
+       .dimension = sizeof(first_vector) / sizeof(first_vector[0])},
+      {.kind = LANCEDB_QUERY_VECTOR_F64,
+       .data = second_vector,
+       .dimension = sizeof(second_vector) / sizeof(second_vector[0])}};
+  const LanceDBQueryVector third = {
+      .kind = LANCEDB_QUERY_VECTOR_F16,
+      .data = third_vector,
+      .dimension = sizeof(third_vector) / sizeof(third_vector[0])};
+  typed = lancedb_vector_query_new_typed(table, typed_vectors, 2);
+  if (typed == NULL) {
+    result = fail("creating the C17 typed vector query failed");
+    goto cleanup;
+  }
+  if (lancedb_vector_query_add_query_vector(typed, &third, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("adding the C17 typed vector failed");
+    goto cleanup;
+  }
+
+  const LanceDBQueryVector invalid_vector = {
+      .kind = LANCEDB_QUERY_VECTOR_F32, .data = NULL, .dimension = 8};
+  if (lancedb_vector_query_add_query_vector(
+          typed, &invalid_vector, &error_message) != LANCEDB_INVALID_ARGUMENT ||
+      error_message == NULL) {
+    result = fail("a typed vector without data must be rejected");
+    goto cleanup;
+  }
+  lancedb_free_string(error_message);
+  error_message = NULL;
+  lancedb_vector_query_free(typed);
+  typed = NULL;
+
+  if (lancedb_vector_query_new_typed(table, typed_vectors, 0) != NULL) {
+    result = fail("a typed constructor without vectors must return NULL");
+    goto cleanup;
+  }
+
 cleanup:
   lancedb_free_string(error_message);
   lancedb_fts_query_free(fts_query);
+  lancedb_vector_query_free(typed);
   lancedb_query_free(first);
   lancedb_query_free(second);
   if (table != NULL) {
