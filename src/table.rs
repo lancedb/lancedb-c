@@ -1496,24 +1496,14 @@ pub unsafe extern "C" fn lancedb_table_stats(
         Err(e) => return handle_error(&e, error_message),
     };
 
-    // Deleted rows are only marked in the deletion files of the underlying
-    // lance dataset, so they are counted from there. Remote tables do not
-    // expose their dataset, in which case the count is reported as unknown.
-    let num_deleted_rows = match tbl.dataset() {
-        Some(ds) => {
-            let count = runtime.block_on(async {
-                let dataset = ds.get().await?;
-                dataset
-                    .count_deleted_rows()
-                    .await
-                    .map_err(lancedb::Error::from)
-            });
-            match count {
-                Ok(count) => count as i64,
-                Err(e) => return handle_error(&e, error_message),
-            }
-        }
-        None => -1,
+    // The SDK's native stats already count the rows recorded in the deletion
+    // files of the underlying lance dataset, so reuse that count instead of
+    // reading the dataset again. Remote tables do not expose their dataset,
+    // so their count stays unknown even if the SDK reports one.
+    let num_deleted_rows = if tbl.dataset().is_some() {
+        stats.num_deleted_rows.map_or(-1, |count| count as i64)
+    } else {
+        -1
     };
 
     let lengths = &stats.fragment_stats.lengths;

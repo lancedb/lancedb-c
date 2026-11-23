@@ -919,8 +919,9 @@ if(BUILD_TESTS)
     add_test(NAME lancedb_arrow_stream_tests COMMAND $<TARGET_FILE:lancedb_arrow_stream_tests>)
   endif()
 
-  # The table tests use a local HTTP server for remote branch operations.
-  set_tests_properties(lancedb_table_tests PROPERTIES
+  # The connection and table tests use loopback HTTP servers for remote
+  # client configuration and branch operations.
+  set_tests_properties(lancedb_connection_tests lancedb_table_tests PROPERTIES
     ENVIRONMENT "NO_PROXY=127.0.0.1;no_proxy=127.0.0.1"
   )
 
@@ -975,6 +976,28 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
     C_EXTENSIONS OFF
   )
 
+  # Link the user-facing C17 example against the generated header and the
+  # built library. It is a compile and link check, not a second runtime suite.
+  add_executable(lancedb_c17_example examples/hello.c)
+  target_link_libraries(lancedb_c17_example
+    PRIVATE
+    lancedb
+    Threads::Threads
+  )
+  target_include_directories(lancedb_c17_example
+    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
+  )
+  target_compile_options(lancedb_c17_example PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-Wall;-Wextra;-Werror;-pedantic>
+    $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+  )
+  set_target_properties(lancedb_c17_example PROPERTIES
+    C_STANDARD 17
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+    BUILD_RPATH ${RUST_TARGET_DIR}
+  )
+
   set(_c17_ctest_config_args)
   if(CMAKE_CONFIGURATION_TYPES)
     set(_c17_ctest_config_args -C $<CONFIG>)
@@ -987,7 +1010,7 @@ if(BUILD_TESTS OR BUILD_CONSUMER_TEST)
       -R "^lancedb_c17_consumer$"
       --output-on-failure
       --no-tests=error
-    DEPENDS lancedb_c17_consumer lancedb_source_header_c17
+    DEPENDS lancedb_c17_consumer lancedb_source_header_c17 lancedb_c17_example
     COMMENT "Checking the public header with a strict C17 consumer..."
     VERBATIM
   )

@@ -21,7 +21,7 @@ use lancedb::arrow::SendableRecordBatchStream;
 use lancedb::datafusion::logical_expr::Expr;
 use lancedb::index::scalar::{FullTextSearchQuery, PhraseQuery};
 use lancedb::query::{
-    ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
+    ColumnOrdering, ExecutableQuery, HasQuery, Query, QueryBase, QueryFilter, Select, VectorQuery,
 };
 use lancedb::rerankers::rrf::RRFReranker;
 use lancedb::rerankers::NormalizeMethod;
@@ -43,6 +43,7 @@ pub struct LanceDBQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     select: Option<Select>,
+    order_by: Option<Vec<ColumnOrdering>>,
     with_row_id: bool,
     fast_search: bool,
     filter: Option<String>,
@@ -160,6 +161,7 @@ pub struct LanceDBVectorQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     select: Option<Select>,
+    order_by: Option<Vec<ColumnOrdering>>,
     with_row_id: bool,
     fast_search: bool,
     bypass_vector_index: bool,
@@ -173,6 +175,19 @@ pub struct LanceDBVectorQuery {
     nprobes: Option<usize>,
     refine_factor: Option<u32>,
     ef: Option<usize>,
+}
+
+/// One column ordering for `lancedb_query_order_by` and
+/// `lancedb_vector_query_order_by`.
+#[repr(C)]
+#[derive(Debug)]
+pub struct LanceDBColumnOrdering {
+    /// NUL-terminated UTF-8 column name.
+    pub column: *const c_char,
+    /// Non-zero for ascending order, zero for descending.
+    pub ascending: i32,
+    /// Non-zero puts NULL values first, regardless of direction.
+    pub nulls_first: i32,
 }
 
 /// Query result handle for streaming results
@@ -204,6 +219,7 @@ pub unsafe extern "C" fn lancedb_query_new(table: *const LanceDBTable) -> *mut L
         limit: None,
         offset: None,
         select: None,
+        order_by: None,
         with_row_id: false,
         fast_search: false,
         filter: None,
@@ -245,6 +261,7 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
         limit: None,
         offset: None,
         select: None,
+        order_by: None,
         with_row_id: false,
         fast_search: false,
         bypass_vector_index: false,
@@ -507,6 +524,42 @@ unsafe fn dynamic_projection_from_c(
     Ok(Select::Dynamic(projection))
 }
 
+/// Read a borrowed C column-ordering array into the SDK's ordering values.
+///
+/// A zero count clears the ordering, so `orderings` may be NULL. A positive
+/// count requires an array whose entries and column names are non-NULL and
+/// valid UTF-8. Entries are copied in array order.
+unsafe fn column_orderings_from_c(
+    orderings: *const LanceDBColumnOrdering,
+    num_orderings: usize,
+) -> Result<Option<Vec<ColumnOrdering>>, ()> {
+    if num_orderings == 0 {
+        return Ok(None);
+    }
+    if orderings.is_null() {
+        return Err(());
+    }
+
+    let mut parsed = Vec::with_capacity(num_orderings);
+    for index in 0..num_orderings {
+        let ordering = &*orderings.add(index);
+        if ordering.column.is_null() {
+            return Err(());
+        }
+        let column = CStr::from_ptr(ordering.column)
+            .to_str()
+            .map_err(|_| ())?
+            .to_string();
+        parsed.push(ColumnOrdering {
+            column_name: column,
+            ascending: ordering.ascending != 0,
+            nulls_first: ordering.nulls_first != 0,
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
 /// Set limit for query
 ///
 /// # Safety
@@ -653,6 +706,54 @@ pub unsafe extern "C" fn lancedb_query_select_dynamic(
     match dynamic_projection_from_c(names, expressions, num_columns) {
         Ok(select) => {
             (*query).select = Some(select);
+            LanceDBError::Success
+        }
+        Err(()) => {
+            set_invalid_argument_message(error_message);
+            LanceDBError::InvalidArgument
+        }
+    }
+}
+
+/// Set the column ordering for a plain query
+///
+/// The ordering array is borrowed for the call and copied. A zero count clears
+/// the ordering and accepts a NULL array; a positive count requires a non-NULL
+/// array whose entries and column names are non-NULL and valid UTF-8. Invalid
+/// input returns `LANCEDB_INVALID_ARGUMENT` without changing the previous
+/// ordering.
+///
+/// A nonempty ordering sorts an ordinary scan before limit and offset are
+/// applied. On a standalone full-text search it sorts all matches before the
+/// search page is selected. On a hybrid vector plus full-text query it applies
+/// to both search legs, and the reranker still determines the final fused
+/// order.
+///
+/// A native namespace connection with QueryTable pushdown executes a nonempty
+/// ordering locally, so it needs client access to table storage. A table routed
+/// through the MemWAL LSM scanner rejects a nonempty ordering with
+/// `LANCEDB_NOT_SUPPORTED`; clear the ordering to return to the default route.
+/// A remote LanceDB forwards the ordering to the server.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_query_new`
+/// - `orderings` must be NULL or point to `num_orderings` entries
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_query_order_by(
+    query: *mut LanceDBQuery,
+    orderings: *const LanceDBColumnOrdering,
+    num_orderings: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match column_orderings_from_c(orderings, num_orderings) {
+        Ok(ordering) => {
+            (*query).order_by = ordering;
             LanceDBError::Success
         }
         Err(()) => {
@@ -1091,6 +1192,54 @@ pub unsafe extern "C" fn lancedb_vector_query_select_dynamic(
     }
 }
 
+/// Set the column ordering for a vector query
+///
+/// The ordering array is borrowed for the call and copied. A zero count clears
+/// the ordering and accepts a NULL array; a positive count requires a non-NULL
+/// array whose entries and column names are non-NULL and valid UTF-8. Invalid
+/// input returns `LANCEDB_INVALID_ARGUMENT` without changing the previous
+/// ordering.
+///
+/// A vector search first selects its nearest-neighbour candidates using the
+/// configured limit and offset, or the SDK's default top-K when no limit is
+/// set, and then orders those candidates. It does not sort the whole table. On
+/// a hybrid vector plus full-text query it applies to both search legs, and the
+/// reranker still determines the final fused order.
+///
+/// A native namespace connection with QueryTable pushdown executes a nonempty
+/// ordering locally, so it needs client access to table storage. A table routed
+/// through the MemWAL LSM scanner rejects a nonempty ordering with
+/// `LANCEDB_NOT_SUPPORTED`; clear the ordering to return to the default route.
+/// A remote LanceDB forwards the ordering to the server.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
+/// - `orderings` must be NULL or point to `num_orderings` entries
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_vector_query_order_by(
+    query: *mut LanceDBVectorQuery,
+    orderings: *const LanceDBColumnOrdering,
+    num_orderings: usize,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    match column_orderings_from_c(orderings, num_orderings) {
+        Ok(ordering) => {
+            (*query).order_by = ordering;
+            LanceDBError::Success
+        }
+        Err(()) => {
+            set_invalid_argument_message(error_message);
+            LanceDBError::InvalidArgument
+        }
+    }
+}
+
 /// Ask a vector query to return the `_rowid` metadata column
 ///
 /// This also applies to a hybrid vector plus full-text query. The metadata
@@ -1500,6 +1649,9 @@ fn configured_plain_query(query: &LanceDBQuery) -> Query {
     if let Some(ref select) = query.select {
         rust_query = rust_query.select(select.clone());
     }
+    if let Some(ref order_by) = query.order_by {
+        rust_query = rust_query.order_by(Some(order_by.clone()));
+    }
     if query.with_row_id {
         rust_query = rust_query.with_row_id();
     }
@@ -1547,6 +1699,9 @@ fn configured_vector_query(
     }
     if let Some(ref select) = query.select {
         rust_query = rust_query.select(select.clone());
+    }
+    if let Some(ref order_by) = query.order_by {
+        rust_query = rust_query.order_by(Some(order_by.clone()));
     }
     if query.with_row_id {
         rust_query = rust_query.with_row_id();

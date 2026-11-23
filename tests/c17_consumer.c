@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define LANCEDB_STRINGIFY_IMPL(value) #value
 #define LANCEDB_STRINGIFY(value) LANCEDB_STRINGIFY_IMPL(value)
@@ -375,6 +376,231 @@ cleanup:
   return result;
 }
 
+/* Build a four-row int32 table. The rows are deliberately not in sorted order
+ * so an ordering check cannot pass by accident. */
+static int create_order_by_table(
+    LanceDBConnection* connection, const char* table_name, LanceDBTable** table_out) {
+  static const int32_t values[] = {3, 1, 4, 2};
+  struct ArrowSchema id_schema = {
+      .format = "i",
+      .name = "id",
+      .metadata = NULL,
+      .flags = 0,
+      .n_children = 0,
+      .children = NULL,
+      .dictionary = NULL,
+      .release = release_arrow_schema,
+      .private_data = NULL,
+  };
+  struct ArrowSchema* fields[] = {&id_schema};
+  struct ArrowSchema schema = {
+      .format = "+s",
+      .name = "",
+      .metadata = NULL,
+      .flags = 0,
+      .n_children = 1,
+      .children = fields,
+      .dictionary = NULL,
+      .release = release_arrow_schema,
+      .private_data = NULL,
+  };
+
+  const void* id_buffers[] = {NULL, values};
+  struct ArrowArray id_array = {
+      .length = 4,
+      .null_count = 0,
+      .offset = 0,
+      .n_buffers = 2,
+      .n_children = 0,
+      .buffers = id_buffers,
+      .children = NULL,
+      .dictionary = NULL,
+      .release = release_arrow_array,
+      .private_data = NULL,
+  };
+  struct ArrowArray* children[] = {&id_array};
+  const void* struct_buffers[] = {NULL};
+  struct ArrowArray batch = {
+      .length = 4,
+      .null_count = 0,
+      .offset = 0,
+      .n_buffers = 1,
+      .n_children = 1,
+      .buffers = struct_buffers,
+      .children = children,
+      .dictionary = NULL,
+      .release = release_arrow_array,
+      .private_data = NULL,
+  };
+
+  LanceDBRecordBatchReader* reader = NULL;
+  char* error_message = NULL;
+  LanceDBError status = lancedb_record_batch_reader_from_arrow(
+      (const FFI_ArrowArray*)&batch, (const FFI_ArrowSchema*)&schema,
+      &reader, &error_message);
+  if (status != LANCEDB_SUCCESS || reader == NULL || error_message != NULL) {
+    lancedb_free_string(error_message);
+    lancedb_record_batch_reader_free(reader);
+    return fail("creating the C17 ordering table reader failed");
+  }
+
+  status = lancedb_table_create(connection, table_name,
+                                (const FFI_ArrowSchema*)&schema, reader,
+                                table_out, &error_message);
+  if (status != LANCEDB_SUCCESS || *table_out == NULL || error_message != NULL) {
+    lancedb_free_string(error_message);
+    if (*table_out != NULL) {
+      lancedb_table_free(*table_out);
+      *table_out = NULL;
+    }
+    return fail("creating the C17 ordering table failed");
+  }
+  return 0;
+}
+
+/* Execute a configured query and copy its int32 id column into ids. */
+static int execute_order_by_ids(
+    LanceDBQuery* query, int32_t* ids, size_t capacity, size_t* count_out) {
+  LanceDBQueryResult* result = NULL;
+  char* error_message = NULL;
+  LanceDBError status = lancedb_query_execute_with_status(query, &result, &error_message);
+  if (status != LANCEDB_SUCCESS || result == NULL || error_message != NULL) {
+    lancedb_free_string(error_message);
+    lancedb_query_result_free(result);
+    return fail("executing the C17 ordering query failed");
+  }
+
+  struct FFI_ArrowArray** arrays = NULL;
+  struct FFI_ArrowSchema* schema = NULL;
+  size_t batch_count = 0;
+  status = lancedb_query_result_to_arrow(result, &arrays, &schema, &batch_count, &error_message);
+  if (status != LANCEDB_SUCCESS || error_message != NULL) {
+    lancedb_free_string(error_message);
+    lancedb_free_arrow_arrays(arrays, batch_count);
+    lancedb_free_arrow_schema(schema);
+    return fail("reading the C17 ordering result failed");
+  }
+
+  size_t count = 0;
+  for (size_t i = 0; i < batch_count; i++) {
+    const struct ArrowArray* batch = (const struct ArrowArray*)arrays[i];
+    if (batch->n_children != 1 || batch->children[0]->n_buffers < 2) {
+      lancedb_free_arrow_arrays(arrays, batch_count);
+      lancedb_free_arrow_schema(schema);
+      return fail("the C17 ordering result has an unexpected shape");
+    }
+    const struct ArrowArray* id_array = batch->children[0];
+    const int32_t* values = (const int32_t*)id_array->buffers[1];
+    for (int64_t row = 0; row < id_array->length; row++) {
+      if (count >= capacity) {
+        lancedb_free_arrow_arrays(arrays, batch_count);
+        lancedb_free_arrow_schema(schema);
+        return fail("the C17 ordering result exceeded the test buffer");
+      }
+      ids[count++] = values[id_array->offset + row];
+    }
+  }
+
+  lancedb_free_arrow_arrays(arrays, batch_count);
+  lancedb_free_arrow_schema(schema);
+  *count_out = count;
+  return 0;
+}
+
+static LanceDBQuery* make_order_by_query(
+    LanceDBTable* table, size_t limit, size_t offset, char** error_message) {
+  LanceDBQuery* query = lancedb_query_new(table);
+  if (query == NULL) {
+    return NULL;
+  }
+  const char* columns[] = {"id"};
+  if (lancedb_query_select(query, columns, 1, error_message) != LANCEDB_SUCCESS ||
+      lancedb_query_limit(query, limit, error_message) != LANCEDB_SUCCESS ||
+      lancedb_query_offset(query, offset, error_message) != LANCEDB_SUCCESS) {
+    lancedb_query_free(query);
+    return NULL;
+  }
+  return query;
+}
+
+static int run_order_by_cases(LanceDBConnection* connection) {
+  char table_name[64];
+  const int table_name_len = snprintf(
+      table_name, sizeof(table_name), "order_by_c17_test_%lld", (long long)time(NULL));
+  if (table_name_len < 0 || (size_t)table_name_len >= sizeof(table_name)) {
+    return fail("the C17 ordering table name does not fit its buffer");
+  }
+
+  LanceDBTable* table = NULL;
+  LanceDBQuery* query = NULL;
+  LanceDBVectorQuery* vector_query = NULL;
+  int result = 0;
+  char* error_message = NULL;
+  if (create_order_by_table(connection, table_name, &table) != 0) {
+    return 1;
+  }
+
+  LanceDBColumnOrdering descending[] = {{"id", /*ascending=*/0, /*nulls_first=*/0}};
+  int32_t ids[8];
+  size_t count = 0;
+
+  // One valid plain call exercises the C ABI and a real ordered result. The
+  // C++ suites own rejection, reset and multi-column coverage.
+  query = make_order_by_query(table, 2, 1, &error_message);
+  if (query == NULL || error_message != NULL) {
+    result = fail("creating the C17 descending ordering query failed");
+    goto cleanup;
+  }
+  if (lancedb_query_order_by(query, descending, 1, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("setting the C17 descending ordering failed");
+    goto cleanup;
+  }
+  if (execute_order_by_ids(query, ids, 8, &count) != 0) {
+    query = NULL;
+    result = 1;
+    goto cleanup;
+  }
+  query = NULL;
+  if (count != 2 || ids[0] != 3 || ids[1] != 2) {
+    result = fail("the C17 descending ordering returned the wrong rows");
+    goto cleanup;
+  }
+
+  // The vector setter only stores the ordering here; its C ABI and argument
+  // handling are the same code path that the C++ vector fixture executes.
+  float query_vector[] = {0.0f};
+  vector_query = lancedb_vector_query_new(table, query_vector, 1);
+  if (vector_query == NULL) {
+    result = fail("creating the C17 ordering vector query failed");
+    goto cleanup;
+  }
+  if (lancedb_vector_query_order_by(vector_query, descending, 1, &error_message)
+          != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("setting the C17 vector ordering failed");
+    goto cleanup;
+  }
+  lancedb_vector_query_free(vector_query);
+  vector_query = NULL;
+
+cleanup:
+  lancedb_query_free(query);
+  lancedb_vector_query_free(vector_query);
+  lancedb_free_string(error_message);
+  if (table != NULL) {
+    lancedb_table_free(table);
+    char* drop_error = NULL;
+    const LanceDBError drop_status =
+        lancedb_connection_drop_table(connection, table_name, NULL, &drop_error);
+    if (result == 0 && (drop_status != LANCEDB_SUCCESS || drop_error != NULL)) {
+      result = fail("dropping the C17 ordering table failed");
+    }
+    lancedb_free_string(drop_error);
+  }
+  return result;
+}
+
 int main(int argc, char** argv) {
   if (argc != 2) {
     fprintf(stderr, "usage: %s <temporary-database-path>\n", argv[0]);
@@ -502,8 +728,29 @@ int main(int argc, char** argv) {
   builder = lancedb_connect_builder_namespace_client_property(builder, "ignored", "value");
   builder = lancedb_connect_builder_manifest_enabled(builder, false);
   builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 0);
+
+  const char* client_header_keys[] = {"x-lancedb-c17-consumer"};
+  const char* client_header_values[] = {"forwarded"};
+  const uint16_t retry_statuses[] = {429, 503};
+  LanceDBClientConfig client_config = {0};
+  client_config.set_fields = LANCEDB_CLIENT_CONFIG_RETRIES |
+                             LANCEDB_CLIENT_CONFIG_READ_TIMEOUT |
+                             LANCEDB_CLIENT_CONFIG_RETRY_STATUSES |
+                             LANCEDB_CLIENT_CONFIG_TLS_ASSERT_HOSTNAME;
+  client_config.retries = 2;
+  client_config.read_timeout_ms = 1000;
+  client_config.retry_statuses = retry_statuses;
+  client_config.retry_status_count = 2;
+  client_config.tls_assert_hostname = 1;
+  client_config.extra_header_keys = client_header_keys;
+  client_config.extra_header_values = client_header_values;
+  client_config.extra_header_count = 1;
+  builder = lancedb_connect_builder_client_config(builder, &client_config);
   if (builder == NULL) {
-    return fail("the connection builder setters must return a builder");
+    return fail("the client configuration setter must return a builder");
+  }
+  if (lancedb_connect_builder_client_config(NULL, &client_config) != NULL) {
+    return fail("the client configuration setter must reject a NULL builder");
   }
 
   connection = NULL;
@@ -532,6 +779,11 @@ int main(int argc, char** argv) {
   }
 
   if (run_fts_query_cases(connection) != 0) {
+    lancedb_connection_free(connection);
+    return 1;
+  }
+
+  if (run_order_by_cases(connection) != 0) {
     lancedb_connection_free(connection);
     return 1;
   }

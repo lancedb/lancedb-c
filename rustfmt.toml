@@ -1,0 +1,2 @@
+# Keep direct rustfmt invocations aligned with the Cargo package edition.
+edition = "2021"
