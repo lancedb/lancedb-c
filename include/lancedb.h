@@ -3114,13 +3114,136 @@ LanceDBError lancedb_table_stats(
  *
  * A non-NULL reader is consumed after the table and reader pointers are checked
  * for NULL, so a NULL table or reader leaves the reader caller-owned. Do NOT
- * call lancedb_record_batch_reader_free() after the reader is consumed. If
- * error_message is provided and an error occurs, the caller must free the error
- * message with lancedb_free_string().
+ * call lancedb_record_batch_reader_free() after the reader is consumed. This
+ * entry point always appends and discards the SDK commit result; use
+ * lancedb_table_add_with_options() to choose a mode or read that version.
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_add(
     const LanceDBTable* table,
     LanceDBRecordBatchReader* reader,
+    char** error_message
+);
+
+/**
+ * Add-data modes for lancedb_table_add_with_options()
+ *
+ * Append keeps the existing rows. Overwrite replaces the table contents with
+ * the supplied data.
+ */
+typedef enum {
+    LANCEDB_ADD_DATA_MODE_APPEND = 0,
+    LANCEDB_ADD_DATA_MODE_OVERWRITE = 1
+} LanceDBAddDataMode;
+
+/**
+ * How an add treats NaN and null elements in vector columns
+ *
+ * Error is the SDK default and rejects such vectors. Keep stores them, but they
+ * are not indexed for search. Whole null vectors are allowed by both modes.
+ */
+typedef enum {
+    LANCEDB_NAN_VECTOR_BEHAVIOR_ERROR = 0,
+    LANCEDB_NAN_VECTOR_BEHAVIOR_KEEP = 1
+} LanceDBNaNVectorBehavior;
+
+/**
+ * Fields of LanceDBAddOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB SDK default, so an omitted retry or write parallelism stays
+ * distinct from an explicit zero.
+ */
+typedef enum {
+    LANCEDB_ADD_OPTIONS_RETRIES = 1 << 0,
+    LANCEDB_ADD_OPTIONS_WRITE_PARALLELISM = 1 << 1
+} LanceDBAddOptionsField;
+
+/**
+ * Options for lancedb_table_add_with_options()
+ *
+ * set_fields selects the optional fields that are read; every other field keeps
+ * the SDK default. A NULL pointer to this struct uses the default append mode,
+ * the default NaN handling and the SDK defaults for write options, retries and
+ * write parallelism. A non-NULL struct still reads mode, on_nan_vectors,
+ * write_options and allow_external_blob_outside_bases regardless of set_fields.
+ *
+ * mode is one of the LanceDBAddDataMode values. The binding applies that one
+ * mode to both the SDK add builder and any supplied Lance write parameters,
+ * because the embedded SDK otherwise uses the write parameters' own mode. This
+ * keeps a caller that also requests a layout override on the intended
+ * append/overwrite path.
+ *
+ * write_options is NULL for the SDK defaults or points to a readable
+ * LanceDBWriteOptions. The SDK decides which options a backend supports. Remote
+ * add rejects non-default layout sizes; its insert request carries only the
+ * mode, so data storage version and stable-row-ID overrides have no effect
+ * there. allow_external_blob_outside_bases is embedded only and must be 0 or 1;
+ * a remote add with it set to 1 returns LANCEDB_NOT_SUPPORTED.
+ *
+ * retries is a remote per-call failed-attempt threshold and is only read when
+ * its bit is set. A value of 0 disables retries explicitly, while an unset bit
+ * keeps the SDK default. Embedded tables ignore it, and ambiguous write results
+ * are never replayed.
+ *
+ * on_nan_vectors is one of the LanceDBNaNVectorBehavior values; zero selects the
+ * SDK default Error behavior.
+ *
+ * write_parallelism is the number of parallel write streams and is only read
+ * when its bit is set. An unset bit lets the SDK estimate it, while an explicit
+ * zero is passed to the SDK and rejected with LANCEDB_INVALID_INPUT when the add
+ * executes.
+ *
+ * The struct and its write_options are borrowed for the duration of the call.
+ */
+typedef struct {
+    uint32_t set_fields;                       // Bitmask of LanceDBAddOptionsField values (0 = defaults)
+    int mode;                                  // One of the LanceDBAddDataMode values
+    const LanceDBWriteOptions* write_options;  // Per-call write options (NULL for SDK defaults)
+    uint8_t retries;                           // Failed-attempt threshold when its bit is set
+    int on_nan_vectors;                        // One of the LanceDBNaNVectorBehavior values
+    size_t write_parallelism;                  // Parallel write streams when its bit is set
+    int allow_external_blob_outside_bases;     // Allow external blob URIs (1 = true, 0 = false)
+} LanceDBAddOptions;
+
+/**
+ * Result of an add operation
+ *
+ * version is copied unchanged from the SDK's AddResult; this layer does not
+ * recompute or synthesize it. A value of zero means a legacy remote server did
+ * not return a commit version.
+ */
+typedef struct {
+    uint64_t version;  // Commit version; 0 may mean the server did not report one
+} LanceDBAddResult;
+
+/**
+ * Add data to table with options and an optional SDK commit result
+ *
+ * @param table - pointer to LanceDBTable
+ * @param reader - pointer to LanceDBRecordBatchReader; it is consumed on every path
+ * @param options - pointer to LanceDBAddOptions, or NULL for the SDK defaults
+ * @param result_out - optional pointer to receive the SDK commit version; NULL discards it
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * A non-NULL reader is consumed before the table and options are validated, so
+ * every rejection after the NULL reader check frees it exactly once. A NULL
+ * reader returns without consuming anything. Do NOT call
+ * lancedb_record_batch_reader_free() after the reader is consumed.
+ *
+ * When result_out is non-NULL, it is written only after a successful commit and
+ * is left unchanged on failure. The value is the SDK's AddResult.version; zero
+ * is valid when a legacy remote server does not report a commit version.
+ * If error_message is provided and an error occurs, the caller must free the
+ * error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_add_with_options(
+    const LanceDBTable* table,
+    LanceDBRecordBatchReader* reader,
+    const LanceDBAddOptions* options,
+    LanceDBAddResult* result_out,
     char** error_message
 );
 

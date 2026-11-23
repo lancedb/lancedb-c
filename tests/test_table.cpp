@@ -5,6 +5,7 @@
 
 #include <arrow/util/bit_util.h>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <memory>
@@ -961,6 +962,202 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table Add", "[table]") {
     if (error_message) {
       lancedb_free_string(error_message);
     }
+  }
+
+  SECTION("Options append applies write parameters and reports the SDK version") {
+    constexpr auto initial_rows = 3;
+    auto initial_reader = create_reader_with_value(initial_rows, 0, 1.0f);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, initial_reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBWriteOptions write_options{};
+    write_options.set_fields = LANCEDB_WRITE_OPTIONS_MAX_ROWS_PER_FILE;
+    write_options.max_rows_per_file = 2;
+
+    LanceDBAddOptions options{};
+    options.set_fields = LANCEDB_ADD_OPTIONS_RETRIES | LANCEDB_ADD_OPTIONS_WRITE_PARALLELISM;
+    options.mode = LANCEDB_ADD_DATA_MODE_APPEND;
+    options.write_options = &write_options;
+    options.retries = 0;
+    options.on_nan_vectors = LANCEDB_NAN_VECTOR_BEHAVIOR_ERROR;
+    options.write_parallelism = 2;
+    options.allow_external_blob_outside_bases = 1;
+
+    auto reader = create_reader_from_batch(create_batch_with_value(5, initial_rows, 2.0f));
+    LanceDBAddResult add_result{};
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == initial_rows + 5);
+    REQUIRE(first_data_value(table, "key_0") == 1.0f);
+    REQUIRE(first_data_value(table, "key_3") == 2.0f);
+
+    const auto version = lancedb_table_version(table);
+    REQUIRE(version == 3);
+    REQUIRE(add_result.version == version);
+
+    // max_rows_per_file=2 must split the five appended rows into more than one
+    // data file, in addition to the initial file.
+    const auto data_dir = std::filesystem::path(uri) / (table_name + ".lance") / "data";
+    size_t data_files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(data_dir)) {
+      if (entry.is_regular_file()) {
+        ++data_files;
+      }
+    }
+    REQUIRE(data_files >= 4);
+  }
+
+  SECTION("Overwrite with write parameters replaces the table and reports the SDK version") {
+    constexpr auto initial_rows = 6;
+    auto initial_reader = create_reader_with_value(initial_rows, 0, 1.0f);
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add(table, initial_reader, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBWriteOptions write_options{};
+    write_options.set_fields = LANCEDB_WRITE_OPTIONS_MAX_ROWS_PER_FILE;
+    write_options.max_rows_per_file = 2;
+
+    LanceDBAddOptions options{};
+    options.mode = LANCEDB_ADD_DATA_MODE_OVERWRITE;
+    options.write_options = &write_options;
+
+    auto reader = create_reader_from_batch(create_batch_with_value(4, 100, 9.0f));
+    LanceDBAddResult add_result{};
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 4);
+    REQUIRE(first_data_value(table, "key_100") == 9.0f);
+
+    const auto version = lancedb_table_version(table);
+    REQUIRE(version == 3);
+    REQUIRE(add_result.version == version);
+  }
+
+  SECTION("NULL options and result use the SDK defaults") {
+    auto reader = create_reader_from_batch(create_test_record_batch(2, 0));
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add_with_options(table, reader, nullptr, nullptr, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 2);
+    REQUIRE(lancedb_table_version(table) == 2);
+  }
+
+  SECTION("NaN vectors follow the selected behavior") {
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    LanceDBAddOptions options{};
+    LanceDBAddResult add_result{777};
+    char* error_message = nullptr;
+
+    auto reader = create_reader_from_batch(create_batch_with_value(1, 0, nan));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        != LANCEDB_SUCCESS);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("NaN") != std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(add_result.version == 777);
+    REQUIRE(lancedb_table_count_rows(table) == 0);
+
+    options.on_nan_vectors = LANCEDB_NAN_VECTOR_BEHAVIOR_KEEP;
+    reader = create_reader_from_batch(create_batch_with_value(1, 0, nan));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_table_count_rows(table) == 1);
+    REQUIRE(add_result.version == lancedb_table_version(table));
+    REQUIRE(add_result.version == 2);
+  }
+
+  SECTION("Invalid options are rejected and consume the reader") {
+    LanceDBAddResult add_result{42};
+    LanceDBAddOptions options{};
+    char* error_message = nullptr;
+
+    options.set_fields = 1u << 31;
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(add_result.version == 42);
+
+    options.set_fields = 0;
+    options.mode = 99;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.mode = LANCEDB_ADD_DATA_MODE_APPEND;
+    options.on_nan_vectors = 2;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.on_nan_vectors = LANCEDB_NAN_VECTOR_BEHAVIOR_ERROR;
+    options.allow_external_blob_outside_bases = 2;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+
+    options.allow_external_blob_outside_bases = 0;
+    LanceDBWriteOptions bad_write_options{};
+    bad_write_options.set_fields = LANCEDB_WRITE_OPTIONS_DATA_STORAGE_VERSION;
+    options.write_options = &bad_write_options;
+    reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    REQUIRE(add_result.version == 42);
+    REQUIRE(lancedb_table_count_rows(table) == 0);
+    REQUIRE(lancedb_table_version(table) == 1);
+  }
+
+  SECTION("Explicit zero write parallelism is rejected by the SDK") {
+    LanceDBAddOptions options{};
+    options.set_fields = LANCEDB_ADD_OPTIONS_WRITE_PARALLELISM;
+    options.write_parallelism = 0;
+    LanceDBAddResult add_result{123};
+
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add_with_options(table, reader, &options, &add_result, &error_message)
+        == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("write_parallelism") != std::string::npos);
+    lancedb_free_string(error_message);
+
+    REQUIRE(add_result.version == 123);
+    REQUIRE(lancedb_table_count_rows(table) == 0);
+    REQUIRE(lancedb_table_version(table) == 1);
+  }
+
+  SECTION("NULL table with options consumes the reader") {
+    auto reader = create_reader_from_batch(create_test_record_batch(1, 0));
+    char* error_message = nullptr;
+    REQUIRE(lancedb_table_add_with_options(nullptr, reader, nullptr, nullptr, &error_message)
+        == LANCEDB_INVALID_ARGUMENT);
+    REQUIRE(error_message != nullptr);
+    lancedb_free_string(error_message);
+
+    // The reader is intentionally not freed. Valgrind reports a leak when this
+    // call stops consuming a non-NULL reader before validating the table.
   }
 
   lancedb_table_free(table);
