@@ -308,7 +308,7 @@ pub unsafe extern "C" fn lancedb_vector_query_new(
 /// On a multivector column, `limit` selects table rows in total and each row's
 /// `_distance` includes the contribution of every input vector.
 ///
-/// The pinned SDK beta.23 and the beta.24 release do not support a hybrid query
+/// The pinned SDK beta.25 does not support a hybrid query
 /// with more than one query vector on a fixed-size-list float column when the
 /// full-text leg returns matches: the SDK's RRF merge combines the batch
 /// `query_index` column with the full-text schema and returns an Arrow schema
@@ -376,6 +376,7 @@ pub unsafe extern "C" fn lancedb_vector_query_new_typed(
         limit: None,
         offset: None,
         select: None,
+        order_by: None,
         with_row_id: false,
         fast_search: false,
         bypass_vector_index: false,
@@ -1360,7 +1361,7 @@ pub unsafe extern "C" fn lancedb_vector_query_where_filter(
 /// the SDK's unsupported-shape error for this hybrid; execute the query instead.
 ///
 /// If the builder has more than one query vector on a fixed-size-list float
-/// column, the pinned SDK beta.23 and beta.24 cannot merge a matching full-text
+/// column, the pinned SDK beta.25 cannot merge a matching full-text
 /// leg; see `lancedb_vector_query_new_typed` for that batch limitation.
 ///
 /// # Safety
@@ -1402,7 +1403,7 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
 /// reuse or free the handle immediately.
 ///
 /// If the builder has more than one query vector on a fixed-size-list float
-/// column, the pinned SDK beta.23 and beta.24 cannot merge a matching full-text
+/// column, the pinned SDK beta.25 cannot merge a matching full-text
 /// leg; see `lancedb_vector_query_new_typed` for that batch limitation.
 ///
 /// # Safety

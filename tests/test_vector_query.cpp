@@ -2682,6 +2682,38 @@ TEST_CASE_METHOD(
     }
   }
 
+  SECTION("Batch vectors combine with column ordering") {
+    auto first_vector = vector_for_row(1);
+    auto second_vector = vector_for_row(7);
+    LanceDBQueryVector vectors[] = {
+        {LANCEDB_QUERY_VECTOR_F32, first_vector.data(), first_vector.size()},
+        {LANCEDB_QUERY_VECTOR_F32, second_vector.data(), second_vector.size()},
+    };
+
+    LanceDBVectorQuery* query =
+        lancedb_vector_query_new_typed(table, vectors, 2);
+    REQUIRE(query != nullptr);
+    configure_key_projection_and_limit(query, 1);
+
+    const LanceDBColumnOrdering orderings[] = {{"key", 0, 0}};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_order_by(query, orderings, 1, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto rows = execute_vector_query(query);
+    REQUIRE(rows.num_rows() == 2);
+    REQUIRE(rows.schema->GetFieldByName("query_index") != nullptr);
+    const auto collected = query_rows_with_index(rows);
+    REQUIRE(collected.size() == 2);
+    // The scanner's ordering sorts the combined batch output by key. Each
+    // query keeps its own top-1 row and query_index value.
+    REQUIRE(collected[0].key == "key_7");
+    REQUIRE(collected[0].query_index == 1);
+    REQUIRE(collected[1].key == "key_1");
+    REQUIRE(collected[1].query_index == 0);
+  }
+
   SECTION("Binary vectors query a UInt8 column with Hamming distance") {
     LanceDBTable* binary_table =
         create_binary_vector_table(db, "typed_binary_vector_query_test");
@@ -2758,6 +2790,46 @@ TEST_CASE_METHOD(
     REQUIRE(distances_of(rows) == std::vector<float>{20.0F, 580.0F});
 
     lancedb_table_free(multivector_table);
+  }
+
+  SECTION("A missing batch vector column returns the SDK error") {
+    auto first_vector = vector_for_row(1);
+    auto second_vector = vector_for_row(7);
+    LanceDBQueryVector vectors[] = {
+        {LANCEDB_QUERY_VECTOR_F32, first_vector.data(), first_vector.size()},
+        {LANCEDB_QUERY_VECTOR_F32, second_vector.data(), second_vector.size()},
+    };
+
+    LanceDBVectorQuery* query =
+        lancedb_vector_query_new_typed(table, vectors, 2);
+    REQUIRE(query != nullptr);
+    configure_key_projection_and_limit(query, 1);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "missing_vector", &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // SDK beta.25 (#5162) validates the batch column before planning and
+    // returns lancedb::Error::Lance wrapping lance::Error::Index. The C layer
+    // maps that variant to LANCEDB_LANCE, not LANCEDB_INVALID_INPUT.
+    LanceDBQueryResult* result = reinterpret_cast<LanceDBQueryResult*>(1);
+    REQUIRE(lancedb_vector_query_execute_with_status(
+        query, &result, &error_message) == LANCEDB_LANCE);
+    REQUIRE(result == nullptr);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("missing_vector") != std::string::npos);
+    REQUIRE(std::string(error_message).find("does not exist in schema")
+        != std::string::npos);
+    lancedb_free_string(error_message);
+
+    // The failed call consumed only its own query and left the table usable.
+    auto valid_vector = vector_for_row(3);
+    LanceDBQueryVector valid{
+        LANCEDB_QUERY_VECTOR_F32, valid_vector.data(), valid_vector.size()};
+    auto rows = run_typed_query(table, {valid}, 1);
+    REQUIRE(rows.num_rows() == 1);
+    REQUIRE(keys_of(rows) == std::vector<std::string>{"key_3"});
   }
 
   SECTION("SDK validation runs when the query is configured") {
