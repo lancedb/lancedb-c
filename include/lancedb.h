@@ -4422,10 +4422,13 @@ typedef struct {
  * max_expansions (50) and prefix_length (0) apply to every leaf; each leaf has
  * its own max_expansions budget.
  *
- * Embedded LanceDB rejects a MultiMatch that resolves to ListElement documents
- * with LANCEDB_NOT_SUPPORTED, including a single-column or nested MultiMatch.
- * That is an embedded dataset-scanner check and is separate from the MemWAL
- * routing limits below.
+ * Embedded LanceDB rejects a MultiMatch that resolves to ListElement documents,
+ * including a single-column or nested MultiMatch. Lance reports the rejection as
+ * its internal Error::NotSupported; the pinned SDK wraps that variant as
+ * Error::Lance, so the C status is LANCEDB_LANCE with the "MultiMatch does not
+ * support ListElement document granularity" diagnostic, not
+ * LANCEDB_NOT_SUPPORTED. That is an embedded dataset-scanner check and is
+ * separate from the MemWAL routing limits below.
  *
  * The constructor validates representation only and leaves semantics to the
  * SDK. A nonzero boost count that differs from the column count fails here with
@@ -4456,9 +4459,10 @@ typedef struct {
  * which can lose the AND constraint. For example, a Boost whose positive leg
  * is an AND MultiMatch sends the positive leg's shared text over the union of
  * the columns, so the server can treat it as OR. With a root OR MultiMatch, an
- * older server receives the shared text and the union of the columns, so
- * membership is preserved but every per-column boost is dropped and the
- * server applies its default.
+ * older server receives the shared text and the union of the columns; every
+ * per-column boost is dropped, and the client does not guarantee the resulting
+ * membership or ranking. The server determines the result from that
+ * projection.
  *
  * A MemWAL LSM full-text query first checks the table's unenforced primary
  * key, and a table without one fails with LANCEDB_INVALID_INPUT before FTS

@@ -1352,8 +1352,11 @@ pub unsafe extern "C" fn lancedb_fts_query_new_match(
 /// embedded planner runs.
 ///
 /// Embedded LanceDB rejects a MultiMatch that resolves to ListElement
-/// documents with `LANCEDB_NOT_SUPPORTED`, including single-column and nested
-/// cases. A MemWAL LSM full-text query first requires an unenforced primary
+/// documents, including single-column and nested cases. Lance's internal
+/// `Error::NotSupported` is wrapped by the pinned SDK as `Error::Lance`, so the
+/// C status is `LANCEDB_LANCE` with the "MultiMatch does not support
+/// ListElement document granularity" diagnostic, not `LANCEDB_NOT_SUPPORTED`.
+/// A MemWAL LSM full-text query first requires an unenforced primary
 /// key (`LANCEDB_INVALID_INPUT` when absent), then requires the whole full-text
 /// tree to name one explicit column whose FTS index the write spec maintains
 /// and every resident MemTable carries; a cross-column MultiMatch fails with
@@ -1361,7 +1364,9 @@ pub unsafe extern "C" fn lancedb_fts_query_new_match(
 /// to a hybrid query's full-text leg. Older Enterprise servers
 /// reject AND only at a root Match or MultiMatch; a MultiMatch nested under
 /// Boolean or Boost follows the parent's legacy text projection and can lose
-/// AND. The C declaration has the full backend contract.
+/// AND. A root OR MultiMatch is sent as the shared text over the union of the
+/// columns, with every per-column boost dropped and the result left to the
+/// server. The C declaration has the full backend contract.
 ///
 /// # Safety
 /// - `text` must be a valid null-terminated UTF-8 string
