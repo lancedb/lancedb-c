@@ -2323,6 +2323,99 @@ void lancedb_table_free(LanceDBTable* table);
 void lancedb_run_on_stack(void (*callback)(void*), void* user_data, size_t red_zone, size_t stack_size);
 
 /**
+ * Create table modes for lancedb_table_create_with_options()
+ *
+ * The values mirror the LanceDB SDK's CreateTableMode. Create returns
+ * LANCEDB_TABLE_ALREADY_EXISTS when the table exists, Overwrite replaces it with
+ * the supplied data, and ExistOk opens the existing table and ignores the
+ * supplied data. ExistOk schema and reopen behavior is backend-dependent:
+ * - A root listing connection compares the existing table schema with the
+ *   request schema (the reader schema when a reader is supplied, otherwise
+ *   schema_ptr) and reopens through the SDK ExistOk callback. This binding
+ *   supplies the custom location and per-table storage options to that callback
+ *   so a same-name default table is not opened instead.
+ * - Nonempty namespace paths and direct namespace connections ask the
+ *   namespace backend to open the existing table; the pinned SDK does not call
+ *   the C callback or compare schemas on that path.
+ * - The remote client compares the schema only on its AlreadyExists reopen path.
+ */
+typedef enum {
+    LANCEDB_CREATE_TABLE_MODE_CREATE = 0,
+    LANCEDB_CREATE_TABLE_MODE_OVERWRITE = 1,
+    LANCEDB_CREATE_TABLE_MODE_EXIST_OK = 2
+} LanceDBCreateTableMode;
+
+/**
+ * Fields of LanceDBWriteOptions
+ *
+ * Every bit makes the matching field an override. A field whose bit is not set
+ * keeps the LanceDB SDK default, so an omitted option stays distinct from an
+ * explicit zero or false.
+ */
+typedef enum {
+    LANCEDB_WRITE_OPTIONS_MAX_ROWS_PER_FILE = 1 << 0,
+    LANCEDB_WRITE_OPTIONS_MAX_ROWS_PER_GROUP = 1 << 1,
+    LANCEDB_WRITE_OPTIONS_MAX_BYTES_PER_FILE = 1 << 2,
+    LANCEDB_WRITE_OPTIONS_DATA_STORAGE_VERSION = 1 << 3,
+    LANCEDB_WRITE_OPTIONS_ENABLE_STABLE_ROW_IDS = 1 << 4
+} LanceDBWriteOptionsField;
+
+/**
+ * Per-call Lance write parameters shared by table create and add
+ *
+ * set_fields selects the fields that are read; every other field keeps the SDK
+ * default. A NULL pointer to this struct, or set_fields equal to zero, keeps the
+ * SDK WriteOptions without Lance write parameters. That is what default remote
+ * table creation requires.
+ *
+ * data_storage_version is parsed by the SDK's own version parser, for example
+ * "2.0", "2.1", "legacy" or "stable". It must not be NULL when its bit is set.
+ * enable_stable_row_ids must be 0 or 1 when its bit is set. The string is
+ * borrowed for the duration of the call.
+ */
+typedef struct {
+    uint32_t set_fields;                 // Bitmask of LanceDBWriteOptionsField values (0 = defaults)
+    uint64_t max_rows_per_file;          // Maximum number of rows per data file
+    uint64_t max_rows_per_group;         // Maximum number of rows per row group
+    uint64_t max_bytes_per_file;         // Maximum number of bytes per data file
+    const char* data_storage_version;    // Data storage version string (NULL when unset)
+    int enable_stable_row_ids;           // Stable row IDs (1 = true, 0 = false)
+} LanceDBWriteOptions;
+
+/**
+ * Options for lancedb_table_create_with_options()
+ *
+ * mode is one of the LanceDBCreateTableMode values. namespace_path is an array
+ * of namespace_path_len borrowed strings; NULL with length 0 means the root
+ * namespace. A positive length with a NULL array, a NULL part or a part that is
+ * not valid UTF-8 is rejected with LANCEDB_INVALID_ARGUMENT. location is an
+ * optional borrowed custom table location; NULL derives it from the database
+ * URI and the table name. On a root listing database it is also the location
+ * used by the ExistOk callback when reopening the existing table. Namespace and
+ * remote backends resolve table locations themselves and may reject or ignore
+ * it according to the SDK.
+ *
+ * storage_keys and storage_values are parallel arrays of storage_count borrowed
+ * strings for this table only. An empty array leaves the SDK's per-table storage
+ * options unset. The same options are passed to the SDK ExistOk callback when a
+ * root listing table is reopened. write_options is NULL for the SDK defaults or
+ * points to a readable LanceDBWriteOptions. allow_external_blob_outside_bases
+ * must be 0 or 1. The SDK decides which options a backend supports and applies
+ * its own precedence to overlapping create/open options and write parameters.
+ */
+typedef struct {
+    int mode;                                      // One of the LanceDBCreateTableMode values
+    const char* const* namespace_path;             // Namespace path parts (NULL with length 0 for root)
+    size_t namespace_path_len;                     // Number of namespace path parts
+    const char* location;                          // Custom table location (NULL to derive it)
+    const char* const* storage_keys;               // Per-table storage option keys
+    const char* const* storage_values;             // Per-table storage option values
+    size_t storage_count;                          // Number of per-table storage options
+    const LanceDBWriteOptions* write_options;      // Per-call write options (NULL for SDK defaults)
+    int allow_external_blob_outside_bases;         // Allow external blob URIs (1 = true, 0 = false)
+} LanceDBCreateTableOptions;
+
+/**
  * Create a new table with Arrow schema
  *
  * @param connection - pointer to LanceDBConnection
@@ -2347,6 +2440,54 @@ LanceDBError lancedb_table_create(
     const char* table_name,
     const FFI_ArrowSchema* schema_ptr,
     LanceDBRecordBatchReader* reader,
+    LanceDBTable** table_out,
+    char** error_message
+);
+
+/**
+ * Create a new table with SDK create builder options
+ *
+ * @param connection - pointer to LanceDBConnection
+ * @param table_name - null-terminated C string containing the table name
+ * @param schema_ptr - pointer to Arrow C ABI schema, borrowed for the call
+ * @param reader - pointer to LanceDBRecordBatchReader or NULL for empty table
+ * @param options - pointer to LanceDBCreateTableOptions, or NULL for SDK defaults
+ * @param table_out - pointer to receive the created or existing table
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * This entry point applies the create mode, namespace path, custom location,
+ * per-table storage options, write options and external-blob option to the SDK
+ * create builder. Write options are applied before the per-table storage and
+ * external-blob setters so those setters extend rather than replace them. The
+ * SDK still applies its own precedence for the create mode and overlapping write
+ * parameters. The SDK decides which options a backend supports and may resolve
+ * a table location from the backend instead of using location.
+ *
+ * For ExistOk, the SDK behavior is backend-dependent. A root listing compares
+ * the request schema (the reader schema when a reader is supplied, otherwise
+ * schema_ptr) and reopens through the callback with the supplied location and
+ * storage options. Nonempty namespaces and direct namespace connections open the
+ * existing table through the namespace backend without calling the C callback or
+ * comparing schemas. The remote client compares the schema only on its
+ * AlreadyExists reopen path.
+ *
+ * On entry, a non-NULL table_out is set to NULL. It is written only on success,
+ * so a failure leaves it NULL. The caller is responsible for freeing the
+ * returned table with lancedb_table_free() and the Arrow schema with its own
+ * release callback. This function takes ownership of the reader (when not NULL)
+ * as soon as it is called. The reader is released exactly once, also when
+ * another argument, an option, the Arrow schema or the SDK rejects the create.
+ * Do NOT call lancedb_record_batch_reader_free() after calling this function.
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_table_create_with_options(
+    const LanceDBConnection* connection,
+    const char* table_name,
+    const FFI_ArrowSchema* schema_ptr,
+    LanceDBRecordBatchReader* reader,
+    const LanceDBCreateTableOptions* options,
     LanceDBTable** table_out,
     char** error_message
 );

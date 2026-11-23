@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::Schema;
 use futures::TryStreamExt;
+use lance_io::object_store::StorageOptionsAccessor;
 use lance_namespace::models::{
     CreateNamespaceRequest, DescribeNamespaceRequest, DropNamespaceRequest,
 };
@@ -20,7 +21,7 @@ use lancedb::connection::{
     connect, connect_namespace, ConnectBuilder, ConnectNamespaceBuilder, Connection,
     NamespaceClientPushdownOperation, TableNamesBuilder,
 };
-use lancedb::database::ReadConsistency;
+use lancedb::database::{CreateTableMode, ReadConsistency};
 use lancedb::utils::validate_table_name;
 use lancedb::Table;
 
@@ -28,7 +29,9 @@ use crate::error::{
     clear_error_message, handle_error, set_custom_error_message, set_invalid_argument_message,
     set_unknown_error_message, LanceDBError,
 };
-use crate::types::LanceDBRecordBatchReader;
+use crate::types::{
+    bool_from_c_int, write_options_from_c, LanceDBCreateTableOptions, LanceDBRecordBatchReader,
+};
 
 /// Opaque handle to a ConnectBuilder
 #[repr(C)]
@@ -2016,6 +2019,251 @@ pub unsafe extern "C" fn lancedb_table_create(
     }
 }
 
+/// Convert a raw C create mode to the SDK mode
+///
+/// The SDK builds its ExistOk open request without the create location or the
+/// per-table storage options. The callback puts both back so the match reopens
+/// the table this create was meant to create, not a same-name default table.
+fn create_table_mode_from_c(
+    value: c_int,
+    location: Option<String>,
+    storage_options: Vec<(String, String)>,
+) -> Result<CreateTableMode, String> {
+    match value {
+        // LANCEDB_CREATE_TABLE_MODE_CREATE
+        0 => Ok(CreateTableMode::Create),
+        // LANCEDB_CREATE_TABLE_MODE_OVERWRITE
+        1 => Ok(CreateTableMode::Overwrite),
+        // LANCEDB_CREATE_TABLE_MODE_EXIST_OK
+        2 => Ok(CreateTableMode::exist_ok(move |mut request| {
+            if let Some(location) = location {
+                request.location = Some(location);
+            }
+            if !storage_options.is_empty() {
+                let mut read_params = request.lance_read_params.unwrap_or_default();
+                let mut store_params = read_params.store_options.unwrap_or_default();
+                store_params.storage_options_accessor =
+                    Some(Arc::new(StorageOptionsAccessor::with_static_options(
+                        storage_options.into_iter().collect::<HashMap<_, _>>(),
+                    )));
+                read_params.store_options = Some(store_params);
+                request.lance_read_params = Some(read_params);
+            }
+            request
+        })),
+        other => Err(format!(
+            "'mode' value {} is not a LanceDBCreateTableMode enumerator",
+            other
+        )),
+    }
+}
+
+/// Convert the per-table storage option arrays from C
+unsafe fn create_storage_options(
+    options: &LanceDBCreateTableOptions,
+) -> Result<Vec<(String, String)>, String> {
+    if options.storage_count == 0 {
+        return Ok(Vec::new());
+    }
+    if options.storage_keys.is_null() || options.storage_values.is_null() {
+        return Err(
+            "storage_keys and storage_values must not be NULL when storage_count is non-zero"
+                .to_string(),
+        );
+    }
+
+    let mut pairs = Vec::new();
+    for index in 0..options.storage_count {
+        let key = *options.storage_keys.add(index);
+        let value = *options.storage_values.add(index);
+        if key.is_null() || value.is_null() {
+            return Err(format!("storage option {} has a NULL key or value", index));
+        }
+        let key = CStr::from_ptr(key)
+            .to_str()
+            .map_err(|_| format!("storage option key {} is not valid UTF-8", index))?;
+        let value = CStr::from_ptr(value)
+            .to_str()
+            .map_err(|_| format!("storage option value {} is not valid UTF-8", index))?;
+        pairs.push((key.to_string(), value.to_string()));
+    }
+    Ok(pairs)
+}
+
+/// Convert the optional table location from C
+unsafe fn create_location(options: &LanceDBCreateTableOptions) -> Result<Option<String>, String> {
+    if options.location.is_null() {
+        return Ok(None);
+    }
+    CStr::from_ptr(options.location)
+        .to_str()
+        .map(|location| Some(location.to_string()))
+        .map_err(|_| "'location' is not valid UTF-8".to_string())
+}
+
+/// Create a table with the SDK create builder options
+///
+/// # Safety
+/// - `connection` must be a valid pointer returned from `lancedb_connect_builder_execute`
+/// - `table_name` must be a valid null-terminated C string
+/// - `schema_ptr` must be a valid pointer to Arrow C ABI schema
+/// - `reader` must be NULL or a valid reader. It is always consumed, also when
+///   another argument, an option, the schema or the SDK rejects the create
+/// - `options` may be NULL for the SDK defaults, or point to a readable
+///   `LanceDBCreateTableOptions`. Its pointers and strings are borrowed
+/// - `table_out` must be a valid pointer to receive the created table
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` with `*table_out` set to the created or existing table
+/// - `LANCEDB_INVALID_ARGUMENT` for a NULL pointer, an invalid string, an
+///   unknown write option bit, an out-of-range mode or an invalid boolean
+/// - The SDK error code for a rejected create
+///
+/// For `ExistOk`, the SDK behavior is backend-dependent. A root listing compares
+/// the request schema (the reader schema when supplied, otherwise `schema_ptr`)
+/// and reopens through the callback with the supplied location and storage
+/// options. Nonempty namespaces and direct namespace connections open through
+/// the namespace backend without the C callback or a schema comparison. The
+/// remote client compares only on its AlreadyExists reopen path.
+///
+/// The Arrow schema stays owned by the caller. On entry the error message slot
+/// is cleared; free a returned message with `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_create_with_options(
+    connection: *const LanceDBConnection,
+    table_name: *const c_char,
+    schema_ptr: *const arrow_schema::ffi::FFI_ArrowSchema,
+    reader: *mut LanceDBRecordBatchReader,
+    options: *const LanceDBCreateTableOptions,
+    table_out: *mut *mut LanceDBTable,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if !table_out.is_null() {
+        *table_out = ptr::null_mut();
+    }
+
+    // The new entry owns the reader from the moment it is called, so every
+    // rejection below drops it exactly once.
+    let reader = if reader.is_null() {
+        None
+    } else {
+        Some(Box::from_raw(reader).into_inner())
+    };
+    clear_error_message(error_message);
+
+    if connection.is_null() || table_name.is_null() || schema_ptr.is_null() || table_out.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let Ok(table_name_str) = CStr::from_ptr(table_name).to_str() else {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    };
+
+    let schema = match Schema::try_from(&*schema_ptr) {
+        Ok(schema) => Arc::new(schema),
+        Err(error) => {
+            return handle_error(
+                &lancedb::error::Error::Arrow { source: error },
+                error_message,
+            )
+        }
+    };
+
+    let mut mode = CreateTableMode::Create;
+    let mut namespace_path = Vec::new();
+    let mut location = None;
+    let mut storage_options = Vec::new();
+    let mut write_options = lancedb::table::WriteOptions::default();
+    let mut allow_external_blob_outside_bases = false;
+
+    if !options.is_null() {
+        let options = &*options;
+        write_options = match write_options_from_c(options.write_options) {
+            Ok(write_options) => write_options,
+            Err(message) => {
+                set_custom_error_message(error_message, &message);
+                return LanceDBError::InvalidArgument;
+            }
+        };
+        location = match create_location(options) {
+            Ok(location) => location,
+            Err(message) => {
+                set_custom_error_message(error_message, &message);
+                return LanceDBError::InvalidArgument;
+            }
+        };
+        storage_options = match create_storage_options(options) {
+            Ok(storage_options) => storage_options,
+            Err(message) => {
+                set_custom_error_message(error_message, &message);
+                return LanceDBError::InvalidArgument;
+            }
+        };
+        allow_external_blob_outside_bases = match bool_from_c_int(
+            "allow_external_blob_outside_bases",
+            options.allow_external_blob_outside_bases,
+        ) {
+            Ok(allow) => allow,
+            Err(message) => {
+                set_custom_error_message(error_message, &message);
+                return LanceDBError::InvalidArgument;
+            }
+        };
+        namespace_path = match namespace_path_from_c(
+            options.namespace_path,
+            options.namespace_path_len,
+            error_message,
+        ) {
+            Some(path) => path,
+            None => return LanceDBError::InvalidArgument,
+        };
+        mode =
+            match create_table_mode_from_c(options.mode, location.clone(), storage_options.clone())
+            {
+                Ok(mode) => mode,
+                Err(message) => {
+                    set_custom_error_message(error_message, &message);
+                    return LanceDBError::InvalidArgument;
+                }
+            };
+    }
+
+    let conn = &(*connection).inner;
+    let runtime = get_runtime();
+    let outcome = runtime.block_on(async {
+        let mut builder = if let Some(batch_reader) = reader {
+            conn.create_table(table_name_str, batch_reader)
+        } else {
+            conn.create_empty_table(table_name_str, schema.clone())
+        };
+        builder = builder.mode(mode);
+        if !namespace_path.is_empty() {
+            builder = builder.namespace(namespace_path);
+        }
+        if let Some(location) = location {
+            builder = builder.location(location);
+        }
+        builder = builder.write_options(write_options);
+        if !storage_options.is_empty() {
+            builder = builder.storage_options(storage_options);
+        }
+        builder = builder.allow_external_blob_outside_bases(allow_external_blob_outside_bases);
+        builder.execute().await
+    });
+
+    match outcome {
+        Ok(table) => {
+            let boxed_table = Box::new(LanceDBTable { inner: table });
+            *table_out = Box::into_raw(boxed_table);
+            LanceDBError::Success
+        }
+        Err(error) => handle_error(&error, error_message),
+    }
+}
+
 /// Get table names from the connection
 ///
 /// # Safety
@@ -3243,6 +3491,219 @@ pub unsafe extern "C" fn lancedb_run_on_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use arrow_schema::{DataType, Field};
+    use lancedb::database::OpenTableRequest;
+
+    use crate::types::LanceDBWriteOptions;
+
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir() -> TempDir {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "lancedb-c-create-options-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        TempDir(path)
+    }
+
+    struct CountingReader {
+        schema: Arc<Schema>,
+        batch: Option<RecordBatch>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Iterator for CountingReader {
+        type Item = Result<RecordBatch, arrow_schema::ArrowError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.batch.take().map(Ok)
+        }
+    }
+
+    impl RecordBatchReader for CountingReader {
+        fn schema(&self) -> Arc<Schema> {
+            self.schema.clone()
+        }
+    }
+
+    impl Drop for CountingReader {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_reader(
+        schema: Arc<Schema>,
+        drops: Arc<AtomicUsize>,
+    ) -> *mut LanceDBRecordBatchReader {
+        let batch = RecordBatch::new_empty(schema.clone());
+        let reader = CountingReader {
+            schema,
+            batch: Some(batch),
+            drops,
+        };
+        Box::into_raw(Box::new(LanceDBRecordBatchReader::new(Box::new(reader))))
+    }
+
+    fn test_connection(root: &TempDir) -> *mut LanceDBConnection {
+        let uri = root.0.to_str().expect("the temporary path is UTF-8");
+        let connection = get_runtime()
+            .block_on(connect(uri).execute())
+            .expect("the temporary database connects");
+        Box::into_raw(Box::new(LanceDBConnection {
+            inner: connection,
+            uri_cache: OnceLock::new(),
+        }))
+    }
+
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]))
+    }
+
+    #[test]
+    fn exist_ok_reopens_with_the_create_location_and_storage_options() {
+        let mode = create_table_mode_from_c(
+            2,
+            Some("custom-location".to_string()),
+            vec![(
+                "scheduler_error_mode".to_string(),
+                "best_effort".to_string(),
+            )],
+        )
+        .expect("ExistOk is a valid create mode");
+        let CreateTableMode::ExistOk(callback) = mode else {
+            panic!("mode 2 must build the SDK ExistOk callback");
+        };
+
+        let request = OpenTableRequest {
+            name: "table".to_string(),
+            namespace_path: Vec::new(),
+            index_cache_size: None,
+            lance_read_params: None,
+            location: None,
+            namespace_client: None,
+            managed_versioning: None,
+        };
+        let request = callback(request);
+
+        assert_eq!(request.location.as_deref(), Some("custom-location"));
+        let store_options = request
+            .lance_read_params
+            .expect("storage options create read parameters")
+            .store_options
+            .expect("storage options create object store parameters");
+        assert_eq!(
+            store_options
+                .storage_options()
+                .and_then(|options| options.get("scheduler_error_mode"))
+                .map(String::as_str),
+            Some("best_effort")
+        );
+    }
+
+    #[test]
+    fn create_options_release_the_reader_exactly_once() {
+        let root = temp_dir();
+        let connection = test_connection(&root);
+        let schema = test_schema();
+        let schema_ffi = arrow_schema::ffi::FFI_ArrowSchema::try_from(schema.as_ref())
+            .expect("the test schema exports");
+        let options = LanceDBCreateTableOptions::default();
+
+        let success_name = CString::new("created").unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut table = ptr::null_mut();
+        let status = unsafe {
+            lancedb_table_create_with_options(
+                connection,
+                success_name.as_ptr(),
+                &schema_ffi,
+                counting_reader(schema.clone(), drops.clone()),
+                &options,
+                &mut table,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, LanceDBError::Success);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        unsafe { lancedb_table_free(table) };
+
+        let argument_name = CString::new("argument-error").unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let status = unsafe {
+            lancedb_table_create_with_options(
+                connection,
+                argument_name.as_ptr(),
+                &schema_ffi,
+                counting_reader(schema.clone(), drops.clone()),
+                &options,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, LanceDBError::InvalidArgument);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let bad_write_options = LanceDBWriteOptions {
+            set_fields: 1 << 31,
+            ..LanceDBWriteOptions::default()
+        };
+        let bad_options = LanceDBCreateTableOptions {
+            write_options: &bad_write_options,
+            ..LanceDBCreateTableOptions::default()
+        };
+        let option_name = CString::new("option-error").unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut table = ptr::null_mut();
+        let status = unsafe {
+            lancedb_table_create_with_options(
+                connection,
+                option_name.as_ptr(),
+                &schema_ffi,
+                counting_reader(schema.clone(), drops.clone()),
+                &bad_options,
+                &mut table,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, LanceDBError::InvalidArgument);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let invalid_name = CString::new("invalid table name").unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut table = ptr::null_mut();
+        let status = unsafe {
+            lancedb_table_create_with_options(
+                connection,
+                invalid_name.as_ptr(),
+                &schema_ffi,
+                counting_reader(schema.clone(), drops.clone()),
+                &options,
+                &mut table,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, LanceDBError::InvalidTableName);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        unsafe { lancedb_connection_free(connection) };
+    }
 
     // The SDK keeps builder options private. Debug is the observable builder
     // representation at this boundary, so inspect it directly.

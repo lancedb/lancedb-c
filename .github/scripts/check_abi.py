@@ -313,6 +313,8 @@ ENUM_PREFIXES = {
     "LanceDBIndexType": "LANCEDB_INDEX_",
     "LanceDBOptimizeType": "LANCEDB_OPTIMIZE_",
     "LanceDBBinaryOp": "LANCEDB_BINARY_OP_",
+    "LanceDBCreateTableMode": "LANCEDB_CREATE_TABLE_MODE_",
+    "LanceDBWriteOptionsField": "LANCEDB_WRITE_OPTIONS_",
     "LanceDBBranchSourceKind": "LANCEDB_BRANCH_SOURCE_",
     "LanceDBDeltaRefType": "LANCEDB_DELTA_REF_",
     "LanceDBCherryPickStatus": "LANCEDB_CHERRY_PICK_STATUS_",
