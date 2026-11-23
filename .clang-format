@@ -1,0 +1,8 @@
+# Match the existing C/C++ source layout. Format changed lines or new files;
+# the rest of the tree does not need a repository-wide reflow.
+BasedOnStyle: Google
+IndentWidth: 2
+ColumnLimit: 0
+SortIncludes: false
+PointerAlignment: Left
+DerivePointerAlignment: false
