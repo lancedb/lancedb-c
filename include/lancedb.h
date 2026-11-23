@@ -11,6 +11,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/**
+ * @defgroup api_version Binding version
+ * @brief Compile-time and runtime version helpers.
+ * @{
+ */
+
 /*
  * Binding version. This source header reports the development default so it
  * stays usable directly without a generated file. CMake renders these values
@@ -22,6 +28,14 @@
 #define LANCEDB_VERSION_PATCH 0
 #define LANCEDB_VERSION_STRING "0.0.0-dev"
 #define LANCEDB_VERSION LANCEDB_VERSION_STRING
+
+/** @} */
+
+/**
+ * @defgroup api_types Handles and shared buffers
+ * @brief Opaque handles, shared buffers, and Arrow C ABI structures.
+ * @{
+ */
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,6 +124,11 @@ typedef struct ArrowArrayStream ArrowArrayStream;
 #endif /* ARROW_C_STREAM_INTERFACE */
 
 /**
+ * @addtogroup api_version
+ * @{
+ */
+
+/**
  * Return the binding version embedded in this library.
  *
  * The returned string is static, NUL-terminated and owned by the library. It
@@ -117,6 +136,8 @@ typedef struct ArrowArrayStream ArrowArrayStream;
  * build. The caller must not free the returned string.
  */
 const char* lancedb_version(void);
+
+/** @} */
 
 /**
  * Opaque handle to a LanceDB ConnectBuilder
@@ -230,6 +251,14 @@ typedef struct {
     const uint8_t* data;  /* Start of the file bytes, NULL when no file is held */
     size_t len;           /* Length of the file bytes */
 } LanceDBIpcBuffer;
+
+/** @} */
+
+/**
+ * @defgroup api_errors Errors
+ * @brief Error codes and messages.
+ * @{
+ */
 
 /**
  * Error codes for LanceDB C API
@@ -346,6 +375,14 @@ static inline const char* lancedb_error_to_message(LanceDBError error) {
     }
     return LANCEDB_ERROR_MESSAGES[error];
 }
+
+/** @} */
+
+/**
+ * @defgroup api_config Enumerations and configuration
+ * @brief Enumerations, option structs, and value types used by the API.
+ * @{
+ */
 
 /**
  * Distance type enum for vector search
@@ -859,6 +896,14 @@ typedef struct {
     LanceDBReadConsistencyType kind;  // Read consistency mode
     uint64_t interval_ms;             // Eventual consistency interval in milliseconds
 } LanceDBReadConsistency;
+
+/** @} */
+
+/**
+ * @defgroup api_connection Connections
+ * @brief Connect to embedded, namespace, and remote databases.
+ * @{
+ */
 
 /**
  * Create a ConnectBuilder for the given URI
@@ -2071,6 +2116,14 @@ void lancedb_free_namespace_description(LanceDBNamespaceDescription* description
  */
 void lancedb_connection_free(LanceDBConnection* connection);
 
+/** @} */
+
+/**
+ * @defgroup api_session Sessions and object stores
+ * @brief Reusable session caches and custom object-store registries.
+ * @{
+ */
+
 /**
  * Create a new session
  *
@@ -2195,6 +2248,14 @@ LanceDBError lancedb_session_metadata_cache_stats(
  */
 void lancedb_session_free(LanceDBSession* session);
 
+/** @} */
+
+/**
+ * @defgroup api_table Tables and data
+ * @brief Create tables, write and read data, inspect schemas, and change metadata.
+ * @{
+ */
+
 /**
  * Free a Table
  *
@@ -2235,11 +2296,14 @@ void lancedb_run_on_stack(void (*callback)(void*), void* user_data, size_t red_z
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * The caller is responsible for freeing the returned table with lancedb_table_free().
- * This function takes ownership of the reader (when not NULL) and frees it automatically.
- * Do NOT call lancedb_record_batch_reader_free() after calling this function.
- * If error_message is provided and an error occurs, the caller must free
- * the error message with lancedb_free_string().
+ * The caller is responsible for freeing the returned table with
+ * lancedb_table_free(). A non-NULL reader is taken only after the required
+ * pointers are non-NULL, the table name is valid UTF-8 and the Arrow schema
+ * imports. Failures before that point leave the reader caller-owned; after the
+ * schema imports, the reader is consumed even if table-name validation or table
+ * creation fails. Do NOT call lancedb_record_batch_reader_free() after the
+ * reader is consumed. If error_message is provided and an error occurs, the
+ * caller must free the error message with lancedb_free_string().
  */
 LanceDBError lancedb_table_create(
     const LanceDBConnection* connection,
@@ -2289,6 +2353,14 @@ LanceDBError lancedb_table_schema_ipc_file(
     LanceDBIpcBuffer* buffer_out,
     char** error_message
 );
+
+/** @} */
+
+/**
+ * @defgroup api_blob Blob files
+ * @brief Discover, fetch, and read row-addressable blobs.
+ * @{
+ */
 
 /**
  * List row-addressable Blob v1 and v2 columns in declaration order
@@ -2709,6 +2781,13 @@ LanceDBError lancedb_blob_file_close(
     char** error_message
 );
 
+/** @} */
+
+/**
+ * @addtogroup api_table
+ * @{
+ */
+
 /**
  * Get table version
  *
@@ -2855,10 +2934,11 @@ LanceDBError lancedb_table_stats(
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * This function takes ownership of the reader and frees it automatically.
- * Do NOT call lancedb_record_batch_reader_free() after calling this function.
- * If error_message is provided and an error occurs, the caller must free
- * the error message with lancedb_free_string().
+ * A non-NULL reader is consumed after the table and reader pointers are checked
+ * for NULL, so a NULL table or reader leaves the reader caller-owned. Do NOT
+ * call lancedb_record_batch_reader_free() after the reader is consumed. If
+ * error_message is provided and an error occurs, the caller must free the error
+ * message with lancedb_free_string().
  */
 LanceDBError lancedb_table_add(
     const LanceDBTable* table,
@@ -2879,10 +2959,12 @@ LanceDBError lancedb_table_add(
  *
  * This function performs an upsert operation by joining on the specified columns.
  * New records are inserted, existing records can be updated based on configuration.
- * This function takes ownership of the reader and frees it automatically.
- * Do NOT call lancedb_record_batch_reader_free() after calling this function.
- * The expression in the config is not consumed, and must still be freed by the caller
- * with lancedb_expr_free().
+ * A non-NULL reader is consumed before the table, columns and config are
+ * validated, so it is freed even when those arguments are rejected. A NULL data
+ * pointer returns without consuming a reader. Do NOT call
+ * lancedb_record_batch_reader_free() after the reader is consumed. The
+ * expression in the config is not consumed and must still be freed by the
+ * caller with lancedb_expr_free().
  * If error_message is provided and an error occurs, the caller must free
  * the error message with lancedb_free_string().
  */
@@ -3483,6 +3565,32 @@ LanceDBError lancedb_table_update_field_metadata(
     char** error_message
 );
 
+/** @} */
+
+/**
+ * @defgroup api_query Queries
+ * @brief Build, inspect, and execute vector, scalar, and take queries.
+ * @{
+ */
+
+/**
+ * One column ordering for lancedb_query_order_by() and
+ * lancedb_vector_query_order_by()
+ *
+ * `column` is a NUL-terminated UTF-8 column name. `ascending` is non-zero for
+ * ascending order and 0 for descending. `nulls_first` is non-zero to place NULL
+ * values first, regardless of direction. Entries are applied in array order, so
+ * the first entry is the primary sort key. The ordering setters validate the
+ * array and UTF-8 but do not check that a named column exists; the SDK checks
+ * column names when it plans the query and reports an unknown column from
+ * execution or inspection.
+ */
+typedef struct {
+    const char* column;
+    int ascending;
+    int nulls_first;
+} LanceDBColumnOrdering;
+
 /**
  * Create a new query for the given table
  *
@@ -3610,6 +3718,44 @@ LanceDBError lancedb_query_select_dynamic(
     const char* const* names,
     const char* const* expressions,
     size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Set the column ordering for query
+ *
+ * The first entry is the primary sort key. A nonempty ordering sorts an
+ * ordinary scan before limit and offset are applied. On a standalone full-text
+ * search it sorts all matches before the search page is selected. Execution,
+ * EXPLAIN, output-schema inspection and ANALYZE use the same configured
+ * ordering.
+ *
+ * A zero num_orderings clears the ordering, restoring the query's default
+ * order; orderings may be NULL in that case. A positive count requires a
+ * non-NULL array whose entries and column names are non-NULL, NUL-terminated
+ * UTF-8 strings. Invalid input returns LANCEDB_INVALID_ARGUMENT and leaves the
+ * previous ordering unchanged. The array and its strings are borrowed for the
+ * duration of the call and are copied into the query.
+ *
+ * A native namespace connection with QueryTable pushdown executes a nonempty
+ * ordering locally, so it needs client access to table storage. A table routed
+ * through the MemWAL LSM scanner rejects a nonempty ordering with
+ * LANCEDB_NOT_SUPPORTED; clear the ordering to return to the default route. A
+ * remote LanceDB forwards the ordering to the server.
+ *
+ * @param query - pointer to LanceDBQuery
+ * @param orderings - array of column orderings, or NULL when num_orderings is 0
+ * @param num_orderings - number of entries in orderings; 0 clears the ordering
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_query_order_by(
+    LanceDBQuery* query,
+    const LanceDBColumnOrdering* orderings,
+    size_t num_orderings,
     char** error_message
 );
 
@@ -3930,6 +4076,47 @@ LanceDBError lancedb_vector_query_select_dynamic(
     const char* const* names,
     const char* const* expressions,
     size_t num_columns,
+    char** error_message
+);
+
+/**
+ * Set the column ordering for vector query
+ *
+ * The first entry is the primary sort key. For an embedded vector search, the
+ * nearest-neighbour candidate count is limit + offset, or the SDK's default
+ * top-K + offset when no limit is set. The search orders those candidates and
+ * then applies offset and limit to the ordered page; it does not sort the whole
+ * table. On a hybrid vector plus full-text query it applies to both search
+ * legs, and the reranker still determines the final fused order. EXPLAIN,
+ * output-schema inspection and ANALYZE use the same configured ordering,
+ * subject to the hybrid inspection limits documented below.
+ *
+ * A zero num_orderings clears the ordering, restoring the query's default
+ * order; orderings may be NULL in that case. A positive count requires a
+ * non-NULL array whose entries and column names are non-NULL, NUL-terminated
+ * UTF-8 strings. Invalid input returns LANCEDB_INVALID_ARGUMENT and leaves the
+ * previous ordering unchanged. The array and its strings are borrowed for the
+ * duration of the call and are copied into the query.
+ *
+ * A native namespace connection with QueryTable pushdown executes a nonempty
+ * ordering locally, so it needs client access to table storage. A table routed
+ * through the MemWAL LSM scanner rejects a nonempty ordering with
+ * LANCEDB_NOT_SUPPORTED; clear the ordering to return to the default route. A
+ * remote LanceDB forwards the ordering to the server.
+ *
+ * @param query - pointer to LanceDBVectorQuery
+ * @param orderings - array of column orderings, or NULL when num_orderings is 0
+ * @param num_orderings - number of entries in orderings; 0 clears the ordering
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
+ * @return Error code indicating success or failure
+ *
+ * If error_message is provided and an error occurs, the caller must free
+ * the error message with lancedb_free_string().
+ */
+LanceDBError lancedb_vector_query_order_by(
+    LanceDBVectorQuery* query,
+    const LanceDBColumnOrdering* orderings,
+    size_t num_orderings,
     char** error_message
 );
 
@@ -4783,6 +4970,14 @@ void lancedb_vector_query_free(LanceDBVectorQuery* query);
  */
 void lancedb_query_result_free(LanceDBQueryResult* result);
 
+/** @} */
+
+/**
+ * @defgroup api_arrow Arrow interoperability
+ * @brief Arrow C Data, C Stream, and IPC readers, results, and buffers.
+ * @{
+ */
+
 /**
  * Vector search using nearest_to with full result conversion
  *
@@ -4822,12 +5017,14 @@ LanceDBError lancedb_table_nearest_to(
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * This function consumes the array according to Arrow C ABI specification.
- * The caller should NOT call the array's release function after passing it here.
- * The schema is only read and should still be released by the caller.
- * The caller is responsible for freeing the returned reader with
- * lancedb_record_batch_reader_free(). If error_message is provided and an error
- * occurs, the caller must free the error message with lancedb_free_string().
+ * The schema is imported first. If that import fails, the array still belongs
+ * to the caller and must be released. Once the schema imports, the array is
+ * handed to Arrow's importer and the caller must not release it again, even when
+ * a later batch conversion fails. The schema itself is only read and remains
+ * owned by the caller. The caller is responsible for freeing the returned reader
+ * with lancedb_record_batch_reader_free(). If error_message is provided and an
+ * error occurs, the caller must free the error message with
+ * lancedb_free_string().
  */
 LanceDBError lancedb_record_batch_reader_from_arrow(
     const struct FFI_ArrowArray* array,
@@ -4954,6 +5151,14 @@ void lancedb_free_arrow_schema(FFI_ArrowSchema* schema);
  * empty buffer is a no-op.
  */
 void lancedb_ipc_buffer_free(LanceDBIpcBuffer* buffer);
+
+/** @} */
+
+/**
+ * @defgroup api_index Indexes and maintenance
+ * @brief Create and inspect indexes, wait for builds, and optimize tables.
+ * @{
+ */
 
 /**
  * Create a vector index on table columns
@@ -5496,6 +5701,13 @@ LanceDBError lancedb_table_wait_for_index(
     char** error_message
 );
 
+/** @} */
+
+/**
+ * @addtogroup api_arrow
+ * @{
+ */
+
 /**
  * Free Arrow arrays returned by vector search functions
  *
@@ -5514,6 +5726,13 @@ void lancedb_free_arrow_arrays(
  *                or lancedb_table_fetch_blob_ranges()
  */
 void lancedb_free_arrow_array(FFI_ArrowArray* array);
+
+/** @} */
+
+/**
+ * @addtogroup api_index
+ * @{
+ */
 
 /**
  * Information about one index on a table
@@ -5563,6 +5782,14 @@ LanceDBError lancedb_table_list_indices_info(
  * Safe to call with a NULL pointer.
  */
 void lancedb_free_index_info(const LanceDBIndexInfo* indices, size_t count);
+
+/** @} */
+
+/**
+ * @defgroup api_history Versions, tags, branches, and metadata
+ * @brief Inspect and change table history, branches, and key-value metadata.
+ * @{
+ */
 
 /**
  * List all versions of the table
@@ -6319,6 +6546,14 @@ void lancedb_free_metadata(char** keys, char** values, size_t count);
  */
 void lancedb_free_string(char* str);
 
+/** @} */
+
+/**
+ * @defgroup api_expression Expressions
+ * @brief Build DataFusion expressions and evaluate JSON predicates.
+ * @{
+ */
+
 /* ==================== DataFusion Expression Builder API ==================== */
 
 /**
@@ -6654,6 +6889,8 @@ LanceDBError lancedb_json_matches(
  * @param results - pointer returned by lancedb_json_matches, or NULL
  */
 void lancedb_free_json_matches(bool* results);
+
+/** @} */
 
 #ifdef __cplusplus
 }
