@@ -123,6 +123,10 @@ it takes ownership:
 - ``lancedb_table_add()`` consumes a non-NULL reader after checking the table
   and reader pointers for NULL. A NULL table or reader returns without consuming
   the reader.
+- ``lancedb_table_add_with_options()`` consumes a non-NULL reader before
+  validating the table or options. A NULL reader returns without consuming
+  anything; every non-NULL reader is consumed on every later path, including a
+  NULL table and rejected options.
 - Every ``lancedb_table_merge_insert*`` entry point consumes a non-NULL reader
   before validating the table, columns or options. A NULL data pointer returns
   without consuming it; any non-NULL data is consumed on every later path.

@@ -17,9 +17,13 @@ use arrow_array::{Array, LargeBinaryArray, RecordBatch, RecordBatchReader, Struc
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use futures::TryStreamExt;
 use lance::dataset::transaction::UpdateMapEntry;
+use lance::dataset::WriteMode;
 use lancedb::blob::BlobRangeRequest;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::table::{ColumnAlteration, FieldMetadataUpdate, NewColumnTransform, Ref};
+use lancedb::table::{
+    AddDataMode, ColumnAlteration, FieldMetadataUpdate, NaNVectorBehavior, NewColumnTransform, Ref,
+    WriteOptions,
+};
 
 use crate::connection::{c_string_array, free_c_string_array, get_runtime, LanceDBTable};
 use crate::error::{
@@ -29,8 +33,9 @@ use crate::error::{
 use crate::expr::LanceDBExpr;
 use crate::ipc::{self, LanceDBIpcBuffer};
 use crate::types::{
-    LanceDBMergeInsertConfig, LanceDBMergeInsertOptions, LanceDBMergeInsertResult,
-    LanceDBMergeInsertResultV2, LanceDBRecordBatchReader,
+    bool_from_c_int, write_options_from_c, LanceDBMergeInsertConfig, LanceDBMergeInsertOptions,
+    LanceDBMergeInsertResult, LanceDBMergeInsertResultV2, LanceDBRecordBatchReader,
+    LanceDBWriteOptions,
 };
 
 /// Get table schema as Arrow C ABI
@@ -380,6 +385,233 @@ pub unsafe extern "C" fn lancedb_table_fetch_blob_ranges(
     }
 }
 
+/// Add-data modes for `lancedb_table_add_with_options`
+///
+/// Append keeps existing rows. Overwrite replaces them with the supplied data.
+/// These values are part of the public header.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LanceDBAddDataMode {
+    /// Keep the existing rows and append the new data
+    Append = 0,
+    /// Replace the table contents with the new data
+    Overwrite = 1,
+}
+
+/// How an add treats NaN and null elements in vector columns
+///
+/// Error is the SDK default. Keep stores such vectors, but they are not indexed
+/// for search. Whole null vectors are allowed by both modes.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LanceDBNaNVectorBehavior {
+    /// Reject vectors that contain NaN values or null elements
+    Error = 0,
+    /// Store the vectors without indexing them for search
+    Keep = 1,
+}
+
+/// Fields of `LanceDBAddOptions` that carry an override
+///
+/// These values are part of the public header.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LanceDBAddOptionsField {
+    /// Use `retries`
+    Retries = 1 << 0,
+    /// Use `write_parallelism`
+    WriteParallelism = 1 << 1,
+}
+
+const ADD_RETRIES: u32 = LanceDBAddOptionsField::Retries as u32;
+const ADD_WRITE_PARALLELISM: u32 = LanceDBAddOptionsField::WriteParallelism as u32;
+const ADD_ALL_FIELDS: u32 = ADD_RETRIES | ADD_WRITE_PARALLELISM;
+
+/// Options for `lancedb_table_add_with_options`
+///
+/// A zero-initialized struct uses the default Append mode, the default Error
+/// NaN handling, no Lance write parameters, no retry or write-parallelism
+/// override, and the external-blob switch disabled. `set_fields` only controls
+/// `retries` and `write_parallelism`; the other fields are read from every
+/// non-NULL options pointer.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct LanceDBAddOptions {
+    /// Bitmask of `LanceDBAddOptionsField` values; 0 leaves retries and
+    /// write_parallelism unset
+    pub set_fields: u32,
+    /// One of the `LanceDBAddDataMode` values
+    pub mode: c_int,
+    /// Per-call Lance write options (NULL for the SDK defaults)
+    pub write_options: *const LanceDBWriteOptions,
+    /// Per-call remote failed-attempt threshold when its bit is set
+    pub retries: u8,
+    /// One of the `LanceDBNaNVectorBehavior` values
+    pub on_nan_vectors: c_int,
+    /// Number of parallel write streams when its bit is set. Enterprise servers
+    /// older than 0.4.0 always use the single-request add path, and empty input
+    /// takes that path even on multipart-capable servers. An explicit zero is
+    /// rejected by the SDK as invalid input before backend dispatch.
+    pub write_parallelism: usize,
+    /// Allow blob URIs outside registered bases (1 = true, 0 = false)
+    pub allow_external_blob_outside_bases: c_int,
+}
+
+/// Result of an add operation
+///
+/// `version` is copied unchanged from the SDK's `AddResult`. A value of zero
+/// means a legacy remote server did not return a commit version.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LanceDBAddResult {
+    /// Commit version reported by the SDK; 0 may mean the server did not report one
+    pub version: u64,
+}
+
+/// The parts of an add request that do not depend on C argument layout
+struct AddSettings {
+    mode: AddDataMode,
+    write_options: WriteOptions,
+    retries: Option<u8>,
+    on_nan_vectors: NaNVectorBehavior,
+    write_parallelism: Option<usize>,
+    allow_external_blob_outside_bases: bool,
+}
+
+/// Parse `LanceDBAddOptions` and align the write parameters with the public mode
+///
+/// The embedded SDK uses `WriteParams::mode` directly when write parameters are
+/// supplied, and that mode defaults to Create. The binding therefore writes the
+/// same effective mode into both the add builder and any supplied parameters so
+/// that a C caller only has to choose one mode.
+unsafe fn add_settings_from_c(options: *const LanceDBAddOptions) -> Result<AddSettings, String> {
+    let mut settings = AddSettings {
+        mode: AddDataMode::Append,
+        write_options: WriteOptions::default(),
+        retries: None,
+        on_nan_vectors: NaNVectorBehavior::Error,
+        write_parallelism: None,
+        allow_external_blob_outside_bases: false,
+    };
+
+    if options.is_null() {
+        return Ok(settings);
+    }
+
+    let options = &*options;
+    let unknown = options.set_fields & !ADD_ALL_FIELDS;
+    if unknown != 0 {
+        return Err(format!("unknown add option bits: 0x{unknown:x}"));
+    }
+
+    settings.mode = match options.mode {
+        // LANCEDB_ADD_DATA_MODE_APPEND
+        0 => AddDataMode::Append,
+        // LANCEDB_ADD_DATA_MODE_OVERWRITE
+        1 => AddDataMode::Overwrite,
+        other => {
+            return Err(format!(
+                "'mode' value {other} is not a LanceDBAddDataMode enumerator"
+            ))
+        }
+    };
+
+    settings.write_options = write_options_from_c(options.write_options)?;
+    if let Some(params) = settings.write_options.lance_write_params.as_mut() {
+        params.mode = match &settings.mode {
+            AddDataMode::Append => WriteMode::Append,
+            AddDataMode::Overwrite => WriteMode::Overwrite,
+        };
+    }
+
+    settings.on_nan_vectors = match options.on_nan_vectors {
+        // LANCEDB_NAN_VECTOR_BEHAVIOR_ERROR
+        0 => NaNVectorBehavior::Error,
+        // LANCEDB_NAN_VECTOR_BEHAVIOR_KEEP
+        1 => NaNVectorBehavior::Keep,
+        other => {
+            return Err(format!(
+                "'on_nan_vectors' value {other} is not a LanceDBNaNVectorBehavior enumerator"
+            ))
+        }
+    };
+
+    if options.set_fields & ADD_RETRIES != 0 {
+        settings.retries = Some(options.retries);
+    }
+    if options.set_fields & ADD_WRITE_PARALLELISM != 0 {
+        settings.write_parallelism = Some(options.write_parallelism);
+    }
+    settings.allow_external_blob_outside_bases = bool_from_c_int(
+        "allow_external_blob_outside_bases",
+        options.allow_external_blob_outside_bases,
+    )?;
+
+    Ok(settings)
+}
+
+/// Run one SDK add with an already-owned reader
+unsafe fn execute_add(
+    table: *const LanceDBTable,
+    reader: Box<dyn RecordBatchReader + Send>,
+    options: *const LanceDBAddOptions,
+    result_out: *mut LanceDBAddResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if table.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    let settings = match add_settings_from_c(options) {
+        Ok(settings) => settings,
+        Err(message) => {
+            set_custom_error_message(error_message, &message);
+            return LanceDBError::InvalidArgument;
+        }
+    };
+
+    let AddSettings {
+        mode,
+        write_options,
+        retries,
+        on_nan_vectors,
+        write_parallelism,
+        allow_external_blob_outside_bases,
+    } = settings;
+
+    let tbl = &(*table).inner;
+    let runtime = get_runtime();
+
+    let mut builder = tbl
+        .add(reader)
+        .mode(mode)
+        .write_options(write_options)
+        .on_nan_vectors(on_nan_vectors)
+        .allow_external_blob_outside_bases(allow_external_blob_outside_bases);
+    if let Some(retries) = retries {
+        // An explicit 0 reaches the SDK as a disabled retry budget; an omitted
+        // retry leaves the SDK default in place. Embedded tables ignore it.
+        builder = builder.retries(retries);
+    }
+    if let Some(write_parallelism) = write_parallelism {
+        // An explicit 0 is passed through so the SDK rejects it at execute time.
+        builder = builder.write_parallelism(write_parallelism);
+    }
+
+    match runtime.block_on(builder.execute()) {
+        Ok(add_result) => {
+            if !result_out.is_null() {
+                *result_out = LanceDBAddResult {
+                    version: add_result.version,
+                };
+            }
+            LanceDBError::Success
+        }
+        Err(e) => handle_error(&e, error_message),
+    }
+}
+
 /// Add data to table using Arrow RecordBatchReader
 ///
 /// # Safety
@@ -400,16 +632,62 @@ pub unsafe extern "C" fn lancedb_table_add(
         return LanceDBError::InvalidArgument;
     }
 
-    let tbl = &(*table).inner;
-    let runtime = get_runtime();
-
-    // Take ownership of the reader
+    // The legacy entry point keeps its ownership contract: a NULL table or
+    // reader returns before the reader is taken.
     let reader_box = Box::from_raw(reader);
+    execute_add(
+        table,
+        reader_box.into_inner(),
+        ptr::null(),
+        ptr::null_mut(),
+        error_message,
+    )
+}
 
-    match runtime.block_on(tbl.add(reader_box.into_inner()).execute()) {
-        Ok(_) => LanceDBError::Success,
-        Err(e) => handle_error(&e, error_message),
+/// Add data to table with write options and an optional SDK commit result
+///
+/// The reader is owned from the moment this function is called. A non-NULL
+/// reader is consumed before the table and options are validated, so every
+/// rejection after that point frees it exactly once.
+///
+/// # Safety
+/// - `table` must be a valid pointer returned from `lancedb_connection_open_table`
+/// - `reader` must be a non-NULL pointer to a LanceDBRecordBatchReader; it is
+///   consumed by this function on every path after the NULL check
+/// - `options`, when not NULL, must be a readable `LanceDBAddOptions`; its
+///   `write_options` pointer, when not NULL, must be readable for the call
+/// - `result_out` can be NULL when the caller does not need the SDK result
+/// - `error_message` can be NULL to ignore detailed error messages
+///
+/// # Returns
+/// - `LANCEDB_SUCCESS` after the commit
+/// - `LANCEDB_INVALID_ARGUMENT` for a NULL reader, table, or unrecognized option
+/// - The SDK error code for a rejected add
+///
+/// A non-NULL `result_out` is written only after a successful commit and is
+/// left unchanged on failure. Free a returned error message with
+/// `lancedb_free_string()`.
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_table_add_with_options(
+    table: *const LanceDBTable,
+    reader: *mut LanceDBRecordBatchReader,
+    options: *const LanceDBAddOptions,
+    result_out: *mut LanceDBAddResult,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    if reader.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
     }
+
+    let reader_box = Box::from_raw(reader);
+    execute_add(
+        table,
+        reader_box.into_inner(),
+        options,
+        result_out,
+        error_message,
+    )
 }
 
 /// One way the SDK can restrict which matched rows a merge updates

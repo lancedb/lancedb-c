@@ -27,6 +27,12 @@ _Static_assert(sizeof(LanceDBOptimizeType) == sizeof(int), "LanceDBOptimizeType 
 _Static_assert(sizeof(LanceDBBinaryOp) == sizeof(int), "LanceDBBinaryOp must have the C int ABI");
 _Static_assert(sizeof(LanceDBCreateTableMode) == sizeof(int),
                "LanceDBCreateTableMode must have the C int ABI");
+_Static_assert(sizeof(LanceDBAddDataMode) == sizeof(int),
+               "LanceDBAddDataMode must have the C int ABI");
+_Static_assert(sizeof(LanceDBNaNVectorBehavior) == sizeof(int),
+               "LanceDBNaNVectorBehavior must have the C int ABI");
+_Static_assert(sizeof(LanceDBAddOptionsField) == sizeof(int),
+               "LanceDBAddOptionsField must have the C int ABI");
 _Static_assert(sizeof(LanceDBWriteOptionsField) == sizeof(int),
                "LanceDBWriteOptionsField must have the C int ABI");
 _Static_assert(sizeof(LanceDBBranchSourceKind) == sizeof(int), "LanceDBBranchSourceKind must have the C int ABI");
