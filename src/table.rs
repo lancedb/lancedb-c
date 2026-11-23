@@ -429,14 +429,16 @@ const ADD_ALL_FIELDS: u32 = ADD_RETRIES | ADD_WRITE_PARALLELISM;
 
 /// Options for `lancedb_table_add_with_options`
 ///
-/// `set_fields` selects the optional overrides; a field whose bit is not set
-/// keeps the SDK default. This keeps an omitted retry or write parallelism
-/// distinct from an explicit zero. `write_options` is NULL for SDK defaults or
-/// points to a borrowed `LanceDBWriteOptions`.
+/// A zero-initialized struct uses the default Append mode, the default Error
+/// NaN handling, no Lance write parameters, no retry or write-parallelism
+/// override, and the external-blob switch disabled. `set_fields` only controls
+/// `retries` and `write_parallelism`; the other fields are read from every
+/// non-NULL options pointer.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct LanceDBAddOptions {
-    /// Bitmask of `LanceDBAddOptionsField` values; 0 uses every default
+    /// Bitmask of `LanceDBAddOptionsField` values; 0 leaves retries and
+    /// write_parallelism unset
     pub set_fields: u32,
     /// One of the `LanceDBAddDataMode` values
     pub mode: c_int,
@@ -446,7 +448,10 @@ pub struct LanceDBAddOptions {
     pub retries: u8,
     /// One of the `LanceDBNaNVectorBehavior` values
     pub on_nan_vectors: c_int,
-    /// Number of parallel write streams when its bit is set
+    /// Number of parallel write streams when its bit is set. Enterprise servers
+    /// older than 0.4.0 always use the single-request add path, and empty input
+    /// takes that path even on multipart-capable servers. An explicit zero is
+    /// rejected by the SDK as invalid input before backend dispatch.
     pub write_parallelism: usize,
     /// Allow blob URIs outside registered bases (1 = true, 0 = false)
     pub allow_external_blob_outside_bases: c_int,

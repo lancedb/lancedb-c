@@ -3163,11 +3163,13 @@ typedef enum {
 /**
  * Options for lancedb_table_add_with_options()
  *
- * set_fields selects the optional fields that are read; every other field keeps
- * the SDK default. A NULL pointer to this struct uses the default append mode,
- * the default NaN handling and the SDK defaults for write options, retries and
- * write parallelism. A non-NULL struct still reads mode, on_nan_vectors,
- * write_options and allow_external_blob_outside_bases regardless of set_fields.
+ * A zero-initialized struct (all fields zero and pointers NULL) uses the
+ * default append mode, the default Error NaN handling, no Lance write
+ * parameters, no retry or write-parallelism override, and the external-blob
+ * switch disabled. A NULL options pointer is equivalent to that struct.
+ * set_fields only controls retries and write_parallelism; mode, on_nan_vectors,
+ * write_options and allow_external_blob_outside_bases are read from every
+ * non-NULL struct.
  *
  * mode is one of the LanceDBAddDataMode values. The binding applies that one
  * mode to both the SDK add builder and any supplied Lance write parameters,
@@ -3191,14 +3193,16 @@ typedef enum {
  * SDK default Error behavior.
  *
  * write_parallelism is the number of parallel write streams and is only read
- * when its bit is set. An unset bit lets the SDK estimate it, while an explicit
- * zero is passed to the SDK and rejected with LANCEDB_INVALID_INPUT when the add
- * executes.
+ * when its bit is set. An unset bit lets the SDK estimate it. Enterprise servers
+ * older than 0.4.0 always use the single-request add path, and empty input takes
+ * that path even on multipart-capable servers. An explicit zero is rejected by
+ * the SDK's input validation before backend dispatch and returns
+ * LANCEDB_INVALID_INPUT.
  *
  * The struct and its write_options are borrowed for the duration of the call.
  */
 typedef struct {
-    uint32_t set_fields;                       // Bitmask of LanceDBAddOptionsField values (0 = defaults)
+    uint32_t set_fields;                       // Bitmask of LanceDBAddOptionsField values (0 = no retry or parallelism override)
     int mode;                                  // One of the LanceDBAddDataMode values
     const LanceDBWriteOptions* write_options;  // Per-call write options (NULL for SDK defaults)
     uint8_t retries;                           // Failed-attempt threshold when its bit is set
