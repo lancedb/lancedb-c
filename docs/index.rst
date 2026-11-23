@@ -12,6 +12,7 @@ a developer-friendly, serverless vector database for AI applications.
    versioning
    ownership
    threading
+   cloud-storage
 
 Overview
 --------
@@ -23,6 +24,9 @@ The LanceDB C API provides a complete interface to LanceDB functionality includi
 - Data insertion and querying
 - Vector similarity search
 - Index creation and management
+- Cloud storage and native feature flags
+
+Cloud storage and native feature flags are covered in :doc:`cloud-storage`.
 
 Quick Start
 -----------
@@ -35,16 +39,21 @@ version:
    :language: c
    :linenos:
 
-Build it against an installed package:
+Build it against an installed source package (a current source install
+provides a ``lancedb.pc`` file):
 
 .. code-block:: bash
 
    lancedb_libdir="$(pkg-config --variable=libdir lancedb)"
-   cc -std=c17 -Wall -Wextra -Werror hello.c \
+   cc -std=c17 -Wall -Wextra -Werror -pedantic examples/hello.c \
      $(pkg-config --cflags --libs lancedb) \
      -Wl,-rpath,"$lancedb_libdir" -o hello
 
-See the repository README for build and installation commands.
+The public ``v0.1.0-preview.2`` archives do not contain a pkg-config file or a
+CMake package config. Use their ``include/`` and ``lib/`` directories with
+``-I`` and ``-L`` as shown
+in the `repository README <https://github.com/lancedb/lancedb-c#install-a-prebuilt-package>`_.
+See the same README for source build and installation commands.
 
 Creating a table with Arrow C++
 -------------------------------

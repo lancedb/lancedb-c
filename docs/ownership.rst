@@ -120,6 +120,9 @@ it takes ownership:
   imports. Failures before that point leave the reader caller-owned; after the
   schema imports, the reader is consumed even if table-name validation or table
   creation fails. Passing NULL creates an empty table.
+- ``lancedb_table_create_with_options()`` consumes a non-NULL reader as soon as
+  it is called, including when another argument, an option, the Arrow schema or
+  the SDK rejects the create. Passing NULL creates an empty table.
 - ``lancedb_table_add()`` consumes a non-NULL reader after checking the table
   and reader pointers for NULL. A NULL table or reader returns without consuming
   the reader.
@@ -132,8 +135,9 @@ it takes ownership:
   without consuming it; any non-NULL data is consumed on every later path.
 
 After one of these calls consumes a reader, do not call
-``lancedb_record_batch_reader_free()`` on it. Set the caller's pointer to NULL
-if the caller needs a single cleanup path.
+``lancedb_record_batch_reader_free()`` on it, even when the call returns an
+error. Set the caller's pointer to NULL if the caller needs a single cleanup
+path.
 
 Blob results
 ------------
