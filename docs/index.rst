@@ -45,7 +45,7 @@ provides a ``lancedb.pc`` file):
 .. code-block:: bash
 
    lancedb_libdir="$(pkg-config --variable=libdir lancedb)"
-   cc -std=c17 -Wall -Wextra -Werror -pedantic hello.c \
+   cc -std=c17 -Wall -Wextra -Werror -pedantic examples/hello.c \
      $(pkg-config --cflags --libs lancedb) \
      -Wl,-rpath,"$lancedb_libdir" -o hello
 

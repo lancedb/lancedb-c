@@ -66,8 +66,9 @@ the unversioned library. Packages from preview.2 use
 `@rpath/liblancedb.dylib` on macOS.
 
 The package archive contains only the header, shared library, Windows import
-library when applicable, license, manifest and checksums. It does not include the CMake package config or pkg-config file that
-`cmake --install` produces from the current source. Do not document an archive
+library when applicable, license, manifest and checksums. It does not include
+the CMake package config or pkg-config file that `cmake --install` produces from
+the current source. Do not document an archive
 as supporting `find_package(lancedb)` or `pkg-config`; those integrations
 belong to a source install or to a package that explicitly contains them.
 
@@ -82,11 +83,14 @@ belong to a source install or to a package that explicitly contains them.
 4. To publish, dispatch `Shared Library Packages` on the exact tag with the
    `publish_release` Boolean enabled.
 
-The workflow fetches the tag, requires its peeled commit to be the checked-out
-commit, and uses the tag version for the build, manifest, installed header and
-consumer verification. A tag on a parent or another branch is rejected. Each
-package job builds the target library, creates the package, and verifies the
-archive with a real consumer before uploading it.
+The workflow fetches the tag and requires the tag's peeled commit to match the
+checked-out commit, then uses the tag version for the build, manifest, installed
+header and consumer verification. That is a tag/checkout consistency check, not
+a branch or release-commit check: a tag on a parent commit or another branch
+still points at the commit that the tag dispatch checks out. Keep the manual
+branch and commit checks in steps 1-2; the workflow does not verify release
+intent. Each package job builds the target library, creates the package, and
+verifies the archive with a real consumer before uploading it.
 
 After all five package jobs pass, the publish job re-verifies every archive,
 manifest and checksum against the exact tag, creates a draft release, uploads

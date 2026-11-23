@@ -41,7 +41,7 @@ cmake -S . -B build -G Ninja \
   -DBUILD_EXAMPLES=ON \
   -DBUILD_TESTS=ON
 cmake --build build
-ctest --test-dir build -j --output-on-failure
+ctest --test-dir build -j 6 --output-on-failure
 ```
 
 `BUILD_EXAMPLES` and `BUILD_TESTS` default to `OFF`. The optional Boost.Asio
@@ -92,8 +92,12 @@ These targets match the commands in `.github/workflows/ci.yml`:
 ninja -C build check          # cargo fmt --check and cargo clippy -D warnings
 ninja -C build check-c17      # strict C17 consumer and C17 example
 ninja -C build check-abi      # cbindgen plus clang, host and MSVC LLP64
-ninja -C build check-install  # installed CMake and pkg-config consumers
+ninja -C build check-install  # installed C and C++ find_package consumers
 ```
+
+`check-install` stages the current build into a temporary prefix and runs C and
+C++ `find_package(lancedb CONFIG)` consumers. It does not exercise pkg-config;
+the README documents that consumer path separately.
 
 `check-abi` needs the pinned cbindgen version and clang:
 

@@ -58,9 +58,9 @@ import library name matters, see [Windows (MSVC)](#windows-msvc).
 
 ## Install a prebuilt package
 
-Download an archive and its sibling `.sha256` file from
-[GitHub Releases](https://github.com/lancedb/lancedb-c/releases), verify the
-checksum, and extract it. For example, for the public
+From an empty directory, download an archive and its sibling `.sha256` file
+from [GitHub Releases](https://github.com/lancedb/lancedb-c/releases), verify
+the checksum, and extract it. For example, for the public
 `v0.1.0-preview.2` Linux x86_64 package:
 
 ```bash
@@ -102,12 +102,51 @@ pkg-config file. Use the `-I`/`-L` commands below for that archive. A current
 source build installs both, as described in
 [Build and install from source](#build-and-install-from-source).
 
+Save this complete C17 program as `hello.c` in the same directory. It
+includes only `<lancedb.h>`, connects to a local database, prints the runtime
+version, and frees every handle. The archive contains the header and library,
+but not example sources.
+
+```c
+#include <lancedb.h>
+
+#include <stdio.h>
+
+int main(int argc, char** argv) {
+  const char* uri = argc > 1 ? argv[1] : "./lancedb-c-example-db";
+
+  printf("lancedb-c %s\n", lancedb_version());
+
+  LanceDBConnectBuilder* builder = lancedb_connect(uri);
+  if (builder == NULL) {
+    fprintf(stderr, "failed to create a connection builder for %s\n", uri);
+    return 1;
+  }
+
+  LanceDBConnection* connection = NULL;
+  char* error_message = NULL;
+  const LanceDBError status =
+      lancedb_connect_builder_execute(builder, &connection, &error_message);
+  if (status != LANCEDB_SUCCESS) {
+    fprintf(stderr, "connect failed: %s\n",
+            error_message != NULL ? error_message
+                                  : lancedb_error_to_message(status));
+    lancedb_free_string(error_message);
+    return 1;
+  }
+
+  printf("connected to %s\n", lancedb_connection_uri(connection));
+  lancedb_connection_free(connection);
+  return 0;
+}
+```
+
 ### Linux and macOS
 
-Compile the C17 example against the extracted `include/` and `lib/`:
+Compile the saved `hello.c` against the extracted `include/` and `lib/`:
 
 ```bash
-cc -std=c17 -Wall -Wextra -Werror -pedantic examples/hello.c \
+cc -std=c17 -Wall -Wextra -Werror -pedantic hello.c \
   -I"$root/include" -L"$root/lib" -llancedb \
   -Wl,-rpath,"$root/lib" -o hello
 ./hello ./example-db
@@ -120,12 +159,14 @@ same `-rpath` form works for a package extracted anywhere.
 
 ### Windows (MSVC)
 
-Run this from an MSVC developer shell. The import library is
-`lancedb.dll.lib`; `-llancedb` does not select it under MSVC.
+Use the **x64 Native Tools Command Prompt for VS** for `windows-amd64`, or the
+**arm64 Native Tools Command Prompt for VS** for `windows-arm64`. The compiler
+architecture must match the package. The import library is `lancedb.dll.lib`;
+`-llancedb` does not select it under MSVC.
 
 ```bat
 set root=%CD%\lancedb-c-<commit>-<target>
-cl /nologo /std:c17 /W4 /I"%root%\include" examples\hello.c ^
+cl /nologo /std:c17 /W4 /I"%root%\include" hello.c ^
   /Fe:hello.exe /link /LIBPATH:"%root%\lib" lancedb.dll.lib
 copy "%root%\lib\lancedb.dll" .
 hello.exe .\example-db
@@ -201,61 +242,11 @@ If the install used `lib64`, point `PKG_CONFIG_PATH` at
 static install, add `--static` so `Libs.private` supplies the native link
 dependencies.
 
-## Minimal C17 program
-
-The complete program is [`examples/hello.c`](examples/hello.c). It includes only
-`<lancedb.h>`, connects to a local database, prints the runtime version, and
-frees every handle:
-
-```c
-#include <lancedb.h>
-
-#include <stdio.h>
-
-int main(int argc, char** argv) {
-  const char* uri = argc > 1 ? argv[1] : "./lancedb-c-example-db";
-
-  printf("lancedb-c %s\n", lancedb_version());
-
-  LanceDBConnectBuilder* builder = lancedb_connect(uri);
-  if (builder == NULL) {
-    fprintf(stderr, "failed to create a connection builder for %s\n", uri);
-    return 1;
-  }
-
-  LanceDBConnection* connection = NULL;
-  char* error_message = NULL;
-  const LanceDBError status =
-      lancedb_connect_builder_execute(builder, &connection, &error_message);
-  if (status != LANCEDB_SUCCESS) {
-    fprintf(stderr, "connect failed: %s\n",
-            error_message != NULL ? error_message
-                                  : lancedb_error_to_message(status));
-    lancedb_free_string(error_message);
-    return 1;
-  }
-
-  printf("connected to %s\n", lancedb_connection_uri(connection));
-  lancedb_connection_free(connection);
-  return 0;
-}
-```
-
-With the prebuilt package from above, compile and run it with the
-[Linux and macOS](#linux-and-macos) command. With a source install, use:
-
-```bash
-cc -std=c17 -Wall -Wextra -Werror -pedantic examples/hello.c \
-  $(pkg-config --cflags --libs lancedb) \
-  -Wl,-rpath,"$(pkg-config --variable=libdir lancedb)" -o hello
-./hello ./example-db
-```
-
-The same file is compiled by the `check-c17` CMake target against the generated
-header. That target also compiles the strict C17 consumer against both the
-generated and checked-in header.
-
 ## C++ and Apache Arrow
+
+The repository's [`examples/hello.c`](examples/hello.c) is the same C17 program
+shown in the prebuilt quick start. It exists only in a source checkout; the
+release archives do not include example sources.
 
 [`examples/simple.cpp`](examples/simple.cpp) is a complete C++20 program that
 creates a table with a fixed-size-list vector column, inserts rows through the
@@ -315,11 +306,21 @@ to the same variable. Executing a builder consumes it on success and failure.
 `lancedb_connect_builder_execute()` consumes a non-NULL builder on both paths;
 the connection output is written only on success.
 
-Record-batch readers are transferred only by the entry points that document it.
-`lancedb_table_create()`, `lancedb_table_add()`, `lancedb_table_add_with_options()`
-and the `lancedb_table_merge_insert*` functions consume a non-NULL reader on
-their documented paths; after a successful transfer, do not free the reader
-again. The full per-function rules, including the Arrow array split at schema
+Record-batch reader ownership is per entry point. A call can consume the reader
+and still return an error, so do not free it after a call that takes it.
+
+| Entry point | Reader ownership |
+| --- | --- |
+| `lancedb_table_create()` | Transfers a non-NULL reader only after the required pointers, UTF-8 table name and schema import succeed. Failures before that leave it caller-owned; after schema import it is consumed even if later validation or creation fails. |
+| `lancedb_table_create_with_options()` | Consumes a non-NULL reader as soon as it is called, including when another argument, an option, the schema or the SDK rejects the create. |
+| `lancedb_table_add()` | Consumes a non-NULL reader after the table and reader NULL checks. A NULL table or reader leaves it caller-owned. |
+| `lancedb_table_add_with_options()` | Consumes a non-NULL reader before validating the table or options. A NULL reader is not consumed. |
+| `lancedb_table_merge_insert*()` | Consumes a non-NULL data reader before validating the table, columns, config or options. A NULL data pointer is not consumed. |
+
+After a call consumes a reader, do not call
+`lancedb_record_batch_reader_free()` on it, even when the call returned an
+error. Set the caller's pointer to NULL after the call when a single cleanup
+path needs it. The full rules, including the Arrow array split at schema
 import, are in [Memory ownership](docs/ownership.rst) and the header comments.
 
 ### Arrow interchange
