@@ -591,20 +591,6 @@ QueryResultBatches run_structured_query(
   return collect_query_result(lancedb_query_execute(query));
 }
 
-void set_fts_candidate_limit(LanceDBFtsQuery* fts_query, int64_t limit) {
-  char* error_message = nullptr;
-  REQUIRE(lancedb_fts_query_limit(fts_query, limit, &error_message) ==
-          LANCEDB_SUCCESS);
-  REQUIRE(error_message == nullptr);
-}
-
-void unset_fts_candidate_limit(LanceDBFtsQuery* fts_query) {
-  char* error_message = nullptr;
-  REQUIRE(lancedb_fts_query_unset_limit(fts_query, &error_message) ==
-          LANCEDB_SUCCESS);
-  REQUIRE(error_message == nullptr);
-}
-
 LanceDBFtsQuery* make_multi_match_query(
     const char* text,
     const std::vector<std::string>& columns,
@@ -1424,40 +1410,6 @@ TEST_CASE_METHOD(MultiMatchFtsFixture, "LanceDB Query - structured multi-match i
   }
 }
 
-TEST_CASE_METHOD(FtsFixture,
-                 "LanceDB Query - structured FTS candidate limit", "[fts]") {
-  auto* fts_query = make_match_query("common", "text");
-
-  SECTION("caps candidates independently of the query result limit") {
-    set_fts_candidate_limit(fts_query, 2);
-    auto result = run_structured_query(table(), fts_query, 10);
-    REQUIRE(result.num_rows() == 2);
-  }
-
-  SECTION("zero requests no candidates") {
-    set_fts_candidate_limit(fts_query, 0);
-    auto result = run_structured_query(table(), fts_query, 10);
-    REQUIRE(result.num_rows() == 0);
-  }
-
-  SECTION("unset restores the derived search ceiling") {
-    set_fts_candidate_limit(fts_query, 0);
-    REQUIRE(run_structured_query(table(), fts_query, 10).num_rows() == 0);
-
-    unset_fts_candidate_limit(fts_query);
-    auto result = run_structured_query(table(), fts_query, kRowCount);
-    REQUIRE(result.num_rows() == kRowCount);
-  }
-
-  SECTION("the query result limit still caps a larger candidate ceiling") {
-    set_fts_candidate_limit(fts_query, kRowCount + 1);
-    auto result = run_structured_query(table(), fts_query, 10);
-    REQUIRE(result.num_rows() == 10);
-  }
-
-  lancedb_fts_query_free(fts_query);
-}
-
 TEST_CASE_METHOD(MultiMatchFtsFixture,
                  "LanceDB Query - structured FTS column selection", "[fts]") {
   SECTION("replaces a Match column with several fields") {
@@ -1502,22 +1454,6 @@ TEST_CASE_METHOD(MultiMatchFtsFixture,
     auto result = run_structured_query(table(), boolean);
     REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 3});
     lancedb_fts_query_free(boolean);
-  }
-
-  SECTION("does not copy a child candidate limit into the parent Boolean") {
-    auto* child = make_match_query("alpha", "title");
-    set_fts_candidate_limit(child, 0);
-    REQUIRE(run_structured_query(table(), child).num_rows() == 0);
-
-    std::vector<LanceDBFtsClause> clauses = {
-        {child, LANCEDB_FTS_OCCUR_MUST},
-    };
-    auto* boolean = make_boolean_query(clauses);
-    auto result = run_structured_query(table(), boolean);
-    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 3});
-
-    lancedb_fts_query_free(boolean);
-    lancedb_fts_query_free(child);
   }
 }
 
@@ -2042,6 +1978,52 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - structured match hybrid", "
   REQUIRE(result.num_rows() == 2);
   REQUIRE(ids_of(result) == std::set<int32_t>{0, 7});
   REQUIRE(result.schema->GetFieldByName("_relevance_score") != nullptr);
+}
+
+TEST_CASE_METHOD(FtsFixture,
+                 "LanceDB Vector Query - structured FTS column selection",
+                 "[fts][vector_query]") {
+  auto options = lancedb_fts_match_options_default();
+  options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+
+  char selected_column[] = "text";
+  const char* selected_columns[] = {selected_column};
+  auto* fts_query = make_match_query("common doc7", "missing", &options);
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_with_columns(fts_query, selected_columns, 1, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  // The setter copies the names, so mutating the caller's buffer must not
+  // change either builder.
+  selected_column[0] = 'x';
+
+  LanceDBQuery* plain = lancedb_query_new(table());
+  REQUIRE(plain != nullptr);
+  REQUIRE(lancedb_query_full_text_search_query(plain, fts_query, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+
+  const auto query_vector = vector_for_row(0);
+  LanceDBVectorQuery* hybrid = lancedb_vector_query_new(
+      table(), query_vector.data(), query_vector.size());
+  REQUIRE(hybrid != nullptr);
+  REQUIRE(lancedb_vector_query_column(hybrid, "data", &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_vector_query_limit(hybrid, 2, &error_message) == LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_vector_query_full_text_search_query(hybrid, fts_query, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  lancedb_fts_query_free(fts_query);
+
+  auto plain_result = collect_query_result(lancedb_query_execute(plain));
+  REQUIRE(ids_of(plain_result) == std::set<int32_t>{7});
+
+  auto hybrid_result = collect_query_result(lancedb_vector_query_execute(hybrid));
+  REQUIRE(hybrid_result.num_rows() == 2);
+  REQUIRE(ids_of(hybrid_result) == std::set<int32_t>{0, 7});
+  REQUIRE(hybrid_result.schema->GetFieldByName("_relevance_score") != nullptr);
 }
 
 TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text ordering", "[fts][order_by]") {

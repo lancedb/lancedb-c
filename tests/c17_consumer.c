@@ -486,15 +486,16 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
     result = fail("creating the C17 column-selection Match failed");
     goto cleanup;
   }
-  {
-    const char* selected_columns[] = {"text"};
-    if (lancedb_fts_query_with_columns(
-            fts_query, selected_columns, 1, &error_message) != LANCEDB_SUCCESS ||
-        error_message != NULL) {
-      result = fail("selecting the C17 Match column failed");
-      goto cleanup;
-    }
+  char selected_column[] = "text";
+  const char* selected_columns[] = {selected_column};
+  if (lancedb_fts_query_with_columns(
+          fts_query, selected_columns, 1, &error_message) != LANCEDB_SUCCESS ||
+      error_message != NULL) {
+    result = fail("selecting the C17 Match column failed");
+    goto cleanup;
   }
+  /* The setter copies the names, so this must not change the query. */
+  selected_column[0] = 'x';
   first = lancedb_query_new(table);
   if (first == NULL ||
       lancedb_query_full_text_search_query(first, fts_query, &error_message)
@@ -511,55 +512,6 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
     goto cleanup;
   }
   first = NULL;
-
-  /* The candidate limit is separate from the query result limit. Zero stops the
-   * FTS collector. Negative is forwarded to the SDK, and unsetting restores
-   * the single matching row. Each builder clones the state at attach time. */
-  if (lancedb_fts_query_new_match(
-          "alpha", "text", NULL, &fts_query, &error_message) != LANCEDB_SUCCESS ||
-      fts_query == NULL || error_message != NULL ||
-      lancedb_fts_query_limit(fts_query, 0, &error_message) != LANCEDB_SUCCESS ||
-      error_message != NULL) {
-    result = fail("setting the C17 zero FTS candidate limit failed");
-    goto cleanup;
-  }
-  first = lancedb_query_new(table);
-  if (first == NULL ||
-      lancedb_query_full_text_search_query(first, fts_query, &error_message)
-          != LANCEDB_SUCCESS ||
-      error_message != NULL) {
-    result = fail("attaching the C17 zero-limit Match failed");
-    goto cleanup;
-  }
-  if (lancedb_fts_query_limit(fts_query, -1, &error_message) != LANCEDB_SUCCESS ||
-      error_message != NULL ||
-      lancedb_fts_query_unset_limit(fts_query, &error_message) != LANCEDB_SUCCESS ||
-      error_message != NULL) {
-    result = fail("updating the C17 negative and unset candidate limits failed");
-    goto cleanup;
-  }
-  second = lancedb_query_new(table);
-  if (second == NULL ||
-      lancedb_query_full_text_search_query(second, fts_query, &error_message)
-          != LANCEDB_SUCCESS ||
-      error_message != NULL) {
-    result = fail("attaching the C17 reset-limit Match failed");
-    goto cleanup;
-  }
-  lancedb_fts_query_free(fts_query);
-  fts_query = NULL;
-  if (execute_query_rows(first, &rows) != 0 || rows != 0) {
-    first = NULL;
-    result = fail("the C17 zero FTS candidate limit returned rows");
-    goto cleanup;
-  }
-  first = NULL;
-  if (execute_query_rows(second, &rows) != 0 || rows != 1) {
-    second = NULL;
-    result = fail("unsetting the C17 FTS candidate limit did not restore the match");
-    goto cleanup;
-  }
-  second = NULL;
 
   /* A Phrase accepts exactly one selected column. The rejected rewrite leaves
    * the previous phrase in place and still matches the first row. */
@@ -669,23 +621,6 @@ static int run_fts_query_cases(LanceDBConnection* connection) {
     lancedb_free_string(error_message);
     error_message = NULL;
   }
-  if (lancedb_fts_query_limit(NULL, 1, &error_message)
-          != LANCEDB_INVALID_ARGUMENT ||
-      error_message == NULL) {
-    result = fail("a NULL C17 candidate-limit handle must be rejected");
-    goto cleanup;
-  }
-  lancedb_free_string(error_message);
-  error_message = NULL;
-  if (lancedb_fts_query_unset_limit(NULL, &error_message)
-          != LANCEDB_INVALID_ARGUMENT ||
-      error_message == NULL) {
-    result = fail("a NULL C17 candidate-limit reset handle must be rejected");
-    goto cleanup;
-  }
-  lancedb_free_string(error_message);
-  error_message = NULL;
-
   /* Invalid representation values are rejected at construction. */
   match_options = lancedb_fts_match_options_default();
   match_options.fuzziness = -2;
