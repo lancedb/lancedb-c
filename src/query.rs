@@ -1365,12 +1365,10 @@ pub unsafe extern "C" fn lancedb_vector_query_where_filter(
 /// output schema inspection, and ANALYZE need a single SDK plan and may return
 /// the SDK's unsupported-shape error for this hybrid; execute the query instead.
 ///
-/// If the vector leg returns batch results with `query_index` (multiple
-/// vectors on a fixed-size-list float column, including the per-vector
-/// UInt8/Hamming path) and the full-text leg returns matches, the pinned SDK
-/// beta.25 RRF merge fails with an Arrow schema error. A
-/// `List<FixedSizeList<...>>` multivector column adds no `query_index`; see
-/// `lancedb_vector_query_new_typed` for that batch limitation.
+/// If the vector leg returns batch results with `query_index` and the
+/// full-text leg returns matches, the pinned SDK beta.25 RRF merge fails with
+/// an Arrow schema error. See `lancedb_vector_query_new_typed` for the vector
+/// types and routing that produce `query_index`.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
@@ -1410,12 +1408,10 @@ pub unsafe extern "C" fn lancedb_vector_query_full_text_search(
 /// builder clones the handle's query, so the caller keeps ownership and may
 /// reuse or free the handle immediately.
 ///
-/// If the vector leg returns batch results with `query_index` (multiple
-/// vectors on a fixed-size-list float column, including the per-vector
-/// UInt8/Hamming path) and the full-text leg returns matches, the pinned SDK
-/// beta.25 RRF merge fails with an Arrow schema error. A
-/// `List<FixedSizeList<...>>` multivector column adds no `query_index`; see
-/// `lancedb_vector_query_new_typed` for that batch limitation.
+/// If the vector leg returns batch results with `query_index` and the
+/// full-text leg returns matches, the pinned SDK beta.25 RRF merge fails with
+/// an Arrow schema error. See `lancedb_vector_query_new_typed` for the vector
+/// types and routing that produce `query_index`.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`

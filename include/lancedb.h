@@ -4377,12 +4377,10 @@ LanceDBError lancedb_vector_query_where_filter(
  * lancedb_vector_query_analyze_plan() may return the SDK's unsupported-shape
  * error. Execute the query instead.
  *
- * If the vector leg returns batch results with `query_index` (multiple
- * vectors on a fixed-size-list float column, including the per-vector
- * UInt8/Hamming path) and the full-text leg returns matches, the pinned SDK
- * beta.25 RRF merge fails with an Arrow schema error. A
- * List<FixedSizeList<...>> multivector column adds no `query_index`; see
- * lancedb_vector_query_new_typed() for that batch limitation.
+ * If the vector leg returns batch results with `query_index` and the full-text
+ * leg returns matches, the pinned SDK beta.25 RRF merge fails with an Arrow
+ * schema error. See lancedb_vector_query_new_typed() for the vector types and
+ * routing that produce `query_index`.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
@@ -4415,12 +4413,10 @@ LanceDBError lancedb_vector_query_full_text_search(
  * Phrase evaluation and index-position requirements are described on
  * lancedb_fts_query_new_phrase().
  *
- * If the vector leg returns batch results with `query_index` (multiple
- * vectors on a fixed-size-list float column, including the per-vector
- * UInt8/Hamming path) and the full-text leg returns matches, the pinned SDK
- * beta.25 RRF merge fails with an Arrow schema error. A
- * List<FixedSizeList<...>> multivector column adds no `query_index`; see
- * lancedb_vector_query_new_typed() for that batch limitation.
+ * If the vector leg returns batch results with `query_index` and the full-text
+ * leg returns matches, the pinned SDK beta.25 RRF merge fails with an Arrow
+ * schema error. See lancedb_vector_query_new_typed() for the vector types and
+ * routing that produce `query_index`.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param full_text_query - pointer to LanceDBFtsQuery (borrowed, not consumed)
