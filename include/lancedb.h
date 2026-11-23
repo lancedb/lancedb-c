@@ -3681,11 +3681,12 @@ LanceDBVectorQuery* lancedb_vector_query_new(
  * On a multivector column, `limit` selects table rows in total and each row's
  * `_distance` includes the contribution of every input vector.
  *
- * The pinned SDK beta.25 does not support a hybrid query
- * with more than one query vector on a fixed-size-list float column when the
- * full-text leg returns matches: the SDK's RRF merge combines the batch
- * `query_index` column with the full-text schema and returns an Arrow schema
- * error. This binding forwards the configured SDK query; it does not split the
+ * The pinned SDK beta.25 cannot merge a hybrid query whose vector leg returns
+ * batch results with `query_index` and whose full-text leg returns matches:
+ * the SDK's RRF merge combines the batch `query_index` column with the
+ * full-text schema and returns an Arrow schema error. This includes multiple
+ * vectors on a fixed-size-list float column and the per-vector UInt8/Hamming
+ * path. This binding forwards the configured SDK query; it does not split the
  * batch, drop `query_index`, or run a C-side fusion. Use one query vector for
  * that hybrid shape until the SDK supports it. A List<FixedSizeList<...>>
  * multivector column adds no `query_index`, so it does not hit that merge
@@ -3704,9 +3705,13 @@ LanceDBVectorQuery* lancedb_vector_query_new(
  * distance and which schema it returns; this binding does not reshape or
  * re-issue the result.
  *
- * A table routed through the pinned MemWAL LSM scanner rejects multiple query
- * vectors, hybrid search and binary (UInt8) vector search with
- * LANCEDB_NOT_SUPPORTED. This binding exposes no route override.
+ * A table routed through the pinned MemWAL LSM scanner rejects a single plan
+ * containing multiple query vectors, UInt8 vector search, or both vector and
+ * full-text search with LANCEDB_NOT_SUPPORTED. Hybrid execution does not build
+ * such a plan: it runs separate vector and full-text searches, and can fall
+ * back to primary-key fusion when the table rejects `_rowid`. An eligible
+ * single-vector hybrid query can therefore execute. This binding exposes no
+ * route override.
  *
  * This constructor only copies and checks the description. Like
  * lancedb_vector_query_new(), the SDK reports non-finite values, F64 values
@@ -4372,9 +4377,12 @@ LanceDBError lancedb_vector_query_where_filter(
  * lancedb_vector_query_analyze_plan() may return the SDK's unsupported-shape
  * error. Execute the query instead.
  *
- * If the builder has more than one query vector on a fixed-size-list float
- * column, the pinned SDK beta.25 cannot merge a matching full-text
- * leg; see lancedb_vector_query_new_typed() for that batch limitation.
+ * If the vector leg returns batch results with `query_index` (multiple
+ * vectors on a fixed-size-list float column, including the per-vector
+ * UInt8/Hamming path) and the full-text leg returns matches, the pinned SDK
+ * beta.25 RRF merge fails with an Arrow schema error. A
+ * List<FixedSizeList<...>> multivector column adds no `query_index`; see
+ * lancedb_vector_query_new_typed() for that batch limitation.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param text - full-text query string
@@ -4407,9 +4415,12 @@ LanceDBError lancedb_vector_query_full_text_search(
  * Phrase evaluation and index-position requirements are described on
  * lancedb_fts_query_new_phrase().
  *
- * If the builder has more than one query vector on a fixed-size-list float
- * column, the pinned SDK beta.25 cannot merge a matching full-text
- * leg; see lancedb_vector_query_new_typed() for that batch limitation.
+ * If the vector leg returns batch results with `query_index` (multiple
+ * vectors on a fixed-size-list float column, including the per-vector
+ * UInt8/Hamming path) and the full-text leg returns matches, the pinned SDK
+ * beta.25 RRF merge fails with an Arrow schema error. A
+ * List<FixedSizeList<...>> multivector column adds no `query_index`; see
+ * lancedb_vector_query_new_typed() for that batch limitation.
  *
  * @param query - pointer to LanceDBVectorQuery
  * @param full_text_query - pointer to LanceDBFtsQuery (borrowed, not consumed)
