@@ -635,6 +635,7 @@ def compare_declarations(
             # covered by the C++ optimize, update and open-table option tests
             # rather than cbindgen.
             if name in (
+                "LanceDBClientConfigField",
                 "LanceDBCompactionField",
                 "LanceDBOpenTableField",
                 "LanceDBPruneField",

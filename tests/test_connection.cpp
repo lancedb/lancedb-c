@@ -4,11 +4,218 @@
  */
 
 #include "test_common.h"
-#include <set>
-#include <fstream>
+#include <atomic>
+#include <cctype>
+#include <csignal>
 #include <filesystem>
+#include <fstream>
+#include <functional>
+#include <limits>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 static const char* NON_UTF8 = "\x80\xFF\xFE\xAB";
+
+#ifndef _WIN32
+namespace {
+
+struct ClientConfigRequest {
+  std::string method;
+  std::string target;
+  std::string headers;
+};
+
+// A minimal loopback HTTP server for checking the headers a remote connection
+// actually sends. Requests in these tests have no body.
+class ClientConfigHttpServer {
+ public:
+  ClientConfigHttpServer(int status, std::string body)
+      : status_(status), body_(std::move(body)) {
+    std::signal(SIGPIPE, SIG_IGN);
+    listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(listen_fd_ >= 0);
+
+    int reuse = 1;
+    REQUIRE(setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                       sizeof(reuse)) == 0);
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    REQUIRE(bind(listen_fd_, reinterpret_cast<sockaddr*>(&address),
+                 sizeof(address)) == 0);
+    REQUIRE(listen(listen_fd_, 8) == 0);
+
+    socklen_t length = sizeof(address);
+    REQUIRE(getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&address),
+                        &length) == 0);
+    url_ = "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port));
+    thread_ = std::thread([this] { serve(); });
+  }
+
+  ~ClientConfigHttpServer() {
+    stop_ = true;
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    if (listen_fd_ >= 0) {
+      close(listen_fd_);
+      listen_fd_ = -1;
+    }
+  }
+
+  ClientConfigHttpServer(const ClientConfigHttpServer&) = delete;
+  ClientConfigHttpServer& operator=(const ClientConfigHttpServer&) = delete;
+
+  const std::string& url() const { return url_; }
+
+  std::vector<ClientConfigRequest> requests() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return requests_;
+  }
+
+ private:
+  void serve() {
+    while (!stop_) {
+      fd_set read_fds;
+      FD_ZERO(&read_fds);
+      FD_SET(listen_fd_, &read_fds);
+      timeval timeout{};
+      timeout.tv_sec = 0;
+      timeout.tv_usec = 100000;
+      const int ready =
+          select(listen_fd_ + 1, &read_fds, nullptr, nullptr, &timeout);
+      if (ready <= 0) {
+        continue;
+      }
+
+      const int client = accept(listen_fd_, nullptr, nullptr);
+      if (client < 0) {
+        continue;
+      }
+      handle(client);
+      close(client);
+    }
+  }
+
+  void handle(int client) {
+    timeval io_timeout{};
+    io_timeout.tv_sec = 2;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout));
+
+    std::string request;
+    char buffer[4096];
+    while (request.find("\r\n\r\n") == std::string::npos) {
+      const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+      if (count <= 0) {
+        return;
+      }
+      request.append(buffer, static_cast<size_t>(count));
+      if (request.size() > 1024 * 1024) {
+        return;
+      }
+    }
+
+    const size_t line_end = request.find("\r\n");
+    const std::string request_line = request.substr(0, line_end);
+    const size_t first_space = request_line.find(' ');
+    const size_t second_space = request_line.find(' ', first_space + 1);
+    ClientConfigRequest captured;
+    captured.method = request_line.substr(0, first_space);
+    captured.target = request_line.substr(
+        first_space + 1, second_space - first_space - 1);
+    captured.headers = request.substr(0, request.find("\r\n\r\n") + 4);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      requests_.push_back(captured);
+    }
+
+    std::string wire = "HTTP/1.1 " + std::to_string(status_) + " " +
+                       reason_phrase(status_) + "\r\n";
+    wire += "Content-Type: application/json\r\n";
+    wire += "Content-Length: " + std::to_string(body_.size()) + "\r\n";
+    wire += "Connection: close\r\n\r\n";
+    wire += body_;
+    size_t sent = 0;
+    while (sent < wire.size()) {
+      const ssize_t count =
+          send(client, wire.data() + sent, wire.size() - sent, 0);
+      if (count <= 0) {
+        return;
+      }
+      sent += static_cast<size_t>(count);
+    }
+  }
+
+  static const char* reason_phrase(int status) {
+    switch (status) {
+      case 200:
+        return "OK";
+      case 500:
+        return "Internal Server Error";
+      default:
+        return "Response";
+    }
+  }
+
+  int listen_fd_ = -1;
+  int status_;
+  std::string body_;
+  std::string url_;
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  mutable std::mutex mutex_;
+  std::vector<ClientConfigRequest> requests_;
+};
+
+std::string header_value(const ClientConfigRequest& request,
+                         const std::string& name) {
+  size_t line_start = request.headers.find("\r\n");
+  if (line_start == std::string::npos) {
+    return {};
+  }
+  line_start += 2;
+  while (line_start < request.headers.size()) {
+    const size_t line_end = request.headers.find("\r\n", line_start);
+    if (line_end == std::string::npos) {
+      break;
+    }
+    const std::string line = request.headers.substr(line_start, line_end - line_start);
+    const size_t colon = line.find(':');
+    if (colon != std::string::npos) {
+      std::string header_name = line.substr(0, colon);
+      std::transform(header_name.begin(), header_name.end(), header_name.begin(),
+                     [](unsigned char value) {
+                       return static_cast<char>(std::tolower(value));
+                     });
+      if (header_name == name) {
+        size_t value_start = colon + 1;
+        while (value_start < line.size() && line[value_start] == ' ') {
+          ++value_start;
+        }
+        return line.substr(value_start);
+      }
+    }
+    line_start = line_end + 2;
+  }
+  return {};
+}
+
+}  // namespace
+#endif
 
 // the messages are indexed by the error code, so a missing message would go unnoticed
 static_assert(sizeof(LANCEDB_ERROR_MESSAGES)/sizeof(LANCEDB_ERROR_MESSAGES[0]) == LANCEDB_EXTERNAL + 1,
@@ -146,6 +353,114 @@ TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Builder", "[connection]") {
     REQUIRE(db != nullptr);
     lancedb_connection_free(db);
   }
+}
+
+TEST_CASE("LanceDB Remote Client Configuration", "[connection]") {
+#ifndef _WIN32
+  struct Outputs {
+    LanceDBConnection* connection = nullptr;
+    char** names = nullptr;
+    size_t count = 0;
+    char* error_message = nullptr;
+
+    ~Outputs() {
+      lancedb_free_table_names(names, count);
+      lancedb_free_string(error_message);
+      lancedb_connection_free(connection);
+    }
+  };
+
+  auto make_builder = [](const std::string& host,
+                         const LanceDBClientConfig* config) {
+    LanceDBConnectBuilder* builder = lancedb_connect("db://test");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_api_key(builder, "test-client-config-key");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_region(builder, "us-east-1");
+    REQUIRE(builder != nullptr);
+    builder = lancedb_connect_builder_host_override(builder, host.c_str());
+    REQUIRE(builder != nullptr);
+    if (config != nullptr) {
+      builder = lancedb_connect_builder_client_config(builder, config);
+      REQUIRE(builder != nullptr);
+    }
+    return builder;
+  };
+
+  SECTION("Static headers and the user agent reach a sent request") {
+    ClientConfigHttpServer server(200, "{\"tables\":[]}");
+    const char* header_keys[] = {"x-lancedb-client-config-test"};
+    const char* header_values[] = {"forwarded"};
+    LanceDBClientConfig config{};
+    config.user_agent = "lancedb-c-client-config-test/1.0";
+    config.extra_header_keys = header_keys;
+    config.extra_header_values = header_values;
+    config.extra_header_count = 1;
+
+    LanceDBConnectBuilder* builder = make_builder(server.url(), &config);
+    Outputs outputs;
+    REQUIRE(lancedb_connect_builder_execute(
+                builder, &outputs.connection, &outputs.error_message)
+            == LANCEDB_SUCCESS);
+    REQUIRE(outputs.error_message == nullptr);
+    REQUIRE(outputs.connection != nullptr);
+
+    REQUIRE(lancedb_connection_table_names(outputs.connection, &outputs.names,
+                                           &outputs.count,
+                                           &outputs.error_message)
+            == LANCEDB_SUCCESS);
+    REQUIRE(outputs.error_message == nullptr);
+    REQUIRE(outputs.count == 0);
+    REQUIRE(outputs.names == nullptr);
+
+    const auto requests = server.requests();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests[0].method == "GET");
+    REQUIRE(requests[0].target == "/v1/table/");
+    REQUIRE(header_value(requests[0], "user-agent") ==
+            "lancedb-c-client-config-test/1.0");
+    REQUIRE(header_value(requests[0], "x-lancedb-client-config-test") ==
+            "forwarded");
+  }
+
+  SECTION("SDK validation keeps its execute-time error") {
+    const uint16_t retry_statuses[] = {42};
+    LanceDBClientConfig config{};
+    config.set_fields = LANCEDB_CLIENT_CONFIG_RETRY_STATUSES;
+    config.retry_statuses = retry_statuses;
+    config.retry_status_count = 1;
+
+    LanceDBConnectBuilder* builder =
+        make_builder("http://127.0.0.1:1", &config);
+    Outputs outputs;
+    REQUIRE(lancedb_connect_builder_execute(
+                builder, &outputs.connection, &outputs.error_message)
+            == LANCEDB_INVALID_INPUT);
+    REQUIRE(outputs.connection == nullptr);
+    REQUIRE(outputs.error_message != nullptr);
+    REQUIRE(std::string(outputs.error_message).find("invalid HTTP status code") !=
+            std::string::npos);
+  }
+
+  SECTION("Oversized blob concurrency is a typed execute-time error") {
+    LanceDBClientConfig config{};
+    config.set_fields = LANCEDB_CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY;
+    config.blob_request_concurrency = std::numeric_limits<size_t>::max();
+
+    LanceDBConnectBuilder* builder =
+        make_builder("http://127.0.0.1:1", &config);
+    Outputs outputs;
+    REQUIRE(lancedb_connect_builder_execute(
+                builder, &outputs.connection, &outputs.error_message)
+            == LANCEDB_INVALID_INPUT);
+    REQUIRE(outputs.connection == nullptr);
+    REQUIRE(outputs.error_message != nullptr);
+    REQUIRE(std::string(outputs.error_message).find("blob request concurrency") !=
+            std::string::npos);
+  }
+#else
+  SUCCEED("the client configuration loopback check requires POSIX sockets");
+#endif
 }
 
 TEST_CASE_METHOD(BaseFixture, "LanceDB Connection Settings", "[connection]") {

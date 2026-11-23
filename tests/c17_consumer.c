@@ -677,8 +677,29 @@ int main(int argc, char** argv) {
   builder = lancedb_connect_builder_namespace_client_property(builder, "ignored", "value");
   builder = lancedb_connect_builder_manifest_enabled(builder, false);
   builder = lancedb_connect_builder_read_consistency_interval_ms(builder, 0);
+
+  const char* client_header_keys[] = {"x-lancedb-c17-consumer"};
+  const char* client_header_values[] = {"forwarded"};
+  const uint16_t retry_statuses[] = {429, 503};
+  LanceDBClientConfig client_config = {0};
+  client_config.set_fields = LANCEDB_CLIENT_CONFIG_RETRIES |
+                             LANCEDB_CLIENT_CONFIG_READ_TIMEOUT |
+                             LANCEDB_CLIENT_CONFIG_RETRY_STATUSES |
+                             LANCEDB_CLIENT_CONFIG_TLS_ASSERT_HOSTNAME;
+  client_config.retries = 2;
+  client_config.read_timeout_ms = 1000;
+  client_config.retry_statuses = retry_statuses;
+  client_config.retry_status_count = 2;
+  client_config.tls_assert_hostname = 1;
+  client_config.extra_header_keys = client_header_keys;
+  client_config.extra_header_values = client_header_values;
+  client_config.extra_header_count = 1;
+  builder = lancedb_connect_builder_client_config(builder, &client_config);
   if (builder == NULL) {
-    return fail("the connection builder setters must return a builder");
+    return fail("the client configuration setter must return a builder");
+  }
+  if (lancedb_connect_builder_client_config(NULL, &client_config) != NULL) {
+    return fail("the client configuration setter must reject a NULL builder");
   }
 
   connection = NULL;

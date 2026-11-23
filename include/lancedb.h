@@ -928,8 +928,14 @@ LanceDBConnectBuilder* lancedb_connect(const char* uri);
  * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  * @return Error code indicating success or failure
  *
- * On success, the builder is consumed by this function and must not be used after calling.
- * The returned connection must be freed with lancedb_connection_free().
+ * A non-NULL builder is consumed on every path and must not be used after
+ * calling. connection is written only on success, when it receives a handle
+ * that must be freed with lancedb_connection_free(); on failure a non-NULL
+ * connection slot is left unchanged. An existing *error_message value is
+ * preserved on success, consistent with
+ * lancedb_connect_namespace_builder_execute(). On error, a non-NULL
+ * error_message receives a message that the caller frees with
+ * lancedb_free_string().
  */
 LanceDBError lancedb_connect_builder_execute( LanceDBConnectBuilder* builder,
 		    LanceDBConnection** connection, char** error_message);
@@ -1089,6 +1095,126 @@ LanceDBConnectBuilder* lancedb_connect_builder_read_consistency_interval_ms(Lanc
  * stating that session is not supported for LanceDB Enterprise connections.
  */
 LanceDBConnectBuilder* lancedb_connect_builder_session(LanceDBConnectBuilder* builder, const LanceDBSession* session);
+
+/**
+ * Client configuration fields of LanceDBClientConfig
+ *
+ * Every bit makes the matching scalar an override. A field whose bit is not set
+ * keeps the SDK value, so an omitted timeout or retry budget stays distinct
+ * from an explicit zero. Strings use NULL for "unset", so an empty non-NULL
+ * string remains an explicit empty value.
+ */
+typedef enum {
+    LANCEDB_CLIENT_CONFIG_TIMEOUT = 1 << 0,
+    LANCEDB_CLIENT_CONFIG_CONNECT_TIMEOUT = 1 << 1,
+    LANCEDB_CLIENT_CONFIG_READ_TIMEOUT = 1 << 2,
+    LANCEDB_CLIENT_CONFIG_POOL_IDLE_TIMEOUT = 1 << 3,
+    LANCEDB_CLIENT_CONFIG_RETRIES = 1 << 4,
+    LANCEDB_CLIENT_CONFIG_CONNECT_RETRIES = 1 << 5,
+    LANCEDB_CLIENT_CONFIG_READ_RETRIES = 1 << 6,
+    LANCEDB_CLIENT_CONFIG_BACKOFF_FACTOR = 1 << 7,
+    LANCEDB_CLIENT_CONFIG_BACKOFF_JITTER = 1 << 8,
+    LANCEDB_CLIENT_CONFIG_RETRY_STATUSES = 1 << 9,
+    LANCEDB_CLIENT_CONFIG_BLOB_REQUEST_CONCURRENCY = 1 << 10,
+    LANCEDB_CLIENT_CONFIG_MAX_BYTES_PER_REQUEST = 1 << 11,
+    LANCEDB_CLIENT_CONFIG_MAX_REQUEST_DURATION = 1 << 12,
+    LANCEDB_CLIENT_CONFIG_TLS_ASSERT_HOSTNAME = 1 << 13
+} LanceDBClientConfigField;
+
+/**
+ * HTTP client configuration for a remote connection
+ *
+ * A NULL pointer or a zero-initialized struct keeps the SDK
+ * ClientConfig::default(), including the SDK user agent, empty extra headers,
+ * and no TLS configuration, which leaves the SDK/reqwest default hostname
+ * verification enabled. When the
+ * library is built with the remote feature, an unknown set_fields bit, a
+ * missing required array or invalid UTF-8 makes
+ * lancedb_connect_builder_client_config() return NULL and consume the builder.
+ * Builds without the remote feature consume the builder and leave it unchanged.
+ *
+ * All strings, status codes and header arrays are borrowed for the duration of
+ * that call and copied into the SDK configuration. NULL string fields keep
+ * their SDK value. A non-NULL string, including an empty one, is passed
+ * unchanged. Negative or non-finite backoff values and invalid scalar values
+ * are left for the SDK to reject when the builder is executed, preserving its
+ * error code and message timing.
+ *
+ * Timeouts use milliseconds and retry counts use the SDK's uint8_t range. When
+ * a set_fields bit is present, its value is forwarded even when zero. The SDK
+ * still owns environment fallbacks: leaving a field unset lets the matching
+ * LANCE_CLIENT_* variable or the SDK default apply. user_id is NULL to keep the
+ * SDK LANCEDB_USER_ID / LANCEDB_USER_ID_ENV_KEY fallback, or a non-NULL string
+ * to set it explicitly. max_bytes_per_request and max_request_duration_ms use
+ * zero to disable their respective insert-request cut, as the SDK does.
+ *
+ * Retry status codes are copied from retry_statuses when
+ * LANCEDB_CLIENT_CONFIG_RETRY_STATUSES is set. A zero retry_status_count with
+ * that bit selects an empty list and disables status retries; a non-zero count
+ * requires a non-NULL array. extra_header_count greater than zero requires both
+ * parallel header arrays and every entry to be non-NULL and valid UTF-8. Static
+ * extra headers replace the same SDK default headers when names collide. The
+ * SDK user agent and a configured or environment-derived user_id are applied
+ * afterward, so they take precedence over a static header with the same name.
+ *
+ * A TLS configuration exists when any TLS path is non-NULL or
+ * LANCEDB_CLIENT_CONFIG_TLS_ASSERT_HOSTNAME is set. The SDK TlsConfig default
+ * asserts the server hostname, so leaving the bit unset keeps verification on;
+ * setting it with 0 explicitly disables it and with 1 keeps it on. Any other
+ * value makes the setter return NULL. tls_cert_file and tls_key_file are read
+ * only when both are configured; a lone client certificate or key path is not
+ * read. tls_ssl_ca_cert is read when configured. Missing or unreadable configured
+ * files, invalid certificate contents, invalid header names or values, an
+ * unsupported id_delimiter, a blob request concurrency outside the SDK's
+ * positive semaphore range (including an environment-derived value) and invalid
+ * retry status codes are reported by lancedb_connect_builder_execute().
+ *
+ * Callback-based header providers are not part of this plain-data structure.
+ * Native (non-db://) connections ignore the configuration, matching the other
+ * remote-only builder setters.
+ */
+typedef struct {
+    uint32_t set_fields;                     // Bitmask of LanceDBClientConfigField values (0 = defaults)
+    const char* user_agent;                  // User agent (NULL keeps the SDK default)
+    uint64_t timeout_ms;                     // Overall request timeout; bit required
+    uint64_t connect_timeout_ms;             // Connection timeout; bit required
+    uint64_t read_timeout_ms;                // Response read timeout; bit required
+    uint64_t pool_idle_timeout_ms;           // Idle connection pool timeout; bit required
+    uint8_t retries;                         // Request retry budget; bit required
+    uint8_t connect_retries;                 // Connect retry budget; bit required
+    uint8_t read_retries;                    // Read retry budget; bit required
+    float backoff_factor;                    // Retry backoff factor in seconds; bit required
+    float backoff_jitter;                    // Retry backoff jitter in seconds; bit required
+    const uint16_t* retry_statuses;          // Retryable status codes (NULL when count is 0)
+    size_t retry_status_count;               // Number of retryable status codes
+    size_t blob_request_concurrency;         // Maximum concurrent blob requests; bit required
+    uint64_t max_bytes_per_request;          // Insert byte budget; bit required
+    uint64_t max_request_duration_ms;        // Insert time budget; bit required
+    const char* id_delimiter;                // Namespace identifier delimiter (NULL to omit)
+    const char* user_id;                     // User ID (NULL keeps the SDK environment fallback)
+    const char* tls_cert_file;               // Client certificate path (NULL to omit)
+    const char* tls_key_file;                // Client private key path (NULL to omit)
+    const char* tls_ssl_ca_cert;             // CA certificate path (NULL to omit)
+    int tls_assert_hostname;                 // 0 = false, 1 = true; bit required
+    const char* const* extra_header_keys;    // Static header names (NULL when count is 0)
+    const char* const* extra_header_values;  // Static header values matching the names
+    size_t extra_header_count;               // Number of static extra headers
+} LanceDBClientConfig;
+
+/**
+ * Set the HTTP client configuration for a remote connection
+ *
+ * @param builder - pointer to LanceDBConnectBuilder returned from lancedb_connect()
+ * @param config - pointer to read-only configuration, or NULL for every SDK default
+ * @return Non-null pointer to LanceDBConnectBuilder on success, NULL on failure
+ *
+ * The builder is consumed by this function and must not be used after calling.
+ * A successful call replaces the builder's ClientConfig; it does not merge with
+ * an earlier call. The configuration only reaches connections dispatched to the
+ * SDK remote path. Native connections keep the builder unchanged. The SDK
+ * validates the configuration when the builder is executed.
+ */
+LanceDBConnectBuilder* lancedb_connect_builder_client_config(LanceDBConnectBuilder* builder, const LanceDBClientConfig* config);
 
 /**
  * Free a ConnectBuilder
