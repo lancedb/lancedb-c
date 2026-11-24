@@ -591,6 +591,20 @@ QueryResultBatches run_structured_query(
   return collect_query_result(lancedb_query_execute(query));
 }
 
+void set_fts_candidate_limit(LanceDBFtsQuery* fts_query, int64_t limit) {
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_limit(fts_query, limit, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
+void unset_fts_candidate_limit(LanceDBFtsQuery* fts_query) {
+  char* error_message = nullptr;
+  REQUIRE(lancedb_fts_query_unset_limit(fts_query, &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+}
+
 LanceDBFtsQuery* make_multi_match_query(
     const char* text,
     const std::vector<std::string>& columns,
@@ -1510,6 +1524,81 @@ TEST_CASE_METHOD(PhraseFtsFixture,
   }
 }
 
+TEST_CASE_METHOD(FtsFixture, "LanceDB Query - structured FTS candidate limit", "[fts]") {
+  SECTION("caps candidates independently of the query result limit") {
+    auto* fts_query = make_match_query("common", "text");
+    set_fts_candidate_limit(fts_query, 2);
+
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 2);
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("zero requests no candidates") {
+    auto* fts_query = make_match_query("common", "text");
+    set_fts_candidate_limit(fts_query, 0);
+
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 0);
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("unset restores the derived search ceiling") {
+    auto* fts_query = make_match_query("common", "text");
+    set_fts_candidate_limit(fts_query, 0);
+    REQUIRE(run_structured_query(table(), fts_query, 10).num_rows() == 0);
+
+    unset_fts_candidate_limit(fts_query);
+    auto result = run_structured_query(table(), fts_query, kRowCount);
+    REQUIRE(result.num_rows() == kRowCount);
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("the query result limit still caps a larger candidate ceiling") {
+    auto* fts_query = make_match_query("common", "text");
+    set_fts_candidate_limit(fts_query, kRowCount + 1);
+
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 10);
+    lancedb_fts_query_free(fts_query);
+  }
+
+  SECTION("column selection keeps the candidate limit") {
+    auto* fts_query = make_match_query("common doc7", "missing");
+    set_fts_candidate_limit(fts_query, 0);
+
+    const char* columns[] = {"text"};
+    char* error_message = nullptr;
+    REQUIRE(lancedb_fts_query_with_columns(fts_query, columns, 1, &error_message) ==
+            LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    auto result = run_structured_query(table(), fts_query, 10);
+    REQUIRE(result.num_rows() == 0);
+    lancedb_fts_query_free(fts_query);
+  }
+}
+
+TEST_CASE_METHOD(PhraseFtsFixture,
+                 "LanceDB Query - structured FTS candidate limit composition",
+                 "[fts]") {
+  SECTION("a child candidate limit is not copied into the Boolean parent") {
+    auto* child = make_match_query("alpha", "text");
+    set_fts_candidate_limit(child, 0);
+    REQUIRE(run_structured_query(table(), child).num_rows() == 0);
+
+    std::vector<LanceDBFtsClause> clauses = {
+        {child, LANCEDB_FTS_OCCUR_MUST},
+    };
+    auto* boolean = make_boolean_query(clauses);
+    auto result = run_structured_query(table(), boolean);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+
+    lancedb_fts_query_free(boolean);
+    lancedb_fts_query_free(child);
+  }
+}
+
 TEST_CASE_METHOD(PhraseFtsFixture, "LanceDB Query - structured boolean full text", "[fts]") {
   SECTION("MUST requires every clause") {
     auto* alpha = make_match_query("alpha", "text");
@@ -2024,6 +2113,89 @@ TEST_CASE_METHOD(FtsFixture,
   REQUIRE(hybrid_result.num_rows() == 2);
   REQUIRE(ids_of(hybrid_result) == std::set<int32_t>{0, 7});
   REQUIRE(hybrid_result.schema->GetFieldByName("_relevance_score") != nullptr);
+}
+
+TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - structured FTS candidate limit",
+                 "[fts][vector_query]") {
+  const auto query_vector = vector_for_row(0);
+
+  SECTION("a zero ceiling leaves the vector contribution") {
+    auto options = lancedb_fts_match_options_default();
+    options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+    auto* fts_query = make_match_query("common doc7", "text", &options);
+    set_fts_candidate_limit(fts_query, 0);
+
+    LanceDBVectorQuery* query = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(query != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_vector_query_column(query, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(query, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_full_text_search_query(query, fts_query, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    lancedb_fts_query_free(fts_query);
+
+    auto result = collect_query_result(lancedb_vector_query_execute(query));
+    REQUIRE(result.num_rows() == 3);
+    REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
+    REQUIRE(result.schema->GetFieldByName("_relevance_score") != nullptr);
+
+    // The full-text leg is empty, so each row keeps only its vector RRF score.
+    // Dropping the zero ceiling would add the AND match on row 7 and displace
+    // row 2 from this page.
+    const auto vector_ids = ordered_ids_of(run_vector_leg_query(table(), query_vector, 3));
+    REQUIRE(vector_ids == std::vector<int32_t>{0, 1, 2});
+    const auto expected = expected_rrf_scores(vector_ids, {}, kDefaultRrfK);
+    for (const auto& [id, score] : expected) {
+      REQUIRE(std::abs(relevance_score_of(result, id) - score) < 1e-6F);
+    }
+  }
+
+  SECTION("builders keep the limit captured at attach time") {
+    auto options = lancedb_fts_match_options_default();
+    options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+    auto* fts_query = make_match_query("common doc7", "text", &options);
+    set_fts_candidate_limit(fts_query, 0);
+
+    LanceDBQuery* plain = lancedb_query_new(table());
+    REQUIRE(plain != nullptr);
+
+    char* error_message = nullptr;
+    REQUIRE(lancedb_query_full_text_search_query(plain, fts_query, &error_message) ==
+            LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_query_limit(plain, 10, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    LanceDBVectorQuery* hybrid = lancedb_vector_query_new(
+        table(), query_vector.data(), query_vector.size());
+    REQUIRE(hybrid != nullptr);
+    REQUIRE(lancedb_vector_query_column(hybrid, "data", &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_limit(hybrid, 3, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(lancedb_vector_query_full_text_search_query(hybrid, fts_query, &error_message)
+        == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    // The AND fixture matches row 7. Later changes to the handle must not
+    // reach either builder: a missed zero ceiling would return row 7 from the
+    // plain builder and add it to the hybrid page.
+    set_fts_candidate_limit(fts_query, 2);
+    lancedb_fts_query_free(fts_query);
+
+    auto plain_result = collect_query_result(lancedb_query_execute(plain));
+    REQUIRE(plain_result.num_rows() == 0);
+
+    auto hybrid_result = collect_query_result(lancedb_vector_query_execute(hybrid));
+    REQUIRE(hybrid_result.num_rows() == 3);
+    REQUIRE(ids_of(hybrid_result) == std::set<int32_t>{0, 1, 2});
+    REQUIRE(hybrid_result.schema->GetFieldByName("_relevance_score") != nullptr);
+  }
 }
 
 TEST_CASE_METHOD(FtsFixture, "LanceDB Query - full text ordering", "[fts][order_by]") {

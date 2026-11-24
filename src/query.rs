@@ -975,6 +975,10 @@ unsafe fn column_orderings_from_c(
 
 /// Set limit for query
 ///
+/// This limits the final query result. It is independent of a structured
+/// full-text query's candidate ceiling, which is set with
+/// `lancedb_fts_query_limit`.
+///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_query_new`
 /// - `error_message` can be NULL to ignore detailed error messages
@@ -1521,7 +1525,9 @@ pub unsafe extern "C" fn lancedb_fts_query_new_phrase(
 /// Clauses are a flat borrowed array; nesting is expressed by composing handles
 /// rather than by a recursive C representation. Each clause's structured query
 /// node is copied, so child handles can be reused or freed after this call
-/// returns.
+/// returns. Only the node is copied; a child handle's candidate limit set with
+/// `lancedb_fts_query_limit` is not part of the node and does not constrain the
+/// Boolean query.
 ///
 /// SDK semantics apply unchanged. MUST clauses must all match and their scores
 /// are summed. SHOULD clauses are optional when a MUST clause exists and add
@@ -1586,8 +1592,10 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boolean(
 ///
 /// Both legs are required borrowed handles, and each leg's structured query
 /// node is copied so the handles can be reused or freed after this call
-/// returns. A NULL `negative_boost` passes `None` to the SDK constructor, which
-/// supplies its default 0.5; a pointed-to value is forwarded unchanged. The
+/// returns. Only the node is copied; a child handle's candidate limit set with
+/// `lancedb_fts_query_limit` is not part of the node and does not constrain the
+/// Boost query. A NULL `negative_boost` passes `None` to the SDK constructor,
+/// which supplies its default 0.5; a pointed-to value is forwarded unchanged. The
 /// embedded dataset scanner requires it to be finite and non-negative and
 /// otherwise fails while planning with `LANCEDB_INVALID_INPUT`. A MemWAL LSM
 /// query runs its column checks first, and namespace or Enterprise execution
@@ -1645,9 +1653,9 @@ pub unsafe extern "C" fn lancedb_fts_query_new_boost(
 ///
 /// This applies the SDK's `FullTextSearchQuery::with_columns` to a copy and
 /// publishes the result only after the SDK accepts it, so a failure leaves the
-/// previous query and settings unchanged. The operation replaces the columns of
-/// every Match and Phrase leaf; it does not fill only leaves that lack a
-/// column.
+/// previous query, candidate limit and settings unchanged. The operation
+/// replaces the columns of every Match and Phrase leaf; it does not fill only
+/// leaves that lack a column.
 ///
 /// A Match leaf becomes one leaf per selected column. Several columns therefore
 /// turn it into a MultiMatch, and every scalar setting of the original leaf
@@ -1714,6 +1722,89 @@ pub unsafe extern "C" fn lancedb_fts_query_with_columns(
         }
     };
     (*query).inner = updated;
+    LanceDBError::Success
+}
+
+/// Set the candidate limit of a structured full-text query
+///
+/// This binds the SDK's `FullTextSearchQuery::limit` with `Some(limit)`. The
+/// candidate ceiling is separate from `lancedb_query_limit` and
+/// `lancedb_vector_query_limit`, which limit the final query result. On a
+/// backend that consumes it, zero requests no full-text candidates, so a
+/// standalone full-text query returns no rows and a hybrid query keeps only its
+/// vector contribution. A positive value caps the candidates the full-text leg
+/// may produce before the final result limit and offset are applied.
+///
+/// The value is forwarded unchanged as `i64`. Embedded planning converts it to
+/// `usize`, so a negative value becomes a very large ceiling on a 64-bit
+/// target. The native MemWAL LSM path rejects a negative value at execution
+/// with `LANCEDB_INVALID_INPUT`. This setter does not clamp or reject negative
+/// values; the selected backend determines the outcome.
+///
+/// There is no upper bound. A very large positive value can exhaust memory or
+/// otherwise fail during execution. The native MemWAL LSM path is the most
+/// exposed because it applies the value to every planned FTS column. When the
+/// intent is no explicit ceiling, call `lancedb_fts_query_unset_limit` instead
+/// of passing a very large value.
+///
+/// The pinned SDK consumes the ceiling for standalone embedded full-text
+/// search, for the full-text leg of an embedded hybrid query, and for a native
+/// MemWAL LSM full-text query. Namespace QueryTable pushdown and LanceDB
+/// Enterprise requests do not carry the field: only their outer result limit
+/// applies, so the ceiling is silently absent on those backends.
+///
+/// The limit belongs to the full-text search wrapper, not to the query tree.
+/// Boolean and Boost constructors copy child query nodes and do not copy a
+/// child's candidate limit. Attaching the handle to a builder copies the whole
+/// wrapper, including this limit.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from an
+///   `lancedb_fts_query_new_*` constructor
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_limit(
+    query: *mut LanceDBFtsQuery,
+    limit: i64,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).inner = (*query).inner.clone().limit(Some(limit));
+    LanceDBError::Success
+}
+
+/// Remove the candidate limit from a structured full-text query
+///
+/// This binds the SDK's `FullTextSearchQuery::limit` with `None`. Embedded
+/// standalone full-text search derives its search ceiling from the final query
+/// limit, plus any offset, when that limit is set. With an explicit column
+/// ordering, no ceiling is derived: the full match set is retained so the
+/// ordering can select the page. Native MemWAL derives its ceiling from the
+/// scanner limit and offset. The final query result limit remains independent.
+///
+/// # Safety
+/// - `query` must be a valid pointer returned from an
+///   `lancedb_fts_query_new_*` constructor
+/// - `error_message` can be NULL to ignore detailed error messages
+#[no_mangle]
+pub unsafe extern "C" fn lancedb_fts_query_unset_limit(
+    query: *mut LanceDBFtsQuery,
+    error_message: *mut *mut c_char,
+) -> LanceDBError {
+    clear_error_message(error_message);
+
+    if query.is_null() {
+        set_invalid_argument_message(error_message);
+        return LanceDBError::InvalidArgument;
+    }
+
+    (*query).inner = (*query).inner.clone().limit(None);
     LanceDBError::Success
 }
 
@@ -1790,6 +1881,10 @@ pub unsafe extern "C" fn lancedb_query_df_filter(
 }
 
 /// Set limit for vector query
+///
+/// This limits the final query result. It is independent of a structured
+/// full-text query's candidate ceiling, which is set with
+/// `lancedb_fts_query_limit`.
 ///
 /// # Safety
 /// - `query` must be a valid pointer returned from `lancedb_vector_query_new`
