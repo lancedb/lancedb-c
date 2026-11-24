@@ -1741,6 +1741,12 @@ pub unsafe extern "C" fn lancedb_fts_query_with_columns(
 /// with `LANCEDB_INVALID_INPUT`. This setter does not clamp or reject negative
 /// values; the selected backend determines the outcome.
 ///
+/// There is no upper bound. A very large positive value can exhaust memory or
+/// otherwise fail during execution. The native MemWAL LSM path is the most
+/// exposed because it applies the value to every planned FTS column. When the
+/// intent is no explicit ceiling, call `lancedb_fts_query_unset_limit` instead
+/// of passing a very large value.
+///
 /// The pinned SDK consumes the ceiling for standalone embedded full-text
 /// search, for the full-text leg of an embedded hybrid query, and for a native
 /// MemWAL LSM full-text query. Namespace QueryTable pushdown and LanceDB
@@ -1776,8 +1782,10 @@ pub unsafe extern "C" fn lancedb_fts_query_limit(
 /// Remove the candidate limit from a structured full-text query
 ///
 /// This binds the SDK's `FullTextSearchQuery::limit` with `None`. Embedded
-/// standalone full-text search then derives its search ceiling from the final
-/// query limit and offset when available, and native MemWAL derives it from the
+/// standalone full-text search derives its search ceiling from the final query
+/// limit, plus any offset, when that limit is set. With an explicit column
+/// ordering, no ceiling is derived: the full match set is retained so the
+/// ordering can select the page. Native MemWAL derives its ceiling from the
 /// scanner limit and offset. The final query result limit remains independent.
 ///
 /// # Safety

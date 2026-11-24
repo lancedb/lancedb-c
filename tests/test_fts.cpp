@@ -2120,7 +2120,9 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - structured FTS candidate li
   const auto query_vector = vector_for_row(0);
 
   SECTION("a zero ceiling leaves the vector contribution") {
-    auto* fts_query = make_match_query("common", "text");
+    auto options = lancedb_fts_match_options_default();
+    options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+    auto* fts_query = make_match_query("common doc7", "text", &options);
     set_fts_candidate_limit(fts_query, 0);
 
     LanceDBVectorQuery* query = lancedb_vector_query_new(
@@ -2141,10 +2143,22 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - structured FTS candidate li
     REQUIRE(result.num_rows() == 3);
     REQUIRE(ids_of(result) == std::set<int32_t>{0, 1, 2});
     REQUIRE(result.schema->GetFieldByName("_relevance_score") != nullptr);
+
+    // The full-text leg is empty, so each row keeps only its vector RRF score.
+    // Dropping the zero ceiling would add the AND match on row 7 and displace
+    // row 2 from this page.
+    const auto vector_ids = ordered_ids_of(run_vector_leg_query(table(), query_vector, 3));
+    REQUIRE(vector_ids == std::vector<int32_t>{0, 1, 2});
+    const auto expected = expected_rrf_scores(vector_ids, {}, kDefaultRrfK);
+    for (const auto& [id, score] : expected) {
+      REQUIRE(std::abs(relevance_score_of(result, id) - score) < 1e-6F);
+    }
   }
 
   SECTION("builders keep the limit captured at attach time") {
-    auto* fts_query = make_match_query("common", "text");
+    auto options = lancedb_fts_match_options_default();
+    options.term_operator = LANCEDB_FTS_OPERATOR_AND;
+    auto* fts_query = make_match_query("common doc7", "text", &options);
     set_fts_candidate_limit(fts_query, 0);
 
     LanceDBQuery* plain = lancedb_query_new(table());
@@ -2168,8 +2182,9 @@ TEST_CASE_METHOD(FtsFixture, "LanceDB Vector Query - structured FTS candidate li
         == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
 
-    // Later changes to the handle must not reach either builder, which copied
-    // the wrapper when it was attached.
+    // The AND fixture matches row 7. Later changes to the handle must not
+    // reach either builder: a missed zero ceiling would return row 7 from the
+    // plain builder and add it to the hybrid page.
     set_fts_candidate_limit(fts_query, 2);
     lancedb_fts_query_free(fts_query);
 
