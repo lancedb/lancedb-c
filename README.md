@@ -46,7 +46,7 @@ import library name matters, see [Windows (MSVC)](#windows-msvc).
 
 ### Building from source
 
-- Rust 1.95.0 or newer (`rustc` and `cargo`; the minimum declared by the locked
+- Rust 1.98.0 or newer (`rustc` and `cargo`; the minimum declared by the locked
   dependency graph).
 - CMake 3.22 or later.
 - A C and C++ compiler. CMake enables both languages even when examples and
