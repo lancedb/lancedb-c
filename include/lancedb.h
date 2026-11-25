@@ -2223,6 +2223,7 @@ void lancedb_registry_free(LanceDBObjectStoreRegistry* registry);
  * @param scheme - URL scheme to register the provider for (e.g., "s3")
  * @param provider - pointer to LanceDBObjectStoreProvider. Ownership is transferred
  *                   to the registry; do not free the provider after this call.
+ * @param error_message - optional pointer to receive detailed error message (NULL to ignore)
  *
  * @return 0 on success, -1 on failure
  *
