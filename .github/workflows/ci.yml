@@ -198,12 +198,53 @@ jobs:
       - name: Test
         run: ctest --preset "${{ matrix.preset }}" -j
 
+      - name: Install Clang sanitizer toolchain
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: |
+          sudo apt-get install -y clang llvm
+          clang --version
+          llvm-symbolizer --version
+
+      - name: Configure sanitizer build
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: |
+          cmake -S . -B build-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=ON \
+            -DBUILD_CONSUMER_TEST=ON \
+            -DVALGRIND_EXECUTABLE=OFF \
+            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target"
+
+      - name: Build sanitizer consumers
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: cmake --build build-sanitize --verbose
+
+      - name: Show sanitizer test roster
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: ctest --test-dir build-sanitize -N -V
+
+      - name: Run sanitizer tests
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure --no-tests=error
+
       - name: Show test diagnostics
         if: failure()
         run: |
-          if [ -f build/Testing/Temporary/LastTest.log ]; then
-            cat build/Testing/Temporary/LastTest.log
-          fi
+          for log in build/Testing/Temporary/LastTest.log \
+                     build-sanitize/Testing/Temporary/LastTest.log; do
+            if [ -f "$log" ]; then
+              echo "::group::$log"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+          done
           for log in build/valgrind_*.txt; do
             [ -e "$log" ] || continue
             echo "::group::$log"
@@ -218,6 +259,7 @@ jobs:
           name: test-diagnostics-${{ matrix.os }}-${{ matrix.lib_type }}
           path: |
             build/Testing/Temporary/LastTest.log
+            build-sanitize/Testing/Temporary/LastTest.log
             build/valgrind_*.txt
           if-no-files-found: ignore
           retention-days: 7
