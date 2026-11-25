@@ -404,8 +404,9 @@ jobs:
     # Compatibility-only: the schedule and the manual dispatch run it.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # The cold MinGW cross build took 32 minutes on the current cache key.
-    timeout-minutes: 60
+    # A MinGW run with both the Rust and Arrow caches missing took 57m36s.
+    # Keep headroom for the same double-miss path.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v7
