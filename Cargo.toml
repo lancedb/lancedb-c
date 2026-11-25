@@ -11,7 +11,7 @@ license = "Apache-2.0"
 keywords = ["database", "vector", "search", "c", "ffi"]
 categories = ["database", "api-bindings"]
 publish = false
-rust-version = "1.95.0"
+rust-version = "1.98.0"
 
 [workspace]
 members = ["examples/external_provider"]
@@ -38,10 +38,10 @@ fp16kernels = ["lancedb/fp16kernels"]
 [dependencies]
 tokio = { version = "1.23", features = ["rt-multi-thread"] }
 libc = "0.2"
-lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.30", default-features = false }
-lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.35" }
-lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.35" }
-lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.0.0-beta.35" }
+lancedb = { git = "https://github.com/lancedb/lancedb", tag = "v0.42.0-beta.32", default-features = false }
+lance = { git = "https://github.com/lance-format/lance.git", tag = "v15.1.0-beta.2" }
+lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.1.0-beta.2" }
+lance-namespace = { git = "https://github.com/lance-format/lance.git", tag = "v15.1.0-beta.2" }
 arrow-array = "59.2.0"
 arrow-schema = "59.2.0"
 datafusion-functions-json = "0.55"
