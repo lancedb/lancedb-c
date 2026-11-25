@@ -3,8 +3,34 @@ name: Documentation
 on:
   push:
     branches: [main]
+    # The docs build reads docs/, the public header, Doxyfile, the CMake and
+    # pkg-config inputs, the hello.c literalinclude, and the version helper.
+    paths:
+      - 'docs/**'
+      - 'Doxyfile'
+      - 'include/lancedb.h'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'lancedb.pc.in'
+      - 'examples/hello.c'
+      - 'rust-toolchain.toml'
+      - '.github/scripts/version.py'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
+    # Keep the same input list for pull requests so code-only changes do not
+    # rebuild the documentation site.
+    paths:
+      - 'docs/**'
+      - 'Doxyfile'
+      - 'include/lancedb.h'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'lancedb.pc.in'
+      - 'examples/hello.c'
+      - 'rust-toolchain.toml'
+      - '.github/scripts/version.py'
+      - '.github/workflows/docs.yml'
 
 # Pull requests build independently and cancel superseded runs for the same PR.
 # Pushes to main share the "pages" group so deployments keep their current order
