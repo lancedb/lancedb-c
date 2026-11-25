@@ -94,28 +94,32 @@ def pkg_config_output(pkg_config: str, env: dict[str, str], *arguments: str) -> 
 
 
 def pkg_config_variable(pkg_config: str, env: dict[str, str], name: str) -> Path:
-    # pkg-config shell-escapes variable values, so a staged path containing
-    # whitespace arrives escaped and must be split like the flag output.
+    # pkgconf escapes whitespace in variable values; pkg-config 0.29 returns
+    # the raw value, which has to be taken whole.
     value = pkg_config_output(pkg_config, env, f"--variable={name}")
-    parsed = shlex.split(value)
-    if len(parsed) != 1:
-        raise SystemExit(f"pkg-config reports an unparsable {name}: {value!r}")
-    return Path(parsed[0])
+    if not value:
+        raise SystemExit(f"pkg-config reports an empty {name}")
+    try:
+        parsed = shlex.split(value)
+    except ValueError:
+        parsed = []
+    if len(parsed) == 1:
+        return Path(parsed[0])
+    return Path(value)
 
 
-def flag_search_directories(flags: list[str]) -> list[Path]:
+def flag_search_directories(flags: list[str], option: str) -> list[Path]:
     directories: list[Path] = []
     index = 0
     while index < len(flags):
         flag = flags[index]
-        if flag in ("-I", "-isystem", "-L") and index + 1 < len(flags):
-            directories.append(Path(flags[index + 1]))
-            index += 2
-            continue
-        for option in ("-isystem", "-I", "-L"):
-            if flag.startswith(option) and len(flag) > len(option):
-                directories.append(Path(flag[len(option) :]))
-                break
+        if flag == option:
+            if index + 1 < len(flags):
+                directories.append(Path(flags[index + 1]))
+                index += 2
+                continue
+        elif flag.startswith(option) and len(flag) > len(option):
+            directories.append(Path(flag[len(option) :]))
         index += 1
     return directories
 
@@ -138,7 +142,11 @@ def check_shared_library_origin(
         if names.returncode != 0:
             raise SystemExit(f"otool -L failed for {binary}:\n{names.stderr}")
         install_name = ""
-        for line in names.stdout.splitlines():
+        # otool -L prints a heading line for the binary before its indented
+        # load-command entries; only the entries name the install name.
+        for line in names.stdout.splitlines()[1:]:
+            if not line[:1].isspace():
+                continue
             entry = line.strip()
             if "liblancedb" in entry:
                 install_name = entry.split(" (", 1)[0].strip()
@@ -162,9 +170,11 @@ def check_shared_library_origin(
                         rpath = candidate[len("path ") :].split(" (offset", 1)[0]
                         rpaths.append(Path(os.path.normpath(rpath.strip())))
                         break
-            if expected not in rpaths:
+            # dyld resolves @rpath through the load-command order, so the
+            # staged directory has to come first, not merely be present.
+            if not rpaths or rpaths[0] != expected:
                 raise SystemExit(
-                    f"{binary} resolves lancedb through {rpaths}, expected {expected}"
+                    f"{binary} resolves lancedb through {rpaths}, expected {expected} first"
                 )
             return
         if Path(os.path.normpath(install_name)).parent != expected:
@@ -207,9 +217,9 @@ def verify_pkg_config_consumer(
     """Compile, link and run the C17 consumer through the installed .pc file.
 
     This is a Unix check: the probe consumes only the pkg-config flags. It
-    restricts pkg-config to the staged directory, drops inherited loader paths
-    and requires the effective header, library and runtime search directories
-    to stay inside the staged prefix, so a missing, broken or redirected file
+    restricts pkg-config to the staged directory, clears inherited loader and
+    compiler search paths and requires the effective include and library search
+    directories to be the staged ones, so a missing, broken or redirected file
     cannot silently use a system installation.
     """
     pkg_config = shutil.which("pkg-config") or shutil.which("pkgconf")
@@ -224,9 +234,18 @@ def verify_pkg_config_consumer(
     env = os.environ.copy()
     env["PKG_CONFIG_PATH"] = str(pkgconfig_dir)
     env["PKG_CONFIG_LIBDIR"] = str(pkgconfig_dir)
-    env.pop("PKG_CONFIG_SYSROOT_DIR", None)
-    env.pop("LD_LIBRARY_PATH", None)
-    env.pop("DYLD_LIBRARY_PATH", None)
+    for name in (
+        "PKG_CONFIG_SYSROOT_DIR",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        # Ambient compiler search paths must not resolve headers or archives
+        # outside the staged installation.
+        "LIBRARY_PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+    ):
+        env.pop(name, None)
 
     # The .pc file derives its prefix from its own location, so a staged or
     # relocated installation must report the staged prefix here.
@@ -235,24 +254,37 @@ def verify_pkg_config_consumer(
         raise SystemExit(
             f"pkg-config reports prefix {reported_prefix}, expected {prefix.resolve()}"
         )
-    for name in ("includedir", "libdir"):
-        directory = pkg_config_variable(pkg_config, env, name)
+    staged_include = pkg_config_variable(pkg_config, env, "includedir")
+    staged_libdir = pkg_config_variable(pkg_config, env, "libdir")
+    for name, directory in (("includedir", staged_include), ("libdir", staged_libdir)):
         if not is_within(directory, prefix):
             raise SystemExit(
                 f"pkg-config {name} {directory} is outside the staged prefix {prefix}"
             )
-    reported_libdir = pkg_config_variable(pkg_config, env, "libdir")
 
     lib_arguments = ["--libs"]
     if not shared:
         lib_arguments.append("--static")
     cflags = shlex.split(pkg_config_output(pkg_config, env, "--cflags"))
     libs = shlex.split(pkg_config_output(pkg_config, env, *lib_arguments))
-    for directory in flag_search_directories([*cflags, *libs]):
+    include_directories = [
+        *flag_search_directories(cflags, "-I"),
+        *flag_search_directories(cflags, "-isystem"),
+    ]
+    library_directories = flag_search_directories(libs, "-L")
+    for directory in (*include_directories, *library_directories):
         if not is_within(directory, prefix):
             raise SystemExit(
                 f"pkg-config flags point outside the staged prefix: {directory}"
             )
+    if staged_include.resolve() not in [
+        directory.resolve() for directory in include_directories
+    ]:
+        raise SystemExit("pkg-config cflags do not search the staged include directory")
+    if staged_libdir.resolve() not in [
+        directory.resolve() for directory in library_directories
+    ]:
+        raise SystemExit("pkg-config libs do not search the staged library directory")
 
     consumer_binary = work_dir / "pkg-config-consumer"
     compile_command = [
@@ -263,11 +295,14 @@ def verify_pkg_config_consumer(
         "-o",
         str(consumer_binary),
         *libs,
-        f"-Wl,-rpath,{reported_libdir}",
     ]
+    if shared:
+        # Forward the rpath as separate linker arguments so staged paths with
+        # spaces or commas stay one argument instead of splitting on commas.
+        compile_command += ["-Xlinker", "-rpath", "-Xlinker", str(staged_libdir)]
     run(compile_command, env=env)
     if shared:
-        check_shared_library_origin(consumer_binary, env, reported_libdir)
+        check_shared_library_origin(consumer_binary, env, staged_libdir)
     run([str(consumer_binary), str(work_dir / "pkg-config-consumer-db")], env=env)
 
 

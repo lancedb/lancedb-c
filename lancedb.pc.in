@@ -1,7 +1,9 @@
 prefix=@LANCEDB_PKGCONFIG_PREFIX@
 exec_prefix=${prefix}
-libdir=@LANCEDB_PKGCONFIG_LIBDIR@
-includedir=@LANCEDB_PKGCONFIG_INCLUDEDIR@
+# Quote the directory values so pkg-config 0.29 and pkgconf both keep
+# whitespace intact when the flags below expand them.
+libdir="@LANCEDB_PKGCONFIG_LIBDIR@"
+includedir="@LANCEDB_PKGCONFIG_INCLUDEDIR@"
 
 Name: lancedb
 Description: LanceDB C/C++ bindings
