@@ -29,8 +29,11 @@ CMake configure step after changing it.
 ## Package contract
 
 The `Shared Library Packages` workflow builds and tests five native targets.
-It runs for `v*` tags and explicit dispatches; pull requests run the fast
-packaging and release fixture checks through `CI`.
+It runs only for explicit dispatches on a branch or tag; pull requests run the
+fast packaging and release fixture checks through `CI`. A dispatch on a branch
+builds and verifies the packages without publishing. A dispatch on a tag with
+`publish_release` enabled publishes the GitHub Release after all five packages
+pass.
 
 | Target | Runner | Package |
 | --- | --- | --- |
@@ -78,10 +81,11 @@ belong to a source install or to a package that explicitly contains them.
 2. Create an annotated or lightweight tag such as `v0.1.0-preview.3` on that
    commit. Do not tag a parent, another branch, or a commit that is not the
    package head.
-3. Push the tag. This builds and verifies the five packages and uploads them as
-   CI artifacts, but it does not publish a GitHub Release.
-4. To publish, dispatch `Shared Library Packages` on the exact tag with the
-   `publish_release` Boolean enabled.
+3. Push the tag. The push does not start a workflow.
+4. Dispatch `Shared Library Packages` on the exact tag. Without
+   `publish_release`, this builds and verifies the five packages and uploads
+   them as CI artifacts. With `publish_release` enabled, it also publishes the
+   GitHub Release.
 
 The workflow fetches the tag and requires the tag's peeled commit to match the
 checked-out commit, then uses the tag version for the build, manifest, installed
@@ -95,14 +99,16 @@ verifies the archive with a real consumer before uploading it.
 After all five package jobs pass, the publish job re-verifies every archive,
 manifest and checksum against the exact tag, creates a draft release, uploads
 the five archives, their `.sha256` files and the combined `SHA256SUMS`, and only
-then publishes the release. Publication is limited to preview tags. A tag push
-or dispatch without `publish_release` only produces CI artifacts.
+then publishes the release. Publication is limited to preview tags. A dispatch
+without `publish_release` only produces CI artifacts.
 
 ## Publication behavior and retries
 
 A retry reuses an existing draft. The workflow verifies the draft tag and
 identity, checks every existing asset's digest, and uploads only the missing
-assets. A published release is never replaced. If the draft has already become
+assets. Dispatching the same tag while a run is active queues the new run
+instead of cancelling the package uploads or publication in progress. A
+published release is never replaced. If the draft has already become
 public, stop rather than editing or replacing it.
 
 If an upload is interrupted after GitHub creates an empty `starter` asset, the

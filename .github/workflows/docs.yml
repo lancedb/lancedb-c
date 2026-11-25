@@ -21,9 +21,12 @@ permissions:
 jobs:
   build-docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -46,9 +49,7 @@ jobs:
           cmake .. -DBUILD_DOCS=ON
 
       - name: Build documentation
-        run: |
-          cd build
-          make docs
+        run: cmake --build build --target docs
 
       - name: Upload documentation artifacts
         if: github.event_name == 'pull_request'
@@ -60,7 +61,7 @@ jobs:
 
       - name: Upload artifact to Pages
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: build/docs/html
 
@@ -72,6 +73,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: build-docs
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       pages: write
