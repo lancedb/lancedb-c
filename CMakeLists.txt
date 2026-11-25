@@ -103,8 +103,18 @@ endif()
 # Cargo writes every Rust artifact into one target directory. CI points this
 # at the repository root so its Rust cache restores the same directory the
 # CMake builds write; local builds keep the default inside the build tree.
-set(LANCEDB_CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/target" CACHE PATH
-  "Cargo target directory used by all Rust builds")
+# A relative value resolves against the build directory so Cargo, Ninja and
+# the install rules all name the same absolute path. The cache entry is a
+# STRING so CMake keeps the typed value as written.
+set(LANCEDB_CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/target" CACHE STRING
+  "Cargo target directory used by all Rust builds; a relative path resolves against the build directory")
+if("${LANCEDB_CARGO_TARGET_DIR}" STREQUAL "")
+  message(FATAL_ERROR "LANCEDB_CARGO_TARGET_DIR must name a directory")
+endif()
+if(NOT IS_ABSOLUTE "${LANCEDB_CARGO_TARGET_DIR}")
+  get_filename_component(LANCEDB_CARGO_TARGET_DIR
+    "${LANCEDB_CARGO_TARGET_DIR}" ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
+endif()
 
 set(RUST_TARGET_DIR "${LANCEDB_CARGO_TARGET_DIR}")
 
