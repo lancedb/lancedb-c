@@ -188,13 +188,28 @@ jobs:
       - name: Configure CMake
         run: cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
 
+      # The static leg's install and C17 checks need the final library. Running
+      # them before the full build keeps check-install from switching the Cargo
+      # unit back after the provider edge, which would compile lancedb-c a third
+      # time on a warm cache. The staged library, C17 consumer and CTest roster
+      # are unchanged; only the order inside the job changes.
+      - name: Check installed package consumers (static, before build)
+        if: matrix.lib_type == 'static'
+        run: cmake --build --preset "${{ matrix.preset }}" --target check-install
+
+      - name: Check C17 consumer (static, before build)
+        if: matrix.lib_type == 'static'
+        run: cmake --build --preset "${{ matrix.preset }}" --target check-c17
+
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}"
 
       - name: Check installed package consumers
+        if: matrix.lib_type == 'shared'
         run: cmake --build --preset "${{ matrix.preset }}" --target check-install
 
       - name: Check C17 consumer
+        if: matrix.lib_type == 'shared'
         run: cmake --build --preset "${{ matrix.preset }}" --target check-c17
 
       - name: Test
