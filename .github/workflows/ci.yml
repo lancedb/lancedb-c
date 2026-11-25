@@ -185,10 +185,18 @@ jobs:
       - name: Build
         run: ninja -C build
 
+      - name: Check installed package consumers
+        run: ninja -C build check-install
+
+      - name: Check C17 consumer
+        run: ninja -C build check-c17
+
+      - name: Test
+        run: ctest --test-dir build -j --output-on-failure
+
       - name: Install Clang sanitizer toolchain
         if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
         run: |
-          sudo apt-get update
           sudo apt-get install -y clang llvm
           clang --version
           llvm-symbolizer --version
@@ -221,15 +229,6 @@ jobs:
         env:
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build-sanitize --output-on-failure --no-tests=error
-
-      - name: Check installed package consumers
-        run: ninja -C build check-install
-
-      - name: Check C17 consumer
-        run: ninja -C build check-c17
-
-      - name: Test
-        run: ctest --test-dir build -j --output-on-failure
 
       - name: Show test diagnostics
         if: failure()
