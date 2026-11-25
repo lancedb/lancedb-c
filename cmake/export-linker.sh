@@ -294,6 +294,10 @@ if [[ -n "$kind" ]]; then
   fi
 fi
 
+if [[ -n "$kind" && -n "${LANCEDB_CDYLIB_LINK_ARG:-}" ]]; then
+  args+=("${LANCEDB_CDYLIB_LINK_ARG}")
+fi
+
 if [[ -n "${LANCEDB_REAL_LINKER:-}" ]]; then
   linker=("${LANCEDB_REAL_LINKER}")
 elif [[ -n "${CC:-}" && -x "${CC}" ]]; then

@@ -100,7 +100,13 @@ if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
   endif()
 endif()
 
-set(RUST_TARGET_DIR target)
+# Cargo writes every Rust artifact into one target directory. CI points this
+# at the repository root so its Rust cache restores the same directory the
+# CMake builds write; local builds keep the default inside the build tree.
+set(LANCEDB_CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/target" CACHE PATH
+  "Cargo target directory used by all Rust builds")
+
+set(RUST_TARGET_DIR "${LANCEDB_CARGO_TARGET_DIR}")
 
 if(RUST_TARGET_TRIPLE)
   set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/${RUST_TARGET_TRIPLE}")
@@ -136,10 +142,10 @@ if(APPLE)
 endif()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/${RUST_TARGET_DIR}/debug")
+  set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/debug")
   set(RUST_BUILD_TYPE "")
 else()
-  set(RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/${RUST_TARGET_DIR}/release")
+  set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/release")
   set(RUST_BUILD_TYPE "--release")
 endif()
 option(BUILD_SHARED_LIBS "Build shared library (OFF for static)" ON)
@@ -239,39 +245,62 @@ configure_file(lancedb.pc.in "${CMAKE_BINARY_DIR}/lancedb.pc" @ONLY)
 # Linker metadata is part of the built artifact, not only the release
 # workflow. Linux records the versioned SONAME and macOS records an @rpath
 # install name so local installs and prebuilt packages resolve the same way.
-set(LANCEDB_RUST_LINK_ARGS)
+#
+# The export wrapper replaces rustc's generated export list, so it must be the
+# linker for the lancedb link. Select it through Cargo's target linker
+# configuration instead of `cargo rustc --` arguments: those arguments change
+# the unit profile, so a provider build that pulls lancedb-c in as a
+# dependency rebuilds the crate with a plain profile and the next rust-lib run
+# undoes that again. The SONAME reaches the wrapper through the rust-lib
+# command environment, because a build-script link argument would also reach
+# the provider cdylib and give it lancedb's SONAME.
+set(LANCEDB_EXPORT_LINKER "")
 set(LANCEDB_EXPORT_VERIFY_TARGET "")
 if(BUILD_SHARED_LIBS)
   if(WIN32 AND MSVC AND CMAKE_HOST_WIN32)
     set(LANCEDB_EXPORT_VERIFY_TARGET "windows")
-    list(APPEND LANCEDB_RUST_LINK_ARGS
-      "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.cmd")
+    set(LANCEDB_EXPORT_LINKER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.cmd")
   elseif(APPLE)
     set(LANCEDB_EXPORT_VERIFY_TARGET "darwin")
-    list(APPEND LANCEDB_RUST_LINK_ARGS
-      "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
+    set(LANCEDB_EXPORT_LINKER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
   elseif(UNIX)
     set(LANCEDB_EXPORT_VERIFY_TARGET "linux")
-    list(APPEND LANCEDB_RUST_LINK_ARGS
-      "-C" "linker=${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
+    set(LANCEDB_EXPORT_LINKER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/export-linker.sh")
   endif()
 endif()
-if(APPLE)
-  list(APPEND LANCEDB_RUST_LINK_ARGS
-    "-C" "link-arg=-Wl,-install_name,@rpath/${LANCEDB_SHARED_LIBRARY_NAME}")
-elseif(UNIX)
-  list(APPEND LANCEDB_RUST_LINK_ARGS
-    "-C" "link-arg=-Wl,-soname,${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}")
+set(LANCEDB_CDYLIB_LINK_ARG "")
+if(BUILD_SHARED_LIBS)
+  if(APPLE)
+    set(LANCEDB_CDYLIB_LINK_ARG "-Wl,-install_name,@rpath/${LANCEDB_SHARED_LIBRARY_NAME}")
+  elseif(UNIX)
+    set(LANCEDB_CDYLIB_LINK_ARG "-Wl,-soname,${LANCEDB_INSTALLED_SHARED_LIBRARY_NAME}")
+  endif()
+endif()
+
+# Every Cargo invocation that compiles lancedb-c presents these inputs, so the
+# same crate unit is reused instead of rebuilt per invocation. The shared
+# library link argument is not part of this list: the export wrapper appends it
+# to the rust-lib link only, because a Cargo link argument from build.rs would
+# also reach the provider cdylib link.
+set(LANCEDB_CARGO_BUILD_ENV
+  "LANCEDB_BUILD_VERSION=${LANCEDB_VERSION}")
+if(LANCEDB_EXPORT_LINKER)
+  string(TOUPPER "${RUST_TARGET_TRIPLE}" LANCEDB_LINKER_TRIPLE)
+  string(REPLACE "-" "_" LANCEDB_LINKER_TRIPLE "${LANCEDB_LINKER_TRIPLE}")
+  list(APPEND LANCEDB_CARGO_BUILD_ENV
+    "CARGO_TARGET_${LANCEDB_LINKER_TRIPLE}_LINKER=${LANCEDB_EXPORT_LINKER}")
 endif()
 
 # rust-lib target
-set(CARGO_BUILD_COMMAND cargo rustc ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --lib --target-dir "${CMAKE_BINARY_DIR}/target")
-if(LANCEDB_RUST_LINK_ARGS)
-  list(APPEND CARGO_BUILD_COMMAND -- ${LANCEDB_RUST_LINK_ARGS})
+set(CARGO_BUILD_COMMAND cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --lib --target-dir "${LANCEDB_CARGO_TARGET_DIR}")
+set(CARGO_BUILD_ENV ${LANCEDB_CARGO_BUILD_ENV})
+if(LANCEDB_CDYLIB_LINK_ARG)
+  list(APPEND CARGO_BUILD_ENV
+    "LANCEDB_CDYLIB_LINK_ARG=${LANCEDB_CDYLIB_LINK_ARG}")
 endif()
-# The resolved version changes the embedded runtime string. Pass it as a
-# private build variable so a cached Cargo build rebuilds when it changes.
-set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env "LANCEDB_BUILD_VERSION=${LANCEDB_VERSION}" ${CARGO_BUILD_COMMAND})
+# The resolved version changes the embedded runtime string; the private build
+# variables above make a cached Cargo build rebuild when they change.
+set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env ${CARGO_BUILD_ENV} ${CARGO_BUILD_COMMAND})
 add_custom_target(rust-lib ALL
   COMMAND ${CARGO_BUILD_COMMAND}
   ${LANCEDB_ALIAS_COMMAND}
@@ -348,7 +377,9 @@ if(BUILD_EXAMPLES)
   )
 
   # external_provider helper crate (provides external_object_store_provider_create)
-  set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${CMAKE_BINARY_DIR}/target")
+  # Share every CMake-resolved input with the provider build so its cargo
+  # invocation reuses the lancedb-c unit instead of invalidating it.
+  set(EXT_PROVIDER_CARGO_CMD ${CMAKE_COMMAND} -E env ${LANCEDB_CARGO_BUILD_ENV} cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${LANCEDB_CARGO_TARGET_DIR}")
   if(WIN32)
     set(EXT_PROVIDER_SHARED_PATH "${RUST_TARGET_DIR}/lancedb_external_provider${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(EXT_PROVIDER_IMPORT_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb_external_provider${CMAKE_IMPORT_LIBRARY_SUFFIX}")
@@ -1052,7 +1083,7 @@ endif()
 
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target clean
-  COMMAND cargo clean --target-dir "${CMAKE_BINARY_DIR}/target"
+  COMMAND cargo clean --target-dir "${LANCEDB_CARGO_TARGET_DIR}"
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Cleaning all build artifacts..."
 )
@@ -1060,7 +1091,7 @@ add_custom_target(clean-all
 # Check target for code quality
 add_custom_target(check
   COMMAND cargo fmt --check
-  COMMAND cargo clippy --all-targets -- -D warnings
+  COMMAND ${CMAKE_COMMAND} -E env ${LANCEDB_CARGO_BUILD_ENV} cargo clippy --all-targets -- -D warnings
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Running Rust formatting and linting checks..."
 )
