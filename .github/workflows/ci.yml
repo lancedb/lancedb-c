@@ -183,8 +183,10 @@ jobs:
         run: |
           brew install apache-arrow protobuf boost
 
+      # CI-only: CMake >= 3.24 promotes the existing -Wall -Wextra / /W4
+      # diagnostics to errors. The project and local presets keep 3.22.
       - name: Configure CMake
-        run: cmake --preset "${{ matrix.preset }}"
+        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
 
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}"
@@ -306,7 +308,7 @@ jobs:
           arch: amd64
 
       - name: Configure CMake (Debug)
-        run: cmake --preset ci-windows-msvc
+        run: cmake --preset ci-windows-msvc -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
 
       - name: Build
         run: cmake --build --preset ci-windows-msvc
@@ -360,6 +362,7 @@ jobs:
           cd build
           cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
             -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
             -DLANCEDB_CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
 
       - name: Build
@@ -444,6 +447,7 @@ jobs:
           cmake .. -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/toolchain.cmake \
             -DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/arrow-install \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
             -DLANCEDB_CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target \
             -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
 
