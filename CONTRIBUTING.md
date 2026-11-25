@@ -97,8 +97,8 @@ ninja -C build check-install  # installed C and C++ find_package consumers
 
 The dedicated `Lint and ABI checks` job runs `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, both `check-abi` data models, the
-packaging and release fixtures, and a diff-scoped `clang-format-diff` check on
-changed C and C++ files. The native build matrix no longer repeats the Rust
+packaging and release fixtures, and a diff-scoped C/C++ formatting check on
+changed lines. The native build matrix no longer repeats the Rust
 format, lint or ABI checks.
 
 `check-install` stages the current build into a temporary prefix and runs C and

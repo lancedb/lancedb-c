@@ -9,7 +9,6 @@ on:
       - '*.md'
       - 'docs/**'
       - 'Doxyfile'
-      - 'LICENSE'
       - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
@@ -19,7 +18,6 @@ on:
       - '*.md'
       - 'docs/**'
       - 'Doxyfile'
-      - 'LICENSE'
       - '.github/workflows/docs.yml'
 
 permissions:
@@ -88,34 +86,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
-          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           case "${EVENT_NAME}" in
             pull_request) base="${PR_BASE_SHA}" ;;
             push) base="${PUSH_BEFORE_SHA}" ;;
-            merge_group) base="${MERGE_GROUP_BASE_SHA}" ;;
             *)
               echo "::error::unsupported event ${EVENT_NAME} for the diff-scoped format check"
               exit 1
               ;;
           esac
-          if [ -z "${base}" ] || [[ "${base}" =~ ^0+$ ]]; then
-            echo "no base commit is available for ${EVENT_NAME}; skipping the diff-scoped format check"
-            exit 0
-          fi
-          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "::error::base commit ${base} is not available"
-            exit 1
-          fi
-          cpp_paths=('*.c' '*.h' '*.cc' '*.cpp' '*.cxx' '*.hpp' '*.hh' '*.hxx')
-          if git diff --quiet --diff-filter=ACMR -M "${base}" HEAD -- "${cpp_paths[@]}"; then
-            echo "no C or C++ changes to format"
-            exit 0
-          fi
           clang-format --version
-          git diff -U0 --no-color --diff-filter=ACMR -M "${base}" HEAD -- "${cpp_paths[@]}" \
-            | clang-format-diff -p1
+          python3 .github/scripts/check_format.py --repo . --base "${base}"
 
       - name: Check C ABI declarations (host and MSVC LLP64)
         run: |
