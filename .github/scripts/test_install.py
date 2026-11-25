@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The LanceDB Authors
-"""Install a configured build and verify find_package consumers.
+"""Install a configured build and verify installed package consumers.
 
 This checks the installed layout rather than the build tree: it stages the
 current build under a temporary prefix, configures small C and C++ consumers
-with ``find_package(lancedb CONFIG REQUIRED)``, then builds and runs both.
+with ``find_package(lancedb CONFIG REQUIRED)``, then builds and runs both. On
+Unix it also compiles, links and runs a C consumer through the installed
+``lancedb.pc`` using ``pkg-config`` (``--static`` for static builds).
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -57,6 +60,83 @@ def installed_version(prefix: Path) -> str:
     if not match:
         raise SystemExit("installed header has no LANCEDB_VERSION_STRING")
     return match.group(1)
+
+
+def build_is_shared(build_dir: Path) -> bool:
+    value = cache_value(build_dir, "BUILD_SHARED_LIBS").strip().upper()
+    return value not in ("OFF", "0", "FALSE", "NO")
+
+
+def pkg_config_output(pkg_config: str, env: dict[str, str], *arguments: str) -> str:
+    command = [pkg_config, *arguments, "lancedb"]
+    completed = subprocess.run(command, env=env, text=True, capture_output=True)
+    if completed.returncode != 0:
+        print(completed.stdout)
+        print(completed.stderr, file=sys.stderr)
+        raise SystemExit(f"pkg-config {' '.join(arguments)} lancedb failed")
+    return completed.stdout.strip()
+
+
+def verify_pkg_config_consumer(
+    source_dir: Path,
+    work_dir: Path,
+    prefix: Path,
+    installed_libdir: Path,
+    shared: bool,
+) -> None:
+    """Compile, link and run the C17 consumer through the installed .pc file.
+
+    This is a Unix check: the probe consumes only the pkg-config flags. It
+    restricts pkg-config to the staged directory and drops inherited loader
+    paths, so a missing or broken staged file cannot fall back to a system
+    installation, and the binary must load the staged library through the
+    reported libdir alone.
+    """
+    pkg_config = shutil.which("pkg-config") or shutil.which("pkgconf")
+    if pkg_config is None:
+        raise SystemExit("pkg-config or pkgconf is required to verify lancedb.pc")
+
+    pkgconfig_dir = installed_libdir / "pkgconfig"
+    pc_file = pkgconfig_dir / "lancedb.pc"
+    if not pc_file.is_file():
+        raise SystemExit(f"installed pkg-config file is missing: {pc_file}")
+
+    env = os.environ.copy()
+    env["PKG_CONFIG_PATH"] = str(pkgconfig_dir)
+    env["PKG_CONFIG_LIBDIR"] = str(pkgconfig_dir)
+    env.pop("PKG_CONFIG_SYSROOT_DIR", None)
+    env.pop("LD_LIBRARY_PATH", None)
+    env.pop("DYLD_LIBRARY_PATH", None)
+
+    # The .pc file derives its prefix from its own location, so a staged or
+    # relocated installation must report the staged prefix here.
+    reported_prefix = Path(pkg_config_output(pkg_config, env, "--variable=prefix"))
+    if reported_prefix.resolve() != prefix.resolve():
+        raise SystemExit(
+            f"pkg-config reports prefix {reported_prefix}, expected {prefix.resolve()}"
+        )
+    reported_libdir = Path(pkg_config_output(pkg_config, env, "--variable=libdir"))
+
+    lib_arguments = ["--libs"]
+    if not shared:
+        lib_arguments.append("--static")
+    cflags = shlex.split(pkg_config_output(pkg_config, env, "--cflags"))
+    libs = shlex.split(pkg_config_output(pkg_config, env, *lib_arguments))
+
+    compiler = os.environ.get("CC", "cc")
+    consumer_binary = work_dir / "pkg-config-consumer"
+    compile_command = [
+        compiler,
+        "-std=c17",
+        *cflags,
+        str(source_dir / "tests" / "c17_consumer.c"),
+        "-o",
+        str(consumer_binary),
+        *libs,
+        f"-Wl,-rpath,{reported_libdir}",
+    ]
+    run(compile_command, env=env)
+    run([str(consumer_binary), str(work_dir / "pkg-config-consumer-db")], env=env)
 
 
 def configure_version_case(
@@ -185,6 +265,15 @@ def main() -> int:
     )
     run([str(c_consumer), str(work_dir / "c-consumer-db")], env=env)
     run([str(cxx_consumer), str(work_dir / "cxx-consumer-db")], env=env)
+
+    if os.name != "nt":
+        verify_pkg_config_consumer(
+            source_dir,
+            work_dir,
+            prefix,
+            installed_libdir,
+            build_is_shared(build_dir),
+        )
 
     version = installed_version(prefix)
     target_os = args.export_target or None

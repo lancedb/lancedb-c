@@ -202,7 +202,7 @@ jobs:
           "https://packages.apache.org/artifactory/arrow/almalinux/10/apache-arrow-release-latest.rpm"
 
       - name: Install build tools
-        run: dnf install -y gcc gcc-c++ cmake ninja-build protobuf-compiler protobuf-devel rust cargo arrow-devel valgrind git boost-devel
+        run: dnf install -y gcc gcc-c++ cmake ninja-build protobuf-compiler protobuf-devel rust cargo arrow-devel pkgconf-pkg-config valgrind git boost-devel
 
       - name: Configure CMake
         run: |
