@@ -52,10 +52,12 @@ jobs:
         run: |
           curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
             --fail --location --silent --show-error \
-            --output /usr/local/bin/cbindgen \
+            --output cbindgen \
             https://github.com/mozilla/cbindgen/releases/download/0.29.4/cbindgen-ubuntu22.04
-          echo "27ac237e2ad3ffaffc8ecce0c03e3caa1d1b09e691906c3cb0967367ff6d783d  /usr/local/bin/cbindgen" | sha256sum --check --strict
-          chmod +x /usr/local/bin/cbindgen
+          echo "27ac237e2ad3ffaffc8ecce0c03e3caa1d1b09e691906c3cb0967367ff6d783d  cbindgen" | sha256sum --check --strict
+          chmod +x cbindgen
+          sudo install -m 0755 cbindgen /usr/local/bin/cbindgen
+          rm -f cbindgen
           cbindgen --version
 
       - name: Install dependencies (Ubuntu)
