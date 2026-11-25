@@ -100,7 +100,32 @@ if(CMAKE_CROSSCOMPILING AND NOT RUST_TARGET_TRIPLE)
   endif()
 endif()
 
-set(RUST_TARGET_DIR target)
+# Cargo writes every Rust artifact into one target directory. CI points this
+# at the repository root so its Rust cache restores the same directory the
+# CMake builds write; local builds keep the default inside the build tree.
+# A relative value resolves against the build directory so Cargo, Ninja and
+# the install rules all name the same absolute path. The cache entry is a
+# STRING so CMake keeps the typed value as written.
+set(LANCEDB_CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/target" CACHE STRING
+  "Cargo target directory used by all Rust builds; a relative path resolves against the build directory")
+if("${LANCEDB_CARGO_TARGET_DIR}" STREQUAL "")
+  message(FATAL_ERROR "LANCEDB_CARGO_TARGET_DIR must name a directory")
+endif()
+if(NOT IS_ABSOLUTE "${LANCEDB_CARGO_TARGET_DIR}")
+  get_filename_component(LANCEDB_CARGO_TARGET_DIR
+    "${LANCEDB_CARGO_TARGET_DIR}" ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
+endif()
+# CMake writes install-file paths into cmake_install.cmake inside quoted
+# strings, where a backslash starts an escape sequence. Normalize the resolved
+# directory to CMake slash form on Windows hosts so the imported, install and
+# rpath paths stay usable CMake paths; other hosts keep their native path
+# characters. This also covers a caller that passes native separators or the
+# mixed separator form CI produces.
+if(CMAKE_HOST_WIN32)
+  string(REPLACE "\\" "/" LANCEDB_CARGO_TARGET_DIR "${LANCEDB_CARGO_TARGET_DIR}")
+endif()
+
+set(RUST_TARGET_DIR "${LANCEDB_CARGO_TARGET_DIR}")
 
 if(RUST_TARGET_TRIPLE)
   set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/${RUST_TARGET_TRIPLE}")
@@ -136,10 +161,10 @@ if(APPLE)
 endif()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/${RUST_TARGET_DIR}/debug")
+  set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/debug")
   set(RUST_BUILD_TYPE "")
 else()
-  set(RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/${RUST_TARGET_DIR}/release")
+  set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/release")
   set(RUST_BUILD_TYPE "--release")
 endif()
 option(BUILD_SHARED_LIBS "Build shared library (OFF for static)" ON)
@@ -265,7 +290,7 @@ elseif(UNIX)
 endif()
 
 # rust-lib target
-set(CARGO_BUILD_COMMAND cargo rustc ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --lib --target-dir "${CMAKE_BINARY_DIR}/target")
+set(CARGO_BUILD_COMMAND cargo rustc ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-c --lib --target-dir "${LANCEDB_CARGO_TARGET_DIR}")
 if(LANCEDB_RUST_LINK_ARGS)
   list(APPEND CARGO_BUILD_COMMAND -- ${LANCEDB_RUST_LINK_ARGS})
 endif()
@@ -348,7 +373,9 @@ if(BUILD_EXAMPLES)
   )
 
   # external_provider helper crate (provides external_object_store_provider_create)
-  set(EXT_PROVIDER_CARGO_CMD cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${CMAKE_BINARY_DIR}/target")
+  # Share the CMake-resolved build version with the provider build so an
+  # environment change does not make the lancedb-c build script stale.
+  set(EXT_PROVIDER_CARGO_CMD ${CMAKE_COMMAND} -E env "LANCEDB_BUILD_VERSION=${LANCEDB_VERSION}" cargo build ${RUST_BUILD_TYPE} ${RUST_TARGET_OPT} --package lancedb-external-provider --target-dir "${LANCEDB_CARGO_TARGET_DIR}")
   if(WIN32)
     set(EXT_PROVIDER_SHARED_PATH "${RUST_TARGET_DIR}/lancedb_external_provider${CMAKE_SHARED_LIBRARY_SUFFIX}")
     set(EXT_PROVIDER_IMPORT_PATH "${RUST_TARGET_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}lancedb_external_provider${CMAKE_IMPORT_LIBRARY_SUFFIX}")
@@ -751,7 +778,7 @@ endif()
 
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target clean
-  COMMAND cargo clean --target-dir "${CMAKE_BINARY_DIR}/target"
+  COMMAND cargo clean --target-dir "${LANCEDB_CARGO_TARGET_DIR}"
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Cleaning all build artifacts..."
 )
