@@ -3,10 +3,10 @@
 
 name: Shared Library Packages
 
+# Tag builds are started explicitly. A tag push used to launch a second run
+# that the publication dispatch then cancelled, so one dispatch now owns both
+# the build and the optional publication.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       publish_release:
@@ -19,17 +19,21 @@ permissions:
   contents: read
 
 concurrency:
+  # A tag dispatch builds every package and may publish a release. A second
+  # dispatch for the same ref waits instead of cancelling package uploads or
+  # publication in progress.
   group: packages-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   package-script:
     name: Package script checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out the commit being tested
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -43,6 +47,9 @@ jobs:
   package:
     name: Package ${{ matrix.target }} on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
+    # The slowest successful preview package job took 84 minutes on Windows
+    # x86_64; keep enough room for a cold build and runner variability.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -65,7 +72,7 @@ jobs:
 
     steps:
       - name: Check out the commit being packaged
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -225,12 +232,13 @@ jobs:
       github.ref_type == 'tag' &&
       inputs.publish_release == true
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -266,7 +274,7 @@ jobs:
           echo "commit=${tag_commit}" >> "$GITHUB_OUTPUT"
 
       - name: Download all verified packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: lancedb-c-*
           path: release-artifacts

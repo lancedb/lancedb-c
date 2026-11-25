@@ -116,6 +116,6 @@ the tag ref object, peeled commit, pinned LanceDB and Lance revisions, and every
 archive digest. See the `LanceDB C releases
 <https://github.com/lancedb/lancedb-c/releases>`_ for the current list.
 
-Tag pushes and dispatches without ``publish_release`` only build CI artifacts.
+Tag dispatches without ``publish_release`` only build CI artifacts.
 Publication is limited to preview tags; stable releases remain a manual project
 decision. A published release is never replaced.
