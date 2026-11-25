@@ -521,10 +521,13 @@ if(BUILD_TESTS)
     endif()
 
     add_executable(${name} ${ARG_UNPARSED_ARGUMENTS})
+    # The support archive must precede lancedb: GNU ld scans static archives
+    # once, and test_common.cpp.o is pulled from it with lancedb_* references
+    # that a scan of liblancedb.a before that point cannot resolve.
     target_link_libraries(${name}
       PRIVATE
-      lancedb
       lancedb_test_support
+      lancedb
     )
     set_target_properties(${name} PROPERTIES
       BUILD_RPATH ${RUST_TARGET_DIR}
@@ -604,12 +607,6 @@ if(BUILD_TESTS)
     tests/test_index_stats.cpp
   )
 
-  # Vector index, vector query and full-text suites run without Valgrind:
-  # index and query work is too slow under it.
-  lancedb_add_test(lancedb_vector_index_tests
-    tests/test_vector_index.cpp
-    tests/test_vector_index_stats.cpp
-  )
   lancedb_add_test(lancedb_query_tests VALGRIND
     tests/test_query.cpp
   )
@@ -620,6 +617,19 @@ if(BUILD_TESTS)
   lancedb_add_test(lancedb_json_tests VALGRIND
     tests/test_json.cpp
   )
+  # Arrow C Stream import and ownership tests run under valgrind like the other
+  # lifecycle-sensitive suites.
+  lancedb_add_test(lancedb_arrow_stream_tests VALGRIND
+    tests/test_arrow_stream.cpp
+  )
+
+  # Vector index, vector query and full-text suites run without Valgrind:
+  # index and query work is too slow under it. Registering them last keeps the
+  # CTest numeric order identical to the previous per-suite registration.
+  lancedb_add_test(lancedb_vector_index_tests
+    tests/test_vector_index.cpp
+    tests/test_vector_index_stats.cpp
+  )
   lancedb_add_test(lancedb_vector_query_tests
     tests/test_c_enum_inputs.c
     tests/test_vector_query.cpp
@@ -627,11 +637,6 @@ if(BUILD_TESTS)
   lancedb_add_test(lancedb_fts_tests
     tests/test_c_enum_inputs.c
     tests/test_fts.cpp
-  )
-  # Arrow C Stream import and ownership tests run under valgrind like the other
-  # lifecycle-sensitive suites.
-  lancedb_add_test(lancedb_arrow_stream_tests VALGRIND
-    tests/test_arrow_stream.cpp
   )
 endif()
 
