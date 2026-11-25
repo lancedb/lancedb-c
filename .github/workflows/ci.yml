@@ -337,8 +337,10 @@ jobs:
 
   build_almalinux:
     name: Build on AlmaLinux 10
-    # Compatibility-only: the schedule and the manual dispatch run it.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # EXPERIMENT BRANCH ONLY: a manual dispatch on this branch must start just
+    # the profile comparison, so the compatibility pair keeps the schedule alone
+    # here. This gate is not part of the experiment result and does not land.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     container:
       image: almalinux:10
@@ -388,8 +390,10 @@ jobs:
 
   cross_compile:
     name: Cross-compile Windows on Linux
-    # Compatibility-only: the schedule and the manual dispatch run it.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # EXPERIMENT BRANCH ONLY: a manual dispatch on this branch must start just
+    # the profile comparison, so the compatibility pair keeps the schedule alone
+    # here. This gate is not part of the experiment result and does not land.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
 
     steps:
@@ -464,3 +468,193 @@ jobs:
 
       - name: Build
         run: ninja -C build
+
+  # EXPERIMENT ONLY (C #198, disposable branch; not for merge): compares the
+  # routine Ubuntu shared job under the release profile against the candidate
+  # `ci` profile in Cargo.toml. Both matrix legs take identical steps and differ
+  # only in the profile they select and in their Rust cache namespace, so each
+  # leg starts from a real cold miss and then keeps its own warm state. A manual
+  # dispatch on this branch is the only trigger; nothing else runs with it.
+  profile-compare:
+    name: Profile compare ${{ matrix.variant }} on ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: release
+            cargo_profile: ''
+            cache_key: c198-profile-release
+            preset: ci-linux-shared
+          - variant: ci
+            cargo_profile: ci
+            cache_key: c198-profile-ci
+            preset: ci-linux-shared
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Cache Rust dependencies
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.cache_key }}
+
+      - name: Record restored cache state
+        run: |
+          {
+            echo "### Cargo profile comparison: ${{ matrix.variant }}"
+            echo ""
+            echo "| input | value |"
+            echo "| --- | --- |"
+            echo "| cargo profile | `${{ matrix.cargo_profile || 'release (default)' }}` |"
+            echo "| cache namespace key | `${{ matrix.cache_key }}` |"
+            echo "| rust cache hit output | `${{ steps.rust-cache.outputs.cache-hit }}` |"
+            echo "| target dir present after restore | `$( [ -d target ] && echo yes || echo no )` |"
+            echo "| target entries | `$(ls target 2>/dev/null | tr '\n' ' ')` |"
+            echo "| cargo git checkouts | `$(ls ~/.cargo/git/db 2>/dev/null | wc -l)` |"
+            echo "| commit | `${{ github.sha }}` |"
+            echo "| rustc | `$(rustc --version)` |"
+            echo "| runner | `${{ runner.os }}/${{ runner.arch }}` |"
+            echo "| cpus | `$(nproc)` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install dependencies (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsb-release valgrind
+          wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+          sudo apt-get install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+          sudo apt-get update
+          sudo apt-get install -y libarrow-dev libboost-coroutine-dev libboost-context-dev
+
+      - name: Configure CMake
+        run: |
+          set -euo pipefail
+          profile_args=()
+          if [ -n "${{ matrix.cargo_profile }}" ]; then
+            profile_args+=("-DLANCEDB_CARGO_PROFILE=${{ matrix.cargo_profile }}")
+          fi
+          cmake --preset "${{ matrix.preset }}" "${profile_args[@]}"
+
+      - name: Record resolved Rust profile
+        run: |
+          {
+            echo "resolved profile inputs from build/CMakeCache.txt:"
+            grep -E '^LANCEDB_CARGO_(PROFILE|TARGET_DIR)' build/CMakeCache.txt
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build
+        run: cmake --build --preset "${{ matrix.preset }}"
+
+      - name: Check installed package consumers
+        run: cmake --build --preset "${{ matrix.preset }}" --target check-install
+
+      - name: Check C17 consumer
+        run: cmake --build --preset "${{ matrix.preset }}" --target check-c17
+
+      - name: Test
+        run: ctest --preset "${{ matrix.preset }}" -j
+
+      - name: Prove final library Rust line tables
+        run: |
+          set -euo pipefail
+          lib=""
+          for candidate in target/*/liblancedb.so; do
+            [ -e "$candidate" ] && lib="$candidate"
+          done
+          if [ -z "$lib" ]; then
+            echo "::error::no liblancedb.so under target/"
+            ls -R target | head -50
+            exit 1
+          fi
+          {
+            echo ""
+            echo "### Final library: ${{ matrix.variant }}"
+            echo ""
+            echo "- path: \`${lib}\`"
+            echo "- sha256: \`$(sha256sum "${lib}" | cut -d' ' -f1)\`"
+            echo "- bytes: \`$(stat -c %s "${lib}")\`"
+            echo "- soname: \`$(readelf -d "${lib}" | sed -n 's/.*SONAME.*\[\(.*\)\]/\1/p')\`"
+            echo "- exported dynamic symbols: \`$(nm -D --defined-only "${lib}" | wc -l)\`"
+            echo ""
+            echo '```'
+            readelf -S --wide "${lib}" | grep -E '\.debug_' || echo "no .debug_ sections"
+            echo '```'
+            echo ""
+            echo "first decoded line-table entries:"
+            echo '```'
+            readelf --debug-dump=decodedline "${lib}" 2>/dev/null | sed -n '1,8p' || true
+            echo '```'
+            echo ""
+            echo "gdb resolves the exported Rust FFI symbol lancedb_connect:"
+            echo '```'
+            gdb --batch -ex 'info line lancedb_connect' "${lib}" 2>&1 | sed -n '1,6p' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ matrix.cargo_profile }}" = "ci" ]; then
+            if ! readelf -S --wide "${lib}" | grep -q '\.debug_line'; then
+              echo "::error::the ci profile produced no .debug_line section"
+              exit 1
+            fi
+          fi
+
+      - name: Install Clang and llvm symbolizer
+        run: |
+          sudo apt-get install -y clang llvm
+          clang --version
+          llvm-symbolizer --version
+
+      - name: Configure sanitizer build
+        run: |
+          set -euo pipefail
+          profile_args=()
+          if [ -n "${{ matrix.cargo_profile }}" ]; then
+            profile_args+=("-DLANCEDB_CARGO_PROFILE=${{ matrix.cargo_profile }}")
+          fi
+          cmake -S . -B build-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=ON \
+            -DBUILD_CONSUMER_TEST=ON \
+            -DVALGRIND_EXECUTABLE=OFF \
+            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target" \
+            "${profile_args[@]}"
+
+      - name: Build sanitizer consumers
+        run: cmake --build build-sanitize --verbose
+
+      - name: Show sanitizer test roster
+        run: ctest --test-dir build-sanitize -N -V
+
+      - name: Run sanitizer tests
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure --no-tests=error
+
+      - name: Show test diagnostics
+        if: failure()
+        run: |
+          for log in build/Testing/Temporary/LastTest.log \
+                     build-sanitize/Testing/Temporary/LastTest.log; do
+            if [ -f "$log" ]; then
+              echo "::group::$log"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+          done
+          for log in build/valgrind_*.txt; do
+            [ -e "$log" ] || continue
+            echo "::group::$log"
+            cat "$log"
+            echo "::endgroup::"
+          done

@@ -53,3 +53,18 @@ stacker = "0.1"
 opt-level = 3
 strip = "debuginfo"
 panic = "unwind"
+
+# EXPERIMENT ONLY (C #198, disposable branch; not for merge): candidate routine
+# CI profile. It inherits release so panics, assertions, overflow checks and
+# every other release default stay in force; only optimization and debug
+# information differ. Workspace crates build unoptimized, dependencies at
+# opt-level 2, and the emitted library keeps line tables so Valgrind and the
+# sanitizer suites can symbolize Rust frames.
+[profile.ci]
+inherits = "release"
+opt-level = 0
+debug = "line-tables-only"
+strip = "none"
+
+[profile.ci.package."*"]
+opt-level = 2

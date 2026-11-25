@@ -160,7 +160,15 @@ if(APPLE)
   endif()
 endif()
 
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+# EXPERIMENT ONLY (C #198, disposable branch; not for merge): a caller may name
+# an explicit Cargo profile. An empty value keeps the CMAKE_BUILD_TYPE-derived
+# release and debug selection that every existing build relies on.
+set(LANCEDB_CARGO_PROFILE "" CACHE STRING
+  "Explicit Cargo profile for the Rust library and provider; empty follows CMAKE_BUILD_TYPE")
+if(LANCEDB_CARGO_PROFILE)
+  set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/${LANCEDB_CARGO_PROFILE}")
+  set(RUST_BUILD_TYPE "--profile" "${LANCEDB_CARGO_PROFILE}")
+elseif (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(RUST_TARGET_DIR "${RUST_TARGET_DIR}/debug")
   set(RUST_BUILD_TYPE "")
 else()
