@@ -61,6 +61,8 @@ std::string require_string(const char* value) {
   return std::string(value);
 }
 
+#ifndef _WIN32
+
 const char* kBranchDiffJson = R"json({
   "fromBranch": "exp",
   "parentVersion": 3,
@@ -101,8 +103,6 @@ const char* kBranchDiffJson = R"json({
     {"code": "baseMoved", "message": "main advanced"}
   ]
 })json";
-
-#ifndef _WIN32
 
 std::string ready_result_json() {
   return std::string(R"json({"status":"ready","diff":)json") +
