@@ -8,3 +8,6 @@ target
 # Python cache
 __pycache__/
 *.py[cod]
+
+# local CMake presets
+CMakeUserPresets.json

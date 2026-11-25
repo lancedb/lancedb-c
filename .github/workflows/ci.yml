@@ -10,6 +10,11 @@ name: CI
 #
 # The compatibility environments report release portability rather than
 # per-commit risk, so they run daily instead of on every pull request.
+#
+# The routine native jobs configure, build and test from the ci-* presets in
+# CMakePresets.json so local and CI inputs stay aligned. The compatibility
+# jobs keep their own commands because their container and cross toolchains do
+# not share that configuration.
 on:
   push:
     branches: [main]
@@ -141,11 +146,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
-        lib_type: [shared]
         include:
           - os: ubuntu-latest
+            lib_type: shared
+            preset: ci-linux-shared
+          - os: ubuntu-latest
             lib_type: static
+            preset: ci-linux-static
+          - os: macos-15
+            lib_type: shared
+            preset: ci-macos
 
     steps:
       - uses: actions/checkout@v4
@@ -174,25 +184,19 @@ jobs:
           brew install apache-arrow protobuf boost
 
       - name: Configure CMake
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
-            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target" \
-            -DBUILD_SHARED_LIBS=${{ matrix.lib_type == 'shared' && 'ON' || 'OFF' }}
+        run: cmake --preset "${{ matrix.preset }}"
 
       - name: Build
-        run: ninja -C build
+        run: cmake --build --preset "${{ matrix.preset }}"
 
       - name: Check installed package consumers
-        run: ninja -C build check-install
+        run: cmake --build --preset "${{ matrix.preset }}" --target check-install
 
       - name: Check C17 consumer
-        run: ninja -C build check-c17
+        run: cmake --build --preset "${{ matrix.preset }}" --target check-c17
 
       - name: Test
-        run: ctest --test-dir build -j --output-on-failure
+        run: ctest --preset "${{ matrix.preset }}" -j
 
       - name: Install Clang sanitizer toolchain
         if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
@@ -302,24 +306,19 @@ jobs:
           arch: amd64
 
       - name: Configure CMake (Debug)
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DBUILD_SHARED_LIBS=ON
-          -DBUILD_CONSUMER_TEST=ON
-          -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target"
+        run: cmake --preset ci-windows-msvc
 
       - name: Build
-        run: cmake --build build --parallel 4
+        run: cmake --build --preset ci-windows-msvc
 
       - name: Check installed package consumers
-        run: cmake --build build --target check-install
+        run: cmake --build --preset ci-windows-msvc --target check-install
 
       - name: Test C17 consumer
-        run: ctest --test-dir build -R "^lancedb_c17_consumer$" --output-on-failure --no-tests=error
+        run: ctest --preset ci-windows-msvc-c17
 
       - name: Test C++ consumer
-        run: ctest --test-dir build -R "^package_consumer$" --output-on-failure --no-tests=error
+        run: ctest --preset ci-windows-msvc-consumer
 
   build_almalinux:
     name: Build on AlmaLinux 10
