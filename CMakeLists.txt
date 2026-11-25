@@ -499,464 +499,163 @@ if(BUILD_TESTS)
       Catch2
       GIT_REPOSITORY https://github.com/catchorg/Catch2.git
       GIT_TAG        v2.13.10
+      GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(Catch2)
   endif()
 
-  # Add test executable for connection tests (runs with valgrind)
-  add_executable(lancedb_connection_tests
+  # test_main.cpp defines CATCH_CONFIG_MAIN, so compiling it into one shared
+  # static library keeps the Catch2 implementation out of every test
+  # executable. test_common.cpp is shared the same way. Suites link this
+  # support library and add only their own sources.
+  add_library(lancedb_test_support STATIC
     tests/test_main.cpp
     tests/test_common.cpp
-    tests/test_connection.cpp
   )
-  target_link_libraries(lancedb_connection_tests
-    PRIVATE
-    lancedb
+  target_link_libraries(lancedb_test_support
+    PUBLIC
     Catch2::Catch2
     Threads::Threads
     ${ARROW_LIBRARIES}
   )
-  target_include_directories(lancedb_connection_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  target_include_directories(lancedb_test_support
+    PUBLIC
+    ${ARROW_INCLUDE_DIRS}
+    ${LANCEDB_GENERATED_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
   )
-  target_compile_options(lancedb_connection_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_connection_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
+  target_compile_options(lancedb_test_support PUBLIC ${ARROW_CFLAGS_OTHER})
 
-  # Add test executable for table tests (runs with valgrind)
-  add_executable(lancedb_table_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  # Create a Catch2 test executable from the shared support library and
+  # register it with CTest. VALGRIND routes a suite through Valgrind when it
+  # is installed; suites whose index or query work is too slow under Valgrind
+  # stay plain. A suite named lancedb_<suite>_tests writes valgrind_<suite>.txt
+  # so the CI diagnostics glob keeps working. NO_PROXY exempts loopback
+  # traffic for suites that start local HTTP servers.
+  function(lancedb_add_test name)
+    cmake_parse_arguments(ARG "VALGRIND;NO_PROXY" "" "" ${ARGN})
+    if(NOT ARG_UNPARSED_ARGUMENTS)
+      message(FATAL_ERROR "lancedb_add_test(${name}) requires at least one source file")
+    endif()
+
+    add_executable(${name} ${ARG_UNPARSED_ARGUMENTS})
+    # The support archive must precede lancedb: GNU ld scans static archives
+    # once, and test_common.cpp.o is pulled from it with lancedb_* references
+    # that a scan of liblancedb.a before that point cannot resolve.
+    target_link_libraries(${name}
+      PRIVATE
+      lancedb_test_support
+      lancedb
+    )
+    set_target_properties(${name} PROPERTIES
+      BUILD_RPATH ${RUST_TARGET_DIR}
+    )
+
+    # C_STANDARD is a target property. Apply strict C17 only to the suites
+    # that compile the C consumer helper; the C++ sources keep the global
+    # C++ standard and every other target keeps its existing flags.
+    foreach(source IN LISTS ARG_UNPARSED_ARGUMENTS)
+      if(source MATCHES "[.]c$")
+        set_target_properties(${name} PROPERTIES
+          C_STANDARD 17
+          C_STANDARD_REQUIRED ON
+          C_EXTENSIONS OFF
+        )
+      endif()
+    endforeach()
+
+    if(ARG_VALGRIND AND VALGRIND_EXECUTABLE)
+      # Fail on definite and possible leaks; known false positives are in
+      # valgrind.supp.
+      string(REGEX REPLACE "^lancedb_" "" valgrind_log_name "${name}")
+      string(REGEX REPLACE "_tests$" "" valgrind_log_name "${valgrind_log_name}")
+      add_test(NAME ${name}
+        COMMAND ${VALGRIND_EXECUTABLE}
+          --tool=memcheck
+          --leak-check=full
+          --show-leak-kinds=definite,possible
+          --errors-for-leak-kinds=definite,possible
+          --track-origins=yes
+          --error-exitcode=1
+          --log-file=${CMAKE_BINARY_DIR}/valgrind_${valgrind_log_name}.txt
+          --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
+          $<TARGET_FILE:${name}>
+      )
+    else()
+      add_test(NAME ${name} COMMAND $<TARGET_FILE:${name}>)
+    endif()
+
+    if(ARG_NO_PROXY)
+      set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "NO_PROXY=127.0.0.1;no_proxy=127.0.0.1"
+      )
+    endif()
+  endfunction()
+
+  # Enable CTest and locate Valgrind before registering the suites.
+  enable_testing()
+  find_program(VALGRIND_EXECUTABLE valgrind)
+  if(VALGRIND_EXECUTABLE)
+    message(STATUS "Valgrind found: ${VALGRIND_EXECUTABLE}")
+  else()
+    message(WARNING "Valgrind not found, running tests without memory checking")
+  endif()
+
+  # Connection and table tests use loopback HTTP servers for remote client
+  # configuration and branch operations.
+  lancedb_add_test(lancedb_connection_tests VALGRIND NO_PROXY
+    tests/test_connection.cpp
+  )
+  lancedb_add_test(lancedb_table_tests VALGRIND NO_PROXY
     tests/test_c_enum_inputs.c
     tests/test_branch_diff.cpp
     tests/test_table.cpp
   )
-  target_link_libraries(lancedb_table_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_table_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_table_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_table_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for table metadata/version tests (runs with valgrind)
-  add_executable(lancedb_table_meta_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  lancedb_add_test(lancedb_table_meta_tests VALGRIND
     tests/test_table_meta.cpp
   )
-  target_link_libraries(lancedb_table_meta_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_table_meta_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_table_meta_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_table_meta_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for table delta tests (runs with valgrind)
-  add_executable(lancedb_delta_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  lancedb_add_test(lancedb_delta_tests VALGRIND
     tests/test_delta_enum_inputs.c
     tests/test_delta.cpp
   )
-  target_link_libraries(lancedb_delta_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_delta_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_delta_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_delta_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for scalar index tests (runs with valgrind)
-  add_executable(lancedb_index_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  lancedb_add_test(lancedb_index_tests VALGRIND
     tests/test_c_enum_inputs.c
     tests/test_index.cpp
     tests/test_index_info.cpp
     tests/test_index_stats.cpp
   )
-  target_link_libraries(lancedb_index_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_index_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_index_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
 
-  # Add test executable for vector tests (runs without valgrind)
-  add_executable(lancedb_vector_index_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
-    tests/test_vector_index.cpp
-    tests/test_vector_index_stats.cpp
-  )
-  target_link_libraries(lancedb_vector_index_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_vector_index_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_vector_index_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_vector_index_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for query tests (runs with valgrind)
-  add_executable(lancedb_query_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  lancedb_add_test(lancedb_query_tests VALGRIND
     tests/test_query.cpp
   )
-  target_link_libraries(lancedb_query_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_query_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_query_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for DataFusion expression query tests
-  add_executable(lancedb_df_query_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  lancedb_add_test(lancedb_df_query_tests VALGRIND
     tests/test_c_enum_inputs.c
     tests/test_df_query.cpp
   )
-  target_link_libraries(lancedb_df_query_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_df_query_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_df_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_df_query_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for JSON expression tests
-  add_executable(lancedb_json_tests
-    tests/test_main.cpp
+  lancedb_add_test(lancedb_json_tests VALGRIND
     tests/test_json.cpp
   )
-  target_link_libraries(lancedb_json_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_json_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_json_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_json_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
+  # Arrow C Stream import and ownership tests run under valgrind like the other
+  # lifecycle-sensitive suites.
+  lancedb_add_test(lancedb_arrow_stream_tests VALGRIND
+    tests/test_arrow_stream.cpp
   )
 
-  # Add test executable for vector query tests (runs without valgrind)
-  add_executable(lancedb_vector_query_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  # Vector index, vector query and full-text suites run without Valgrind:
+  # index and query work is too slow under it. Registering them last keeps the
+  # CTest numeric order identical to the previous per-suite registration.
+  lancedb_add_test(lancedb_vector_index_tests
+    tests/test_vector_index.cpp
+    tests/test_vector_index_stats.cpp
+  )
+  lancedb_add_test(lancedb_vector_query_tests
     tests/test_c_enum_inputs.c
     tests/test_vector_query.cpp
   )
-  target_link_libraries(lancedb_vector_query_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_vector_query_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_vector_query_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_vector_query_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Add test executable for full-text and hybrid query tests (runs without valgrind)
-  add_executable(lancedb_fts_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
+  lancedb_add_test(lancedb_fts_tests
     tests/test_c_enum_inputs.c
     tests/test_fts.cpp
   )
-  target_link_libraries(lancedb_fts_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_fts_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_fts_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_fts_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # Arrow C Stream import and ownership tests run under valgrind like the other
-  # lifecycle-sensitive suites.
-  add_executable(lancedb_arrow_stream_tests
-    tests/test_main.cpp
-    tests/test_common.cpp
-    tests/test_arrow_stream.cpp
-  )
-  target_link_libraries(lancedb_arrow_stream_tests
-    PRIVATE
-    lancedb
-    Catch2::Catch2
-    Threads::Threads
-    ${ARROW_LIBRARIES}
-  )
-  target_include_directories(lancedb_arrow_stream_tests
-    PRIVATE ${ARROW_INCLUDE_DIRS}
-    PRIVATE ${LANCEDB_GENERATED_INCLUDE_DIR}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  )
-  target_compile_options(lancedb_arrow_stream_tests PRIVATE ${ARROW_CFLAGS_OTHER})
-  set_target_properties(lancedb_arrow_stream_tests PROPERTIES
-    BUILD_RPATH ${RUST_TARGET_DIR}
-  )
-
-  # C_STANDARD is a target property. Apply strict C17 only to the targets that
-  # compile the C consumer helper; each has no other C sources, so the C++
-  # sources and all other targets keep their existing flags.
-  foreach(target
-    lancedb_index_tests
-    lancedb_df_query_tests
-    lancedb_vector_query_tests
-    lancedb_table_tests
-    lancedb_delta_tests
-    lancedb_fts_tests
-  )
-    set_target_properties(${target} PROPERTIES
-      C_STANDARD 17
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS OFF
-    )
-  endforeach()
-
-  # Enable CTest
-  enable_testing()
-
-  # Check if valgrind is available
-  find_program(VALGRIND_EXECUTABLE valgrind)
-  if(VALGRIND_EXECUTABLE)
-    message(STATUS "Valgrind found: ${VALGRIND_EXECUTABLE}")
-    # Run connection tests with valgrind
-    # Fail on definite and possible leaks; known false positives are in valgrind.supp
-    add_test(NAME lancedb_connection_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_connection.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_connection_tests>
-    )
-    # Run table tests with valgrind
-    add_test(NAME lancedb_table_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_table.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_table_tests>
-    )
-    # Run table metadata/version tests with valgrind
-    add_test(NAME lancedb_table_meta_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_table_meta.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_table_meta_tests>
-    )
-    # Run table delta tests with valgrind
-    add_test(NAME lancedb_delta_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_delta.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_delta_tests>
-    )
-    # Run scalar index tests with valgrind
-    add_test(NAME lancedb_index_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_index.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_index_tests>
-    )
-    # Run query tests with valgrind
-    add_test(NAME lancedb_query_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_query.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_query_tests>
-    )
-    # Run DataFusion expression query tests with valgrind
-    add_test(NAME lancedb_df_query_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_df_query.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_df_query_tests>
-    )
-    # Run JSON expression tests with valgrind
-    add_test(NAME lancedb_json_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_json.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_json_tests>
-    )
-    # Run Arrow C Stream import and ownership tests with valgrind
-    add_test(NAME lancedb_arrow_stream_tests
-      COMMAND ${VALGRIND_EXECUTABLE}
-        --tool=memcheck
-        --leak-check=full
-        --show-leak-kinds=definite,possible
-        --errors-for-leak-kinds=definite,possible
-        --track-origins=yes
-        --error-exitcode=1
-        --log-file=${CMAKE_BINARY_DIR}/valgrind_arrow_stream.txt
-        --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/valgrind.supp
-        $<TARGET_FILE:lancedb_arrow_stream_tests>
-    )
-  else()
-    message(WARNING "Valgrind not found, running tests without memory checking")
-    add_test(NAME lancedb_connection_tests COMMAND $<TARGET_FILE:lancedb_connection_tests>)
-    add_test(NAME lancedb_table_tests COMMAND $<TARGET_FILE:lancedb_table_tests>)
-    add_test(NAME lancedb_table_meta_tests COMMAND $<TARGET_FILE:lancedb_table_meta_tests>)
-    add_test(NAME lancedb_delta_tests COMMAND $<TARGET_FILE:lancedb_delta_tests>)
-    add_test(NAME lancedb_index_tests COMMAND $<TARGET_FILE:lancedb_index_tests>)
-    add_test(NAME lancedb_query_tests COMMAND $<TARGET_FILE:lancedb_query_tests>)
-    add_test(NAME lancedb_df_query_tests COMMAND $<TARGET_FILE:lancedb_df_query_tests>)
-    add_test(NAME lancedb_json_tests COMMAND $<TARGET_FILE:lancedb_json_tests>)
-    add_test(NAME lancedb_arrow_stream_tests COMMAND $<TARGET_FILE:lancedb_arrow_stream_tests>)
-  endif()
-
-  # The connection and table tests use loopback HTTP servers for remote
-  # client configuration and branch operations.
-  set_tests_properties(lancedb_connection_tests lancedb_table_tests PROPERTIES
-    ENVIRONMENT "NO_PROXY=127.0.0.1;no_proxy=127.0.0.1"
-  )
-
-  # Run vector index tests WITHOUT valgrind (too slow under valgrind)
-  add_test(NAME lancedb_vector_index_tests COMMAND $<TARGET_FILE:lancedb_vector_index_tests>)
-  # Run vector query tests WITHOUT valgrind (too slow under valgrind)
-  add_test(NAME lancedb_vector_query_tests COMMAND $<TARGET_FILE:lancedb_vector_query_tests>)
-  # Run full-text and hybrid query tests WITHOUT valgrind (index and query work is slow under valgrind)
-  add_test(NAME lancedb_fts_tests COMMAND $<TARGET_FILE:lancedb_fts_tests>)
 endif()
 
 # Compile and run the public header with a strict C17 consumer. The source has

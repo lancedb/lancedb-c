@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The LanceDB Authors
-"""Install a configured build and verify find_package consumers.
+"""Install a configured build and verify installed package consumers.
 
 This checks the installed layout rather than the build tree: it stages the
 current build under a temporary prefix, configures small C and C++ consumers
-with ``find_package(lancedb CONFIG REQUIRED)``, then builds and runs both.
+with ``find_package(lancedb CONFIG REQUIRED)``, then builds and runs both. On
+Unix it also compiles, links and runs a C consumer through the installed
+``lancedb.pc`` using ``pkg-config`` (``--static`` for static builds).
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -57,6 +60,250 @@ def installed_version(prefix: Path) -> str:
     if not match:
         raise SystemExit("installed header has no LANCEDB_VERSION_STRING")
     return match.group(1)
+
+
+def build_is_shared(build_dir: Path) -> bool:
+    value = cache_value(build_dir, "BUILD_SHARED_LIBS").strip().upper()
+    return value not in ("OFF", "0", "FALSE", "NO")
+
+
+def resolve_c_compiler(build_dir: Path | None) -> list[str]:
+    """Resolve the C compiler command recorded for the build.
+
+    CMake stores the command in CMAKE_C_COMPILER and arguments such as -m64
+    in CMAKE_C_COMPILER_ARG1. A build directory without recorded compilers
+    and direct callers fall back to the standard CC environment variable.
+    """
+    if build_dir is not None:
+        compiler = cache_value(build_dir, "CMAKE_C_COMPILER")
+        if compiler:
+            arguments = shlex.split(cache_value(build_dir, "CMAKE_C_COMPILER_ARG1"))
+            return [compiler, *arguments]
+    configured = os.environ.get("CC", "").strip()
+    return shlex.split(configured) if configured else ["cc"]
+
+
+def pkg_config_output(pkg_config: str, env: dict[str, str], *arguments: str) -> str:
+    command = [pkg_config, *arguments, "lancedb"]
+    completed = subprocess.run(command, env=env, text=True, capture_output=True)
+    if completed.returncode != 0:
+        print(completed.stdout)
+        print(completed.stderr, file=sys.stderr)
+        raise SystemExit(f"pkg-config {' '.join(arguments)} lancedb failed")
+    return completed.stdout.strip()
+
+
+def pkg_config_variable(pkg_config: str, env: dict[str, str], name: str) -> Path:
+    # pkgconf escapes whitespace in variable values; pkg-config 0.29 returns
+    # the raw value, which has to be taken whole.
+    value = pkg_config_output(pkg_config, env, f"--variable={name}")
+    if not value:
+        raise SystemExit(f"pkg-config reports an empty {name}")
+    try:
+        parsed = shlex.split(value)
+    except ValueError:
+        parsed = []
+    if len(parsed) == 1:
+        return Path(parsed[0])
+    return Path(value)
+
+
+def flag_search_directories(flags: list[str], option: str) -> list[Path]:
+    directories: list[Path] = []
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag == option:
+            if index + 1 < len(flags):
+                directories.append(Path(flags[index + 1]))
+                index += 2
+                continue
+        elif flag.startswith(option) and len(flag) > len(option):
+            directories.append(Path(flag[len(option) :]))
+        index += 1
+    return directories
+
+
+def is_within(candidate: Path, root: Path) -> bool:
+    candidate = candidate.resolve()
+    root = root.resolve()
+    return candidate == root or root in candidate.parents
+
+
+def check_shared_library_origin(
+    binary: Path, env: dict[str, str], libdir: Path
+) -> None:
+    """Fail unless the consumer resolves lancedb from the staged libdir."""
+    expected = Path(os.path.normpath(libdir))
+    if sys.platform == "darwin":
+        names = subprocess.run(
+            ["otool", "-L", str(binary)], env=env, text=True, capture_output=True
+        )
+        if names.returncode != 0:
+            raise SystemExit(f"otool -L failed for {binary}:\n{names.stderr}")
+        install_name = ""
+        # otool -L prints a heading line for the binary before its indented
+        # load-command entries; only the entries name the install name.
+        for line in names.stdout.splitlines()[1:]:
+            if not line[:1].isspace():
+                continue
+            entry = line.strip()
+            if "liblancedb" in entry:
+                install_name = entry.split(" (", 1)[0].strip()
+                break
+        if not install_name:
+            raise SystemExit(f"{binary} does not link an installed lancedb library")
+        if install_name.startswith("@rpath/"):
+            details = subprocess.run(
+                ["otool", "-l", str(binary)], env=env, text=True, capture_output=True
+            )
+            if details.returncode != 0:
+                raise SystemExit(f"otool -l failed for {binary}:\n{details.stderr}")
+            rpaths = []
+            lines = details.stdout.splitlines()
+            for index, line in enumerate(lines):
+                if line.strip() != "cmd LC_RPATH":
+                    continue
+                for candidate in lines[index + 1 : index + 4]:
+                    candidate = candidate.strip()
+                    if candidate.startswith("path "):
+                        rpath = candidate[len("path ") :].split(" (offset", 1)[0]
+                        rpaths.append(Path(os.path.normpath(rpath.strip())))
+                        break
+            # dyld resolves @rpath through the load-command order, so the
+            # staged directory has to come first, not merely be present.
+            if not rpaths or rpaths[0] != expected:
+                raise SystemExit(
+                    f"{binary} resolves lancedb through {rpaths}, expected {expected} first"
+                )
+            return
+        if Path(os.path.normpath(install_name)).parent != expected:
+            raise SystemExit(
+                f"{binary} loads lancedb from {install_name}, expected {libdir}"
+            )
+        return
+
+    linked = subprocess.run(
+        ["ldd", str(binary)], env=env, text=True, capture_output=True
+    )
+    if linked.returncode != 0:
+        raise SystemExit(f"ldd failed for {binary}:\n{linked.stderr}")
+    for line in linked.stdout.splitlines():
+        if "liblancedb" not in line:
+            continue
+        if "=>" not in line:
+            raise SystemExit(
+                f"{binary} does not resolve its lancedb library: {line.strip()}"
+            )
+        loaded = line.split("=>", 1)[1].strip().split(" (", 1)[0].strip()
+        if not loaded or loaded == "not found":
+            raise SystemExit(
+                f"{binary} does not resolve its lancedb library: {line.strip()}"
+            )
+        if Path(os.path.normpath(loaded)).parent != expected:
+            raise SystemExit(f"{binary} loads lancedb from {loaded}, expected {libdir}")
+        return
+    raise SystemExit(f"{binary} does not link an installed lancedb library")
+
+
+def verify_pkg_config_consumer(
+    source_dir: Path,
+    work_dir: Path,
+    prefix: Path,
+    installed_libdir: Path,
+    shared: bool,
+    build_dir: Path | None = None,
+) -> None:
+    """Compile, link and run the C17 consumer through the installed .pc file.
+
+    This is a Unix check: the probe consumes only the pkg-config flags. It
+    restricts pkg-config to the staged directory, clears inherited loader and
+    compiler search paths and requires the effective include and library search
+    directories to be the staged ones, so a missing, broken or redirected file
+    cannot silently use a system installation.
+    """
+    pkg_config = shutil.which("pkg-config") or shutil.which("pkgconf")
+    if pkg_config is None:
+        raise SystemExit("pkg-config or pkgconf is required to verify lancedb.pc")
+
+    pkgconfig_dir = installed_libdir / "pkgconfig"
+    pc_file = pkgconfig_dir / "lancedb.pc"
+    if not pc_file.is_file():
+        raise SystemExit(f"installed pkg-config file is missing: {pc_file}")
+
+    env = os.environ.copy()
+    env["PKG_CONFIG_PATH"] = str(pkgconfig_dir)
+    env["PKG_CONFIG_LIBDIR"] = str(pkgconfig_dir)
+    for name in (
+        "PKG_CONFIG_SYSROOT_DIR",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        # Ambient compiler search paths must not resolve headers or archives
+        # outside the staged installation.
+        "LIBRARY_PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+    ):
+        env.pop(name, None)
+
+    # The .pc file derives its prefix from its own location, so a staged or
+    # relocated installation must report the staged prefix here.
+    reported_prefix = pkg_config_variable(pkg_config, env, "prefix")
+    if reported_prefix.resolve() != prefix.resolve():
+        raise SystemExit(
+            f"pkg-config reports prefix {reported_prefix}, expected {prefix.resolve()}"
+        )
+    staged_include = pkg_config_variable(pkg_config, env, "includedir")
+    staged_libdir = pkg_config_variable(pkg_config, env, "libdir")
+    for name, directory in (("includedir", staged_include), ("libdir", staged_libdir)):
+        if not is_within(directory, prefix):
+            raise SystemExit(
+                f"pkg-config {name} {directory} is outside the staged prefix {prefix}"
+            )
+
+    lib_arguments = ["--libs"]
+    if not shared:
+        lib_arguments.append("--static")
+    cflags = shlex.split(pkg_config_output(pkg_config, env, "--cflags"))
+    libs = shlex.split(pkg_config_output(pkg_config, env, *lib_arguments))
+    include_directories = [
+        *flag_search_directories(cflags, "-I"),
+        *flag_search_directories(cflags, "-isystem"),
+    ]
+    library_directories = flag_search_directories(libs, "-L")
+    for directory in (*include_directories, *library_directories):
+        if not is_within(directory, prefix):
+            raise SystemExit(
+                f"pkg-config flags point outside the staged prefix: {directory}"
+            )
+    if staged_include.resolve() not in [
+        directory.resolve() for directory in include_directories
+    ]:
+        raise SystemExit("pkg-config cflags do not search the staged include directory")
+    if staged_libdir.resolve() not in [
+        directory.resolve() for directory in library_directories
+    ]:
+        raise SystemExit("pkg-config libs do not search the staged library directory")
+
+    consumer_binary = work_dir / "pkg-config-consumer"
+    compile_command = [
+        *resolve_c_compiler(build_dir),
+        "-std=c17",
+        *cflags,
+        str(source_dir / "tests" / "c17_consumer.c"),
+        "-o",
+        str(consumer_binary),
+        *libs,
+    ]
+    if shared:
+        # Forward the rpath as separate linker arguments so staged paths with
+        # spaces or commas stay one argument instead of splitting on commas.
+        compile_command += ["-Xlinker", "-rpath", "-Xlinker", str(staged_libdir)]
+    run(compile_command, env=env)
+    if shared:
+        check_shared_library_origin(consumer_binary, env, staged_libdir)
+    run([str(consumer_binary), str(work_dir / "pkg-config-consumer-db")], env=env)
 
 
 def configure_version_case(
@@ -185,6 +432,16 @@ def main() -> int:
     )
     run([str(c_consumer), str(work_dir / "c-consumer-db")], env=env)
     run([str(cxx_consumer), str(work_dir / "cxx-consumer-db")], env=env)
+
+    if os.name != "nt":
+        verify_pkg_config_consumer(
+            source_dir,
+            work_dir,
+            prefix,
+            installed_libdir,
+            build_is_shared(build_dir),
+            build_dir,
+        )
 
     version = installed_version(prefix)
     target_os = args.export_target or None
