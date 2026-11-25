@@ -368,14 +368,22 @@ jobs:
           "https://packages.apache.org/artifactory/arrow/almalinux/10/apache-arrow-release-latest.rpm"
 
       - name: Install build tools
-        run: dnf install -y gcc gcc-c++ cmake ninja-build protobuf-compiler protobuf-devel rust cargo arrow-devel pkgconf-pkg-config valgrind git boost-devel
+        run: dnf install -y curl gcc gcc-c++ cmake ninja-build protobuf-compiler protobuf-devel rust cargo arrow-devel pkgconf-pkg-config valgrind git boost-devel
 
-      # This job deliberately builds with the AlmaLinux system Rust instead of
-      # rust-toolchain.toml, keeping coverage for distro-provided toolchain.
-      # See https://github.com/lancedb/lancedb-c/pull/109 for the rationale.
+      # Keep the distribution rustc and cargo while they meet the crate MSRV;
+      # only an older distribution falls back to the repository toolchain. The
+      # selection runs before the cache so the cache keys on the compiler that
+      # builds the job, and the fallback sets its own cache identity.
+      # See https://github.com/lancedb/lancedb-c/pull/109 for the distro policy.
+      - name: Select the Rust toolchain
+        shell: bash
+        run: bash .github/scripts/select_almalinux_rust.sh
+
       # The earlier cache entry was saved for a host-side target path and a
       # full-match restore skips saving, so the corrected container-workspace
-      # target needs its own key.
+      # target needs its own key. The action also keys on the selected rustc
+      # version; RUSTUP_CACHE_IDENTITY keeps a rustup fallback distinct even
+      # when its version matches the distribution.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
