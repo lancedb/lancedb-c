@@ -115,6 +115,15 @@ if(NOT IS_ABSOLUTE "${LANCEDB_CARGO_TARGET_DIR}")
   get_filename_component(LANCEDB_CARGO_TARGET_DIR
     "${LANCEDB_CARGO_TARGET_DIR}" ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
 endif()
+# CMake writes install-file paths into cmake_install.cmake inside quoted
+# strings, where a backslash starts an escape sequence. Normalize the resolved
+# directory to CMake slash form on Windows hosts so the imported, install and
+# rpath paths stay usable CMake paths; other hosts keep their native path
+# characters. This also covers a caller that passes native separators or the
+# mixed separator form CI produces.
+if(CMAKE_HOST_WIN32)
+  string(REPLACE "\\" "/" LANCEDB_CARGO_TARGET_DIR "${LANCEDB_CARGO_TARGET_DIR}")
+endif()
 
 set(RUST_TARGET_DIR "${LANCEDB_CARGO_TARGET_DIR}")
 
