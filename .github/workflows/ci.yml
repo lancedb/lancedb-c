@@ -1,5 +1,15 @@
 name: CI
 
+# One workflow carries both matrices so that every check keeps its job id, name
+# and steps:
+#
+#   pull_request, push   lint-and-abi, build (Linux shared and static, Apple
+#                        Silicon) and the native Windows x64 MSVC build.
+#   schedule             AlmaLinux 10 and the Linux MinGW cross compile only.
+#   workflow_dispatch    The same compatibility pair, on demand.
+#
+# The compatibility environments report release portability rather than
+# per-commit risk, so they run daily instead of on every pull request.
 on:
   push:
     branches: [main]
@@ -19,6 +29,14 @@ on:
       - 'docs/**'
       - 'Doxyfile'
       - '.github/workflows/docs.yml'
+  # GitHub schedules only the default branch, so this cron covers main between
+  # pushes. 03:17 UTC is a minute off the top of the hour, where the documented
+  # scheduling spike is, and outside the maintainers' working hours.
+  schedule:
+    - cron: '17 3 * * *'
+  # Deliberately no inputs: this dispatch exists only to re-run the
+  # compatibility pair on demand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,12 +47,20 @@ env:
   CARGO_INCREMENTAL: 0
 
 concurrency:
-  group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
+  # A pull request keeps one group per ref, so a new push cancels the previous
+  # run. Every other event gets its own run-id group, so a push, schedule or
+  # dispatch run never cancels or displaces another run.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint-and-abi:
     name: Lint and ABI checks
+    # The diff-scoped C and C++ format check needs a base commit: a pull request
+    # carries a base SHA and a push carries a before SHA. Schedule and dispatch
+    # runs have neither, so they skip lint instead of failing on an unsupported
+    # event.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     # The first run builds the dev-profile Clippy cache from scratch; later runs
     # take a few minutes. Keep the ceiling above a cold dependency build.
@@ -109,6 +135,8 @@ jobs:
 
   build:
     name: Build ${{ matrix.lib_type }} on ${{ matrix.os }}
+    # Part of the change-triggered matrix; the daily run is compatibility-only.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -235,6 +263,8 @@ jobs:
 
   build_windows_native:
     name: Build shared on windows-2025
+    # Part of the change-triggered matrix; the daily run is compatibility-only.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: windows-2025
     timeout-minutes: 180
 
@@ -294,6 +324,8 @@ jobs:
 
   build_almalinux:
     name: Build on AlmaLinux 10
+    # Compatibility-only: the schedule and the manual dispatch run it.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
       image: almalinux:10
@@ -343,6 +375,8 @@ jobs:
 
   cross_compile:
     name: Cross-compile Windows on Linux
+    # Compatibility-only: the schedule and the manual dispatch run it.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
