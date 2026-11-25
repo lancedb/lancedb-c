@@ -102,6 +102,8 @@ const char* kBranchDiffJson = R"json({
   ]
 })json";
 
+#ifndef _WIN32
+
 std::string ready_result_json() {
   return std::string(R"json({"status":"ready","diff":)json") +
          kBranchDiffJson +
@@ -137,8 +139,6 @@ std::string unknown_status_result_json() {
          kBranchDiffJson +
          R"json(,"preview":{"promotedColumns":[]}})json";
 }
-
-#ifndef _WIN32
 
 struct HttpRequest {
   std::string method;
