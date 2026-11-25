@@ -59,8 +59,9 @@ cmake --build --preset ci-linux-shared
 ctest --preset ci-linux-shared -j 6
 ```
 
-From a Visual Studio developer shell, Windows uses `ci-windows-msvc`; run its
-consumer checks with `ci-windows-msvc-c17` and `ci-windows-msvc-consumer`.
+On Windows, run `ci-windows-msvc` and its `ci-windows-msvc-c17` /
+`ci-windows-msvc-consumer` consumer checks from the x64 Native Tools Command
+Prompt for VS, which provides the amd64 MSVC environment the workflow uses.
 
 Every preset configures `${sourceDir}/build` and points
 `LANCEDB_CARGO_TARGET_DIR` at `${sourceDir}/target`, the directory the CI Rust

@@ -49,7 +49,7 @@
     {
       "name": "ci-windows-msvc",
       "displayName": "Windows x64 MSVC Debug shared, routine CI",
-      "description": "The routine windows-2025 build; run it from a Visual Studio developer shell so cl.exe is on PATH.",
+      "description": "The routine windows-2025 build; run it from the x64 Native Tools Command Prompt for VS.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
