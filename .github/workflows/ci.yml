@@ -108,14 +108,14 @@ jobs:
             echo "::error::base commit ${base} is not available"
             exit 1
           fi
-          mapfile -d '' files < <(git diff --name-only -z --diff-filter=ACMR "${base}" HEAD -- \
-            '*.c' '*.h' '*.cc' '*.cpp' '*.cxx' '*.hpp' '*.hh' '*.hxx')
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "no C or C++ files changed"
+          cpp_paths=('*.c' '*.h' '*.cc' '*.cpp' '*.cxx' '*.hpp' '*.hh' '*.hxx')
+          if git diff --quiet --diff-filter=ACMR -M "${base}" HEAD -- "${cpp_paths[@]}"; then
+            echo "no C or C++ changes to format"
             exit 0
           fi
           clang-format --version
-          git clang-format --diff "${base}" HEAD -- "${files[@]}"
+          git diff -U0 --no-color --diff-filter=ACMR -M "${base}" HEAD -- "${cpp_paths[@]}" \
+            | clang-format-diff -p1
 
       - name: Check C ABI declarations (host and MSVC LLP64)
         run: |
