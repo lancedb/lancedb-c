@@ -107,7 +107,6 @@ if [[ "$selected_rustc" != "$channel" || "$selected_cargo" != "$channel" ]]; the
 fi
 
 echo "RUSTUP_TOOLCHAIN=${channel}" >> "$GITHUB_ENV"
-echo "RUSTUP_CACHE_IDENTITY=rustup-${channel}" >> "$GITHUB_ENV"
 echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 echo "selected rustc: $(command -v rustc) ${selected_rustc}"
 echo "selected cargo: $(command -v cargo) ${selected_cargo}"

@@ -372,8 +372,8 @@ jobs:
 
       # Keep the distribution rustc and cargo while they meet the crate MSRV;
       # only an older distribution falls back to the repository toolchain. The
-      # selection runs before the cache so the cache keys on the compiler that
-      # builds the job, and the fallback sets its own cache identity.
+      # selection runs before the cache so the cache sees the compiler that
+      # builds the job.
       # See https://github.com/lancedb/lancedb-c/pull/109 for the distro policy.
       - name: Select the Rust toolchain
         shell: bash
@@ -381,9 +381,7 @@ jobs:
 
       # The earlier cache entry was saved for a host-side target path and a
       # full-match restore skips saving, so the corrected container-workspace
-      # target needs its own key. The action also keys on the selected rustc
-      # version; RUSTUP_CACHE_IDENTITY keeps a rustup fallback distinct even
-      # when its version matches the distribution.
+      # target needs its own key.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
