@@ -3,8 +3,22 @@ name: CI
 on:
   push:
     branches: [main]
+    # Docs and repository metadata do not affect the native, ABI, lint or
+    # fixture checks. The documentation workflow owns docs inputs.
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'Doxyfile'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
+    # Keep the same ignored paths for pull requests so a docs-only change does
+    # not spend the native build matrix.
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'Doxyfile'
+      - '.github/workflows/docs.yml'
 
 permissions:
   contents: read
@@ -19,6 +33,80 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  lint-and-abi:
+    name: Lint and ABI checks
+    runs-on: ubuntu-latest
+    # The first run builds the dev-profile Clippy cache from scratch; later runs
+    # take a few minutes. Keep the ceiling above a cold dependency build.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-lint
+          cache-on-failure: true
+
+      - name: Install pinned cbindgen
+        run: |
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+            --fail --location --silent --show-error \
+            --output cbindgen \
+            https://github.com/mozilla/cbindgen/releases/download/0.29.4/cbindgen-ubuntu22.04
+          echo "27ac237e2ad3ffaffc8ecce0c03e3caa1d1b09e691906c3cb0967367ff6d783d  cbindgen" | sha256sum --check --strict
+          chmod +x cbindgen
+          sudo install -m 0755 cbindgen /usr/local/bin/cbindgen
+          rm -f cbindgen
+          cbindgen --version
+
+      - name: Install clang and clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-format
+
+      - name: Run packaging fixture checks
+        run: python3 .github/scripts/test_package.py
+
+      - name: Run release fixture checks
+        run: python3 .github/scripts/test_release.py
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Check formatting of changed C and C++ files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "${EVENT_NAME}" in
+            pull_request) base="${PR_BASE_SHA}" ;;
+            push) base="${PUSH_BEFORE_SHA}" ;;
+            *)
+              echo "::error::unsupported event ${EVENT_NAME} for the diff-scoped format check"
+              exit 1
+              ;;
+          esac
+          clang-format --version
+          python3 .github/scripts/check_format.py --repo . --base "${base}"
+
+      - name: Check C ABI declarations (host and MSVC LLP64)
+        run: |
+          python3 .github/scripts/check_abi.py --repo . --self-test
+          python3 .github/scripts/check_abi.py --repo . --target x86_64-pc-windows-msvc --self-test
+
+      - name: Check Rust lints
+        run: cargo clippy --all-targets -- -D warnings
+
   build:
     name: Build ${{ matrix.lib_type }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -42,24 +130,11 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.lib_type }}
 
-      - name: Install pinned cbindgen
-        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
-        run: |
-          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
-            --fail --location --silent --show-error \
-            --output cbindgen \
-            https://github.com/mozilla/cbindgen/releases/download/0.29.4/cbindgen-ubuntu22.04
-          echo "27ac237e2ad3ffaffc8ecce0c03e3caa1d1b09e691906c3cb0967367ff6d783d  cbindgen" | sha256sum --check --strict
-          chmod +x cbindgen
-          sudo install -m 0755 cbindgen /usr/local/bin/cbindgen
-          rm -f cbindgen
-          cbindgen --version
-
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y lsb-release valgrind clang
+          sudo apt-get install -y lsb-release valgrind
           wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt-get install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
           sudo apt-get update
@@ -88,14 +163,6 @@ jobs:
       - name: Check C17 consumer
         run: ninja -C build check-c17
 
-      - name: Check
-        if: matrix.lib_type == 'shared'
-        run: ninja -C build check
-
-      - name: Check C ABI declarations (host and MSVC LLP64)
-        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
-        run: ninja -C build check-abi
-
       - name: Test
         run: ctest --test-dir build -j --output-on-failure
 
@@ -122,21 +189,6 @@ jobs:
             build/valgrind_*.txt
           if-no-files-found: ignore
           retention-days: 7
-
-  package-script:
-    name: Package script checks
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Run packaging fixture checks
-        run: python3 .github/scripts/test_package.py
-
-      - name: Run release fixture checks
-        run: python3 .github/scripts/test_release.py
 
   build_windows_native:
     name: Build shared on windows-2025
