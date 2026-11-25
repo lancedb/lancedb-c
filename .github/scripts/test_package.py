@@ -561,10 +561,10 @@ class TargetPolicyTests(unittest.TestCase):
         )
         self.assertEqual(matrix_targets, set(package.TARGETS))
 
-    def test_package_workflow_runs_for_tags_and_dispatch_only(self) -> None:
+    def test_package_workflow_runs_for_dispatch_only(self) -> None:
         workflow = self.workflow()
         self.assertNotIn("pull_request:", workflow)
-        self.assertIn("push:\n    tags:\n      - 'v*'", workflow)
+        self.assertNotIn("push:", workflow)
         self.assertIn("workflow_dispatch:", workflow)
 
     def test_intel_macos_is_not_a_supported_target(self) -> None:
