@@ -143,6 +143,9 @@ jobs:
     # Part of the change-triggered matrix; the daily run is compatibility-only.
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ${{ matrix.os }}
+    # The cold macOS job took 69 minutes before the sanitizer lane was added;
+    # keep room for a cold cache and runner variability.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -158,7 +161,9 @@ jobs:
             preset: ci-macos
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install
@@ -272,7 +277,7 @@ jobs:
 
       - name: Upload test diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-diagnostics-${{ matrix.os }}-${{ matrix.lib_type }}
           path: |
@@ -345,8 +350,12 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: almalinux:10
+    # The cold AlmaLinux job took 45 minutes on the current cache key.
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Enable CRB and EPEL repos
         run: |
@@ -395,9 +404,13 @@ jobs:
     # Compatibility-only: the schedule and the manual dispatch run it.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # The cold MinGW cross build took 32 minutes on the current cache key.
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
