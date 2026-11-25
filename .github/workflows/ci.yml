@@ -221,8 +221,13 @@ jobs:
       # This job deliberately builds with the AlmaLinux system Rust instead of
       # rust-toolchain.toml, keeping coverage for distro-provided toolchain.
       # See https://github.com/lancedb/lancedb-c/pull/109 for the rationale.
+      # The earlier cache entry was saved for a host-side target path and a
+      # full-match restore skips saving, so the corrected container-workspace
+      # target needs its own key.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          key: almalinux-cargo-target
 
       - name: Configure CMake
         run: |
@@ -230,7 +235,7 @@ jobs:
           cd build
           cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
             -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
-            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target"
+            -DLANCEDB_CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
 
       - name: Build
         run: ninja -C build
