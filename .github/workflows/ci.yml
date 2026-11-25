@@ -183,8 +183,9 @@ jobs:
         run: |
           brew install apache-arrow protobuf boost
 
-      # CI-only: CMake >= 3.24 promotes the existing -Wall -Wextra / /W4
-      # diagnostics to errors. The project and local presets keep 3.22.
+      # CI-only: CMake >= 3.24 promotes the project's C++ -Wall -Wextra
+      # -Wtype-limits (or /W4) diagnostics to -Werror (/WX). C17 targets
+      # keep their own strict flags. The project and local presets keep 3.22.
       - name: Configure CMake
         run: cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
 
