@@ -1,0 +1,135 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ci-native-release",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_EXAMPLES": "ON",
+        "BUILD_TESTS": "ON",
+        "BUILD_ASIO_COROUTINE_EXAMPLE": "ON",
+        "LANCEDB_CARGO_TARGET_DIR": "${sourceDir}/target"
+      }
+    },
+    {
+      "name": "ci-linux-shared",
+      "displayName": "Linux shared, routine CI",
+      "description": "The routine ubuntu-latest shared build and test configuration.",
+      "inherits": "ci-native-release",
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "ON"
+      }
+    },
+    {
+      "name": "ci-linux-static",
+      "displayName": "Linux static, routine CI",
+      "description": "The routine ubuntu-latest static build and test configuration.",
+      "inherits": "ci-native-release",
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "OFF"
+      }
+    },
+    {
+      "name": "ci-macos",
+      "displayName": "Apple Silicon shared, routine CI",
+      "description": "The routine macos-15 shared build and test configuration.",
+      "inherits": "ci-native-release",
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "ON"
+      }
+    },
+    {
+      "name": "ci-windows-msvc",
+      "displayName": "Windows x64 MSVC Debug shared, routine CI",
+      "description": "The routine windows-2025 build; run it from a Visual Studio developer shell so cl.exe is on PATH.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_SHARED_LIBS": "ON",
+        "BUILD_CONSUMER_TEST": "ON",
+        "LANCEDB_CARGO_TARGET_DIR": "${sourceDir}/target"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ci-linux-shared",
+      "configurePreset": "ci-linux-shared"
+    },
+    {
+      "name": "ci-linux-static",
+      "configurePreset": "ci-linux-static"
+    },
+    {
+      "name": "ci-macos",
+      "configurePreset": "ci-macos"
+    },
+    {
+      "name": "ci-windows-msvc",
+      "configurePreset": "ci-windows-msvc",
+      "jobs": 4
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "ci-linux-shared",
+      "configurePreset": "ci-linux-shared",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-linux-static",
+      "configurePreset": "ci-linux-static",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-macos",
+      "configurePreset": "ci-macos",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-windows-msvc-c17",
+      "configurePreset": "ci-windows-msvc",
+      "filter": {
+        "include": {
+          "name": "^lancedb_c17_consumer$"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-windows-msvc-consumer",
+      "configurePreset": "ci-windows-msvc",
+      "filter": {
+        "include": {
+          "name": "^package_consumer$"
+        }
+      },
+      "execution": {
+        "noTestsAction": "error"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

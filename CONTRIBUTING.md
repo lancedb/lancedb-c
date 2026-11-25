@@ -48,6 +48,27 @@ ctest --test-dir build -j 6 --output-on-failure
 example needs `-DBUILD_ASIO_COROUTINE_EXAMPLE=ON` in addition to
 `-DBUILD_EXAMPLES=ON`.
 
+### Presets
+
+`CMakePresets.json` mirrors the routine native CI configurations, one per
+supported host. On Linux and Apple Silicon:
+
+```bash
+cmake --preset ci-linux-shared      # or ci-linux-static, ci-macos
+cmake --build --preset ci-linux-shared
+ctest --preset ci-linux-shared -j 6
+```
+
+From a Visual Studio developer shell, Windows uses `ci-windows-msvc`; run its
+consumer checks with `ci-windows-msvc-c17` and `ci-windows-msvc-consumer`.
+
+Every preset configures `${sourceDir}/build` and points
+`LANCEDB_CARGO_TARGET_DIR` at `${sourceDir}/target`, the directory the CI Rust
+cache restores. Remove `build/` before switching presets. The presets are a
+convenience over the command-line build above, not a replacement: plain CMake
+invocations, the AlmaLinux and MinGW compatibility jobs, and the docs and
+packaging workflows keep their own configuration.
+
 ### Manual shared-library build
 
 The supported shared-library entry points are CMake, the package workflow, and
