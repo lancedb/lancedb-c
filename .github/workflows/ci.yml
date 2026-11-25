@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Rust builds are managed by rustup and rust-toolchain.toml. Keep incremental
+# compilation off so the CI Rust caches stay small and reusable.
+env:
+  CARGO_INCREMENTAL: 0
+
 concurrency:
   group: ci-${{ github.event_name == 'push' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -29,17 +34,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
 
+      # The export wrapper is a Cargo linker input that the action's automatic
+      # key does not see, so start a fresh cache generation instead of
+      # restoring target directories whose unit fingerprints were built
+      # without it.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          key: ${{ matrix.os }}-${{ matrix.lib_type }}
 
       - name: Install pinned cbindgen
         if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
-        run: cargo install cbindgen --version =0.29.4 --locked
+        run: |
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+            --fail --location --silent --show-error \
+            --output /usr/local/bin/cbindgen \
+            https://github.com/mozilla/cbindgen/releases/download/0.29.4/cbindgen-ubuntu22.04
+          echo "27ac237e2ad3ffaffc8ecce0c03e3caa1d1b09e691906c3cb0967367ff6d783d  /usr/local/bin/cbindgen" | sha256sum --check --strict
+          chmod +x /usr/local/bin/cbindgen
+          cbindgen --version
 
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -62,6 +79,7 @@ jobs:
           cd build
           cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
+            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target" \
             -DBUILD_SHARED_LIBS=${{ matrix.lib_type == 'shared' && 'ON' || 'OFF' }}
 
       - name: Build
@@ -145,13 +163,13 @@ jobs:
           mkdir -p /c/c
           echo 'CARGO_HOME=C:\c' >> "$GITHUB_ENV"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
 
       - name: Install protoc
         shell: pwsh
@@ -170,6 +188,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Debug
           -DBUILD_SHARED_LIBS=ON
           -DBUILD_CONSUMER_TEST=ON
+          -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target"
 
       - name: Build
         run: cmake --build build --parallel 4
@@ -204,12 +223,21 @@ jobs:
       - name: Install build tools
         run: dnf install -y gcc gcc-c++ cmake ninja-build protobuf-compiler protobuf-devel rust cargo arrow-devel valgrind git boost-devel
 
+      # This job deliberately builds with the AlmaLinux system Rust instead of
+      # rust-toolchain.toml, keeping coverage for distro-provided toolchain.
+      # See https://github.com/lancedb/lancedb-c/pull/109 for the rationale.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+
       - name: Configure CMake
         run: |
           mkdir -p build
           cd build
           cmake .. -G Ninja -DBUILD_EXAMPLES=ON -DBUILD_ASIO_COROUTINE_EXAMPLE=ON \
-            -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+            -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
+            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target"
 
       - name: Build
         run: ninja -C build
@@ -232,13 +260,16 @@ jobs:
         with:
           cmake-version: '4.1'
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: x86_64-pc-windows-gnu
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Add the Windows GNU target
+        run: rustup target add x86_64-pc-windows-gnu
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
 
       - name: Install dependencies
         run: |
@@ -290,6 +321,7 @@ jobs:
           cmake .. -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=$GITHUB_WORKSPACE/toolchain.cmake \
             -DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/arrow-install \
+            -DLANCEDB_CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target \
             -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
