@@ -4630,8 +4630,8 @@ dependencies = [
 
 [[package]]
 name = "lancedb"
-version = "0.42.0-beta.33"
-source = "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.33#7c3d68e9510a6822fc1109b0518730448c9e344a"
+version = "0.42.0-beta.34"
+source = "git+https://github.com/lancedb/lancedb?tag=v0.42.0-beta.34#9adb403656b1f3c1494cb1a3c2d1ee938eacb6cd"
 dependencies = [
  "ahash",
  "arrow",
