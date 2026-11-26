@@ -58,14 +58,20 @@ import library name matters, see [Windows (MSVC)](#windows-msvc).
 
 ## Install a prebuilt package
 
-From an empty directory, download an archive and its sibling `.sha256` file
-from [GitHub Releases](https://github.com/lancedb/lancedb-c/releases), verify
-the checksum, and extract it. For example, for the public
-`v0.1.0-preview.2` Linux x86_64 package:
+Choose a release from [GitHub Releases](https://github.com/lancedb/lancedb-c/releases).
+Each release lists one archive per target from the table above, a sibling
+`.sha256` file for each archive, and a combined `SHA256SUMS` file. Archive names
+have the form `lancedb-c-<commit>-<target>.tar.gz`, where `<commit>` is the
+packaged commit shown on the release page. The release notes and the
+`manifest.json` in each archive record the exact version, commit and target.
+
+Download the archive for your target and its sibling `.sha256` file, then
+verify and extract it. This example uses `linux-amd64`; set `tag` to the release
+tag and `archive` to the archive name from that release:
 
 ```bash
-tag=v0.1.0-preview.2
-archive=lancedb-c-250aa95153848c6fc6f4af571af70e979fb89ce3-linux-amd64.tar.gz
+tag=REPLACE_WITH_RELEASE_TAG
+archive=REPLACE_WITH_LINUX_AMD64_ARCHIVE
 base="https://github.com/lancedb/lancedb-c/releases/download/${tag}"
 
 curl -fLO "${base}/${archive}"
@@ -75,11 +81,8 @@ tar -xzf "${archive}"
 root="${PWD}/${archive%.tar.gz}"
 ```
 
-On macOS use `shasum -a 256 -c "${archive}.sha256"` instead of `sha256sum`.
-Substitute the current release tag and archive name from the Releases page; the
-archive name contains the packaged commit and the platform suffix from the
-table above. The release also publishes a combined `SHA256SUMS` and an internal
-`SHA256SUMS` inside each archive.
+On macOS, use the `darwin-arm64` archive and
+`shasum -a 256 -c "${archive}.sha256"` instead of `sha256sum`.
 
 The extracted package contains:
 
@@ -97,9 +100,9 @@ macOS uses `lib/liblancedb.dylib`; Windows uses `lib/lancedb.dll` and
 `lib/lancedb.dll.lib`. The manifest records the version, commit, target and
 package-relative paths.
 
-The `v0.1.0-preview.2` archives do not contain a CMake package config or a
-pkg-config file. Use the `-I`/`-L` commands below for that archive. A current
-source build installs both, as described in
+Prebuilt release archives do not contain a CMake package config or a
+pkg-config file. Use the `-I`/`-L` commands below with the extracted package.
+A current source build installs both, as described in
 [Build and install from source](#build-and-install-from-source).
 
 Save this complete C17 program as `hello.c` in the same directory. It
@@ -164,18 +167,33 @@ Use the **x64 Native Tools Command Prompt for VS** for `windows-amd64`, or the
 architecture must match the package. The import library is `lancedb.dll.lib`;
 `-llancedb` does not select it under MSVC.
 
+Download the matching archive and its sibling `.sha256` file from the release
+page, then verify and extract it. Set `tag` and `archive` from that release:
+
 ```bat
-set "root=%CD%\lancedb-c-250aa95153848c6fc6f4af571af70e979fb89ce3-windows-amd64"
+set "tag=REPLACE_WITH_RELEASE_TAG"
+set "archive=REPLACE_WITH_WINDOWS_ARCHIVE"
+curl.exe -fLO "https://github.com/lancedb/lancedb-c/releases/download/%tag%/%archive%"
+curl.exe -fLO "https://github.com/lancedb/lancedb-c/releases/download/%tag%/%archive%.sha256"
+certutil -hashfile "%archive%" SHA256
+tar -xzf "%archive%"
+set "root=%CD%\%archive:.tar.gz=%"
+```
+
+Compare the printed SHA-256 hash with the first field of `%archive%.sha256`;
+they must match before you continue. Then compile `hello.c` against the
+extracted package:
+
+```bat
 cl /nologo /std:c17 /W4 /I"%root%\include" hello.c ^
   /Fe:hello.exe /link /LIBPATH:"%root%\lib" lancedb.dll.lib
 copy "%root%\lib\lancedb.dll" .
 hello.exe .\example-db
 ```
 
-The `windows-arm64` archive extracts to
-`lancedb-c-250aa95153848c6fc6f4af571af70e979fb89ce3-windows-arm64`; use that
-directory with the ARM64 prompt. For another release, replace the path with the
-directory actually extracted.
+The extracted directory is `lancedb-c-<commit>-windows-amd64` or
+`lancedb-c-<commit>-windows-arm64`; `root` above derives it from the archive
+name.
 
 The loader must find `lancedb.dll` at runtime. Copy it next to the executable
 (as above) or add `%root%\lib` to `PATH`. A CMake consumer of an installed

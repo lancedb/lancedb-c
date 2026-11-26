@@ -49,11 +49,11 @@ provides a ``lancedb.pc`` file):
      $(pkg-config --cflags --libs lancedb) \
      -Wl,-rpath,"$lancedb_libdir" -o hello
 
-The public ``v0.1.0-preview.2`` archives do not contain a pkg-config file or a
-CMake package config. Use their ``include/`` and ``lib/`` directories with
-``-I`` and ``-L`` as shown
-in the `repository README <https://github.com/lancedb/lancedb-c#install-a-prebuilt-package>`_.
-See the same README for source build and installation commands.
+Prebuilt release archives do not contain a pkg-config file or a CMake package
+config. Use their ``include/`` and ``lib/`` directories with ``-I`` and
+``-L`` as shown in the `repository README
+<https://github.com/lancedb/lancedb-c#install-a-prebuilt-package>`_. See the
+same README for source build and installation commands.
 
 Creating a table with Arrow C++
 -------------------------------
