@@ -51,6 +51,14 @@ on:
           - seed
           - warm
         default: seed
+      arm:
+        description: which comparison arm to run
+        required: true
+        type: choice
+        options:
+          - both
+          - candidate
+        default: both
 
 permissions:
   contents: read
@@ -526,6 +534,11 @@ jobs:
             sccache: 'off'
           - arm: sccache
             sccache: 'on'
+        # EXPERIMENT BRANCH ONLY: a candidate-only dispatch drops the control row
+        # so it can reuse the control archive an earlier seed already saved. The
+        # default value keeps both rows, and the warm phase always needs both.
+        exclude:
+          - arm: ${{ inputs.arm == 'candidate' && 'control' || 'none' }}
 
     steps:
       - name: Select checkout ref for the phase
