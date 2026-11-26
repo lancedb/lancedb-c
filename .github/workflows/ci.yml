@@ -212,15 +212,19 @@ jobs:
       # -Wtype-limits (or /W4) diagnostics to -Werror (/WX). C17 targets
       # keep their own strict flags. The project and local presets keep 3.22.
       # Only the Ubuntu shared row routes its C and C++ compiles through
-      # sccache; the static and macOS rows keep the plain compilers.
+      # sccache. It gets its own command so the static and macOS rows keep the
+      # original invocation byte for byte, and so no step depends on a Bash
+      # newer than the 3.2 that macOS runners provide.
       - name: Configure CMake
+        if: matrix.os != 'ubuntu-latest' || matrix.lib_type != 'shared'
+        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+
+      - name: Configure CMake (Ubuntu shared, sccache launchers)
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
         run: |
-          set -euo pipefail
-          launcher_args=()
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ] && [ "${{ matrix.lib_type }}" = "shared" ]; then
-            launcher_args+=(-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache)
-          fi
-          cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON "${launcher_args[@]}"
+          cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       # The static leg's install and C17 checks need the final library. Running
       # them before the full build keeps check-install from switching the Cargo
