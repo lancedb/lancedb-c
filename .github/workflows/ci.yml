@@ -518,8 +518,6 @@ jobs:
       SCCACHE_LOG: sccache=info
       SEED_SHA: 50ec12b61ae48b815bd12a0bfb43d6d503289e57
       WARM_SHA: 171f33b062c90f2f30e0133a47bd8f4ebb08aafe
-      SCCACHE_VERSION: v0.20.1
-      SCCACHE_SHA256: c9f6c5a3ae84d9da0956b28c357a365827bda33f3383647fc0b67484c74a5ea9
     strategy:
       fail-fast: false
       matrix:
@@ -625,29 +623,26 @@ jobs:
 
       - name: Install pinned sccache
         if: matrix.sccache == 'on'
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/sccache-bin"
-          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --fail --location --silent --show-error \
-            --output "$RUNNER_TEMP/sccache.tar.gz" "$url"
-          echo "${SCCACHE_SHA256}  $RUNNER_TEMP/sccache.tar.gz" | sha256sum --check --strict
-          tar xzf "$RUNNER_TEMP/sccache.tar.gz" -C "$RUNNER_TEMP/sccache-bin" --strip-components=1
-          sudo install -m 0755 "$RUNNER_TEMP/sccache-bin/sccache" /usr/local/bin/sccache
-          sccache --version
+        # Official setup action, pinned by commit. It installs the pinned sccache
+        # release, puts it on PATH and exports the job's ephemeral GHA cache
+        # tokens for later shell steps; it does not set RUSTC_WRAPPER, so Rust
+        # builds stay untouched.
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.20.1
+          disable_annotations: 'false'
 
       - name: Configure sccache GHA backend and probe it
         if: matrix.sccache == 'on'
         run: |
           set -euo pipefail
-          # The GHA cache backend authenticates with the job's ephemeral runner
-          # tokens. Re-export them for shell steps; they are never printed.
+          # The setup action exports the job's ephemeral GHA cache tokens for
+          # shell steps; without them the backend cannot authenticate.
           for name in ACTIONS_RUNTIME_TOKEN ACTIONS_RESULTS_URL; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::$name is missing from the step environment, so the GHA cache backend cannot authenticate"
+              echo "::error::$name is missing after the sccache setup action, so the GHA cache backend cannot authenticate"
               exit 1
             fi
-            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
           {
             echo "SCCACHE_DIR=$RUNNER_TEMP/sccache-disk"
