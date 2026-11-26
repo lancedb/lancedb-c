@@ -10,4 +10,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 lancedb = { package = "lancedb-c", path = "../.." }
-lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v15.1.0-beta.2", default-features = false }
+lance-io = { git = "https://github.com/lance-format/lance.git", tag = "v16.0.0-beta.2", default-features = false }
