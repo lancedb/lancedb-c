@@ -188,11 +188,43 @@ jobs:
         run: |
           brew install apache-arrow protobuf boost
 
+      # The routine Ubuntu shared row caches its C and C++ objects with sccache
+      # on the GitHub Actions cache backend. Rust keeps the existing cache: the
+      # launchers only reach the two CMake configurations, and the unchanged
+      # crates are already reused there (#198).
+      - name: Install sccache
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.20.1
+
+      # A stable sccache-only namespace keeps these objects apart from the Rust
+      # cache entries and survives code changes; changing the version purges it.
+      - name: Point sccache at the GitHub Actions cache
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: |
+          {
+            echo "SCCACHE_GHA_ENABLED=on"
+            echo "SCCACHE_GHA_VERSION=v1"
+          } >> "$GITHUB_ENV"
+
       # CI-only: CMake >= 3.24 promotes the project's C++ -Wall -Wextra
       # -Wtype-limits (or /W4) diagnostics to -Werror (/WX). C17 targets
       # keep their own strict flags. The project and local presets keep 3.22.
+      # Only the Ubuntu shared row routes its C and C++ compiles through
+      # sccache. It gets its own command so the static and macOS rows keep the
+      # original invocation byte for byte, and so no step depends on a Bash
+      # newer than the 3.2 that macOS runners provide.
       - name: Configure CMake
+        if: matrix.os != 'ubuntu-latest' || matrix.lib_type != 'shared'
         run: cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+
+      - name: Configure CMake (Ubuntu shared, sccache launchers)
+        if: matrix.os == 'ubuntu-latest' && matrix.lib_type == 'shared'
+        run: |
+          cmake --preset "${{ matrix.preset }}" -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       # The static leg's install and C17 checks need the final library. Running
       # them before the full build keeps check-install from switching the Cargo
@@ -235,6 +267,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
             -DBUILD_SHARED_LIBS=ON \
