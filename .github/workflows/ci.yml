@@ -39,9 +39,18 @@ on:
   # scheduling spike is, and outside the maintainers' working hours.
   schedule:
     - cron: '17 3 * * *'
-  # Deliberately no inputs: this dispatch exists only to re-run the
-  # compatibility pair on demand.
+  # EXPERIMENT BRANCH ONLY (C #198 sccache): the dispatch selects which half of
+  # the comparison to run. The product workflow keeps this trigger input-free.
   workflow_dispatch:
+    inputs:
+      phase:
+        description: sccache comparison phase
+        required: true
+        type: choice
+        options:
+          - seed
+          - warm
+        default: seed
 
 permissions:
   contents: read
@@ -345,8 +354,9 @@ jobs:
 
   build_almalinux:
     name: Build on AlmaLinux 10
-    # Compatibility-only: the schedule and the manual dispatch run it.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # EXPERIMENT BRANCH ONLY: a dispatch on this branch must start just the
+    # sccache comparison, so the compatibility pair keeps the schedule alone.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     container:
       image: almalinux:10
@@ -407,8 +417,9 @@ jobs:
 
   cross_compile:
     name: Cross-compile Windows on Linux
-    # Compatibility-only: the schedule and the manual dispatch run it.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # EXPERIMENT BRANCH ONLY: a dispatch on this branch must start just the
+    # sccache comparison, so the compatibility pair keeps the schedule alone.
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     # A MinGW run with both the Rust and Arrow caches missing took 57m36s.
     # Keep headroom for the same double-miss path.
@@ -489,3 +500,387 @@ jobs:
 
       - name: Build
         run: ninja -C build
+
+  # EXPERIMENT ONLY (C #198, disposable branch; not for merge): measures whether
+  # sccache launchers for the ordinary GCC and the sanitizer Clang C/C++ builds
+  # beat the existing Rust cache alone across one real SDK lockfile bump. Both
+  # arms take identical steps; only the treatment arm installs sccache and passes
+  # the compiler launchers. Phase `seed` builds A on fresh runners and stores
+  # both caches, phase `warm` builds B on fresh runners and restores them.
+  sccache-compare:
+    name: sccache compare ${{ matrix.arm }} (${{ inputs.phase }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SCCACHE_GHA_ENABLED: 'on'
+      SCCACHE_GHA_VERSION: c198-sccache-v1
+      SCCACHE_LOG: sccache=info
+      SEED_SHA: 50ec12b61ae48b815bd12a0bfb43d6d503289e57
+      WARM_SHA: 171f33b062c90f2f30e0133a47bd8f4ebb08aafe
+      SCCACHE_VERSION: v0.20.1
+      SCCACHE_SHA256: c9f6c5a3ae84d9da0956b28c357a365827bda33f3383647fc0b67484c74a5ea9
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: control
+            sccache: 'off'
+          - arm: sccache
+            sccache: 'on'
+
+    steps:
+      - name: Select checkout ref for the phase
+        run: |
+          set -euo pipefail
+          case "${{ inputs.phase }}" in
+            seed) sha="$SEED_SHA" ;;
+            warm) sha="$WARM_SHA" ;;
+            *) echo "::error::unknown phase ${{ inputs.phase }}"; exit 1 ;;
+          esac
+          {
+            echo "CHECKOUT_SHA=$sha"
+            echo "PHASE=${{ inputs.phase }}"
+            echo "M_START=$(date -u +%s)"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify the checked-out source tree
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          tree="$(git rev-parse HEAD^{tree})"
+          dirty="$(git status --porcelain)"
+          {
+            echo "### sccache comparison: ${{ matrix.arm }} arm, ${{ inputs.phase }} phase"
+            echo ""
+            echo "| input | value |"
+            echo "| --- | --- |"
+            echo "| checked out sha | \`${actual}\` |"
+            echo "| expected sha | \`${CHECKOUT_SHA}\` |"
+            echo "| tree | \`${tree}\` |"
+            echo "| worktree dirty | \`${dirty:-no}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$dirty" ]; then
+            echo "::error::worktree is not clean after checkout"
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
+          if [ "$actual" != "$CHECKOUT_SHA" ]; then
+            echo "::error::checked out $actual but the phase requires $CHECKOUT_SHA"
+            exit 1
+          fi
+
+      - name: Record runner and toolchain identity
+        run: |
+          set -euo pipefail
+          {
+            echo "| os release | \`$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | tr -d '\"')\` |"
+            echo "| kernel | \`$(uname -r)\` |"
+            echo "| cpus | \`$(nproc)\` |"
+            echo "| rustc | \`$(rustc -vV | tr '\n' ' ')\` |"
+            echo "| gcc version | \`$(gcc --version | head -1)\` |"
+            echo "| gcc path | \`$(command -v gcc)\` |"
+            echo "| gcc sha256 | \`$(sha256sum "$(command -v gcc)" | cut -d' ' -f1)\` |"
+            echo "| gcc mtime | \`$(stat -c %y "$(command -v gcc)")\` |"
+            echo "| cmake | \`$(cmake --version | head -1)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rustc -vV
+          gcc --version | head -1
+
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Cache Rust dependencies
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # One namespace per arm, identical across the two phases so the warm
+          # phase restores the archive the seed phase saved for that arm.
+          prefix-key: v0-rust-c198-sccache-${{ matrix.arm }}
+
+      - name: Record Rust cache restore result
+        run: |
+          {
+            echo "| rust cache exact hit | \`${{ steps.rust-cache.outputs.cache-hit }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "rust cache exact hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "the restore key the action used is recorded in the Cache Rust dependencies step log"
+
+      - name: Install dependencies (Ubuntu)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y lsb-release valgrind
+          wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+          sudo apt-get install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb
+          sudo apt-get update
+          sudo apt-get install -y libarrow-dev libboost-coroutine-dev libboost-context-dev
+          echo "M_DEPS=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      - name: Install pinned sccache
+        if: matrix.sccache == 'on'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/sccache-bin"
+          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/sccache.tar.gz" "$url"
+          echo "${SCCACHE_SHA256}  $RUNNER_TEMP/sccache.tar.gz" | sha256sum --check --strict
+          tar xzf "$RUNNER_TEMP/sccache.tar.gz" -C "$RUNNER_TEMP/sccache-bin" --strip-components=1
+          sudo install -m 0755 "$RUNNER_TEMP/sccache-bin/sccache" /usr/local/bin/sccache
+          sccache --version
+
+      - name: Configure sccache GHA backend and probe it
+        if: matrix.sccache == 'on'
+        run: |
+          set -euo pipefail
+          # The GHA cache backend authenticates with the job's ephemeral runner
+          # tokens. Re-export them for shell steps; they are never printed.
+          for name in ACTIONS_RUNTIME_TOKEN ACTIONS_RESULTS_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is missing from the step environment, so the GHA cache backend cannot authenticate"
+              exit 1
+            fi
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+          {
+            echo "SCCACHE_DIR=$RUNNER_TEMP/sccache-disk"
+            echo "SCCACHE_ERROR_LOG=$RUNNER_TEMP/sccache-error.log"
+          } >> "$GITHUB_ENV"
+          # The server this step starts must use the same fresh directory the
+          # later steps get from GITHUB_ENV, so the phase starts with no local
+          # sccache objects and every warm hit has to come from the backend.
+          export SCCACHE_DIR="$RUNNER_TEMP/sccache-disk"
+          export SCCACHE_ERROR_LOG="$RUNNER_TEMP/sccache-error.log"
+          mkdir -p "$RUNNER_TEMP/sccache-stats"
+          sccache --stop-server >/dev/null 2>&1 || true
+          sccache --start-server
+          sccache --show-adv-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats/0-base.json"
+          # One fixed probe translation unit: the seed phase stores its object,
+          # and the warm phase asks for the same key before any project compile,
+          # so a warm hit is a real cross-run restore rather than a local reuse.
+          printf 'int c198_sccache_probe(void) { return 42; }\n' > "$RUNNER_TEMP/sccache-probe.c"
+          ( cd "$RUNNER_TEMP" && sccache gcc -O2 -c sccache-probe.c -o sccache-probe.o )
+          sccache --show-adv-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats/1-probe.json"
+          probe="$RUNNER_TEMP/sccache-stats/1-probe.json"
+          hits=$(jq '[.stats.cache_hits.counts | to_entries[].value] | add // 0' "$probe")
+          misses=$(jq '[.stats.cache_misses.counts | to_entries[].value] | add // 0' "$probe")
+          writes=$(jq -r '.stats.cache_writes' "$probe")
+          read_errors=$(jq -r '.stats.cache_read_errors' "$probe")
+          write_errors=$(jq -r '.stats.cache_write_errors' "$probe")
+          echo "cache location: $(jq -r '.cache_location' "$probe")"
+          echo "probe: hits=$hits misses=$misses writes=$writes read_errors=$read_errors write_errors=$write_errors"
+          if [ "$read_errors" -ne 0 ] || [ "$write_errors" -ne 0 ]; then
+            echo "::error::the GHA cache backend reported read or write errors, so any comparison would be meaningless"
+            exit 1
+          fi
+          if [ "$PHASE" = "seed" ] && [ "$writes" -lt 1 ]; then
+            echo "::error::the seed phase stored no sccache object, so the warm phase would have nothing to restore"
+            exit 1
+          fi
+          if [ "$PHASE" = "warm" ] && [ "$hits" -lt 1 ]; then
+            echo "::warning::the warm probe missed: the object the seed phase stored could not be restored, so compiler identity or the cache namespace changed between phases"
+          fi
+          echo "M_SCCACHE=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      - name: Configure CMake
+        run: |
+          set -euo pipefail
+          launcher_args=()
+          if [ "${{ matrix.sccache }}" = "on" ]; then
+            launcher_args+=(-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache)
+          fi
+          cmake --preset ci-linux-shared -DCMAKE_COMPILE_WARNING_AS_ERROR=ON "${launcher_args[@]}"
+          echo "M_CONFIGURE=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cmake --build --preset ci-linux-shared
+          echo "M_BUILD=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      - name: Snapshot sccache stats after the library build
+        if: matrix.sccache == 'on'
+        run: |
+          sccache --show-adv-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats/2-build.json"
+          sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Check installed package consumers
+        run: cmake --build --preset ci-linux-shared --target check-install
+
+      - name: Check C17 consumer
+        run: cmake --build --preset ci-linux-shared --target check-c17
+
+      - name: Test
+        run: ctest --preset ci-linux-shared -j
+
+      - name: Snapshot sccache stats after the ordinary configuration
+        if: matrix.sccache == 'on'
+        run: |
+          sccache --show-adv-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats/3-ordinary.json"
+          echo "M_ORDINARY=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      - name: Install Clang and llvm symbolizer
+        run: |
+          sudo apt-get install -y clang llvm
+          clang --version
+          llvm-symbolizer --version
+          {
+            echo "| clang | \`$(clang --version | head -1)\` |"
+            echo "| clang sha256 | \`$(sha256sum "$(command -v clang)" | cut -d' ' -f1)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure sanitizer build
+        run: |
+          set -euo pipefail
+          launcher_args=()
+          if [ "${{ matrix.sccache }}" = "on" ]; then
+            launcher_args+=(-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache)
+          fi
+          cmake -S . -B build-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=ON \
+            -DBUILD_CONSUMER_TEST=ON \
+            -DVALGRIND_EXECUTABLE=OFF \
+            -DLANCEDB_CARGO_TARGET_DIR="${{ github.workspace }}/target" \
+            "${launcher_args[@]}"
+
+      - name: Build sanitizer consumers
+        run: cmake --build build-sanitize --verbose
+
+      - name: Show sanitizer test roster
+        run: ctest --test-dir build-sanitize -N -V
+
+      - name: Run sanitizer tests
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure --no-tests=error
+
+      - name: Snapshot sccache stats after the sanitizer configuration
+        if: matrix.sccache == 'on'
+        run: |
+          sccache --show-adv-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats/4-sanitizer.json"
+          echo "M_SANITIZER=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      - name: Report sccache hits per segment
+        if: matrix.sccache == 'on'
+        run: |
+          set -euo pipefail
+          stats="$RUNNER_TEMP/sccache-stats"
+          hits_total() { jq '[.stats.cache_hits.counts | to_entries[].value] | add // 0' "$1"; }
+          misses_total() { jq '[.stats.cache_misses.counts | to_entries[].value] | add // 0' "$1"; }
+          scalar() { jq -r ".stats.$2" "$1"; }
+          segments=(
+            "1-probe.json:probe translation unit"
+            "2-build.json:library build (ordinary GCC)"
+            "3-ordinary.json:install, C17, CTest"
+            "4-sanitizer.json:sanitizer build (Clang)"
+          )
+          {
+            echo ""
+            echo "### sccache per segment"
+            echo ""
+            echo "| segment | hits | misses | compilations | writes |"
+            echo "| --- | --- | --- | --- | --- |"
+            previous="$stats/0-base.json"
+            for entry in "${segments[@]}"; do
+              current="$stats/${entry%%:*}"
+              label="${entry#*:}"
+              printf '| %s | %s | %s | %s | %s |\n' "$label" \
+                "$(( $(hits_total "$current") - $(hits_total "$previous") ))" \
+                "$(( $(misses_total "$current") - $(misses_total "$previous") ))" \
+                "$(( $(scalar "$current" compilations) - $(scalar "$previous" compilations) ))" \
+                "$(( $(scalar "$current" cache_writes) - $(scalar "$previous" cache_writes) ))"
+              previous="$current"
+            done
+            echo ""
+            echo "| segment | language | hits | misses |"
+            echo "| --- | --- | --- | --- |"
+            previous="$stats/0-base.json"
+            for entry in "${segments[@]}"; do
+              current="$stats/${entry%%:*}"
+              label="${entry#*:}"
+              for language in $(jq -r '.stats.cache_hits.counts, .stats.cache_misses.counts | keys[]' "$previous" "$current" | sort -u); do
+                hits=$(( $(jq -r --arg l "$language" '.stats.cache_hits.counts[$l] // 0' "$current") - $(jq -r --arg l "$language" '.stats.cache_hits.counts[$l] // 0' "$previous") ))
+                misses=$(( $(jq -r --arg l "$language" '.stats.cache_misses.counts[$l] // 0' "$current") - $(jq -r --arg l "$language" '.stats.cache_misses.counts[$l] // 0' "$previous") ))
+                if [ "$hits" -ne 0 ] || [ "$misses" -ne 0 ]; then
+                  printf '| %s | %s | %s | %s |\n' "$label" "$language" "$hits" "$misses"
+                fi
+              done
+              previous="$current"
+            done
+            echo ""
+            echo "| segment | compiler key | hits | misses |"
+            echo "| --- | --- | --- | --- |"
+            previous="$stats/0-base.json"
+            for entry in "${segments[@]}"; do
+              current="$stats/${entry%%:*}"
+              label="${entry#*:}"
+              # Advertised keys look like "c [gcc]" or "c++ [clang]", so read them
+              # line by line instead of word splitting.
+              while IFS= read -r key; do
+                hits=$(( $(jq -r --arg k "$key" '.stats.cache_hits.adv_counts[$k] // 0' "$current") - $(jq -r --arg k "$key" '.stats.cache_hits.adv_counts[$k] // 0' "$previous") ))
+                misses=$(( $(jq -r --arg k "$key" '.stats.cache_misses.adv_counts[$k] // 0' "$current") - $(jq -r --arg k "$key" '.stats.cache_misses.adv_counts[$k] // 0' "$previous") ))
+                if [ "$hits" -ne 0 ] || [ "$misses" -ne 0 ]; then
+                  printf '| %s | `%s` | %s | %s |\n' "$label" "$key" "$hits" "$misses"
+                fi
+              done < <(jq -r '.stats.cache_hits.adv_counts, .stats.cache_misses.adv_counts | keys[]' "$previous" "$current" | sort -u)
+              previous="$current"
+            done
+            echo ""
+            echo "- cache read errors: $(scalar "$stats/4-sanitizer.json" cache_read_errors)"
+            echo "- cache write errors: $(scalar "$stats/4-sanitizer.json" cache_write_errors)"
+            echo "- cache location: \`$(jq -r '.cache_location' "$stats/4-sanitizer.json")\`"
+            echo "- sccache version: \`$(jq -r '.version' "$stats/4-sanitizer.json")\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Report segmented timings
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "### segmented wall clock"
+            echo ""
+            echo "| marker | seconds from job start |"
+            echo "| --- | --- |"
+            start="${M_START:-0}"
+            for name in M_DEPS M_SCCACHE M_CONFIGURE M_BUILD M_ORDINARY M_SANITIZER; do
+              value="${!name:-}"
+              [ -n "$value" ] || continue
+              echo "| ${name} | $(( value - start )) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show test diagnostics
+        if: failure()
+        run: |
+          for log in build/Testing/Temporary/LastTest.log \
+                     build-sanitize/Testing/Temporary/LastTest.log; do
+            if [ -f "$log" ]; then
+              echo "::group::$log"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+          done
+          for log in build/valgrind_*.txt; do
+            [ -e "$log" ] || continue
+            echo "::group::$log"
+            cat "$log"
+            echo "::endgroup::"
+          done
+          if [ -f "$RUNNER_TEMP/sccache-error.log" ]; then
+            echo "::group::sccache log (tail)"
+            tail -200 "$RUNNER_TEMP/sccache-error.log"
+            echo "::endgroup::"
+          fi
