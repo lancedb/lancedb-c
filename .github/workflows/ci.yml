@@ -528,17 +528,16 @@ jobs:
       WARM_SHA: 171f33b062c90f2f30e0133a47bd8f4ebb08aafe
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arm: control
-            sccache: 'off'
-          - arm: sccache
-            sccache: 'on'
-        # EXPERIMENT BRANCH ONLY: a candidate-only dispatch drops the control row
-        # so it can reuse the control archive an earlier seed already saved. The
-        # default value keeps both rows, and the warm phase always needs both.
-        exclude:
-          - arm: ${{ inputs.arm == 'candidate' && 'control' || 'none' }}
+      # EXPERIMENT BRANCH ONLY: the matrix is one of two literal complete objects,
+      # so a candidate-only seed drops the control row while every other dispatch,
+      # including every warm run, keeps both exact rows. GitHub applies `include`
+      # after `exclude`, so an exclude entry cannot subtract a row here.
+      matrix: >-
+        ${{ fromJSON(
+          inputs.phase == 'seed' && inputs.arm == 'candidate'
+          && '{"include":[{"arm":"sccache","sccache":"on"}]}'
+          || '{"include":[{"arm":"control","sccache":"off"},{"arm":"sccache","sccache":"on"}]}'
+        ) }}
 
     steps:
       - name: Select checkout ref for the phase
