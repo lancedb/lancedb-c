@@ -64,6 +64,49 @@ CMake shared-library builds from this revision, and release packages from
   library. Use the installed CMake target rather than relying on a library-name
   spelling.
 
+Shared-library exports
+----------------------
+
+Shared libraries built by the release package workflow, and by CMake on Linux,
+macOS or native Windows MSVC, export only the ``lancedb_*`` functions declared
+in ``include/lancedb.h``. The build derives that allowlist from the header's
+``extern "C"`` declarations and passes a platform-specific export control to
+the final ``liblancedb`` link: an ELF version script, a Mach-O
+exported-symbols list, or an MSVC ``.def`` file with its paired import library.
+Symbols that are merely present in the linked artifact, including global
+symbols from statically linked Rust dependencies, are hidden.
+
+``.github/scripts/check_exports.py`` verifies the result. It reads the installed
+or packaged header, requires the dynamic export table to match the header
+declarations exactly, loads every public function, and checks that
+``lancedb_version()`` returns the package version. Package verification and
+``check-install`` use this check, so a library with an extra or missing export
+fails before publication.
+
+The allowlist describes the export surface of a built shared library; it does
+not add a compatibility promise. The preview ABI policy above still applies.
+Adding a public function still changes the Rust FFI and ``include/lancedb.h``
+together, and the function is not exported until it is declared in the header.
+
+The boundary covers Linux ELF, macOS Mach-O and native Windows MSVC shared
+builds. Windows GNU shared builds remain supported for source consumers but do
+not use this policy, and they are not release targets. A plain ``cargo build``
+or ``cargo rustc`` without the export linker wrapper is also a development
+path: it does not apply the boundary, and its ``cdylib`` may export dependency
+symbols. It is not a release artifact. A static library built with
+``-DBUILD_SHARED_LIBS=OFF`` has no dynamic export surface; static consumers
+link the archive together with the native dependencies reported by the
+installed CMake target or by pkg-config's ``Libs.private``.
+
+Earlier preview packages exposed incidental symbols from statically linked
+dependencies. The ``v0.1.0-preview.2`` archives exported ``crc_fast_*``
+functions on Linux, macOS and Windows; macOS also exported
+``blake3_compress_in_place_portable``, and Windows also exported
+``aws_lc_0_41_0_jent_*`` functions. These were never part of the C API. The
+first published preview built with the allowlist was ``v0.1.0-preview.3``;
+published previews from that release onward export only ``lancedb_*``
+functions. No documented C function or header declaration was removed.
+
 Published packages
 ------------------
 
@@ -82,8 +125,14 @@ Each archive is named ``lancedb-c-<commit>-<target>.tar.gz`` and contains:
 
 The ``v0.1.0-preview.1`` Linux archive predates the SONAME rule and contains
 only the unversioned ``liblancedb.so``. The archive has a sibling ``.sha256``
-file, and the release includes a combined ``SHA256SUMS``. The manifest is the
-machine-readable contract for downstream loaders:
+file, and the release includes a combined ``SHA256SUMS``.
+
+A prebuilt archive does not contain the CMake package config or pkg-config
+file that a source install provides, so it does not support
+``find_package(lancedb)`` or ``pkg-config`` directly. A source install can
+produce a shared or static library; the export allowlist above applies only to
+its shared library. The manifest is the machine-readable contract for
+downstream loaders:
 
 .. list-table::
    :header-rows: 1

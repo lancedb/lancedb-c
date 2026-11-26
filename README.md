@@ -382,7 +382,15 @@ The release version comes from the Git tag; the Cargo package version stays
 `0.0.0`. The installed header exposes `LANCEDB_VERSION_MAJOR`,
 `LANCEDB_VERSION_MINOR`, `LANCEDB_VERSION_PATCH` and `LANCEDB_VERSION_STRING`;
 `lancedb_version()` returns the runtime version from the loaded library. The
-checked-in header reports `0.0.0-dev`. See
+checked-in header reports `0.0.0-dev`.
+
+Shared libraries in release packages, and CMake builds on Linux, macOS and
+native Windows MSVC, export only the `lancedb_*` functions declared in
+`include/lancedb.h`; symbols from statically linked dependencies are hidden.
+The first published preview built with this export allowlist was
+`v0.1.0-preview.3`; the `v0.1.0-preview.2` archives also exposed incidental
+dependency symbols. Plain `cargo build` and static builds do not apply this
+dynamic export boundary. See
 [Versioning and ABI](docs/versioning.rst).
 
 ## Documentation and resources
