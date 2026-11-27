@@ -3951,7 +3951,7 @@ LanceDBVectorQuery* lancedb_vector_query_new(
  * On a multivector column, `limit` selects table rows in total and each row's
  * `_distance` includes the contribution of every input vector.
  *
- * The pinned SDK beta.37 cannot merge a hybrid query whose vector leg returns
+ * The pinned SDK beta.38 cannot merge a hybrid query whose vector leg returns
  * batch results with `query_index` and whose full-text leg returns matches:
  * the SDK's RRF merge combines the batch `query_index` column with the
  * full-text schema and returns an Arrow schema error. This includes multiple
@@ -5226,7 +5226,7 @@ LanceDBError lancedb_vector_query_where_filter(
  * error. Execute the query instead.
  *
  * If the vector leg returns batch results with `query_index` and the full-text
- * leg returns matches, the pinned SDK beta.37 RRF merge fails with an Arrow
+ * leg returns matches, the pinned SDK beta.38 RRF merge fails with an Arrow
  * schema error. See lancedb_vector_query_new_typed() for the vector types and
  * routing that produce `query_index`.
  *
@@ -5264,7 +5264,7 @@ LanceDBError lancedb_vector_query_full_text_search(
  * lancedb_fts_query_new_boolean() and lancedb_fts_query_new_boost().
  *
  * If the vector leg returns batch results with `query_index` and the full-text
- * leg returns matches, the pinned SDK beta.37 RRF merge fails with an Arrow
+ * leg returns matches, the pinned SDK beta.38 RRF merge fails with an Arrow
  * schema error. See lancedb_vector_query_new_typed() for the vector types and
  * routing that produce `query_index`.
  *

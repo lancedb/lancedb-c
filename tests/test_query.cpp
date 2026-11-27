@@ -575,6 +575,42 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter", "[query]") {
   lancedb_table_free(table);
 }
 
+TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - combined bitmap filters preserve NULL semantics",
+                 "[query]") {
+  LanceDBTable* table = create_order_by_table(db, "nullable_bitmap_filter_test");
+  LanceDBScalarIndexConfig config = {.replace = 0};
+  char* error_message = nullptr;
+  for (const char* column : {"rank", "bucket"}) {
+    REQUIRE(lancedb_table_create_scalar_index(table, &column, 1, LANCEDB_INDEX_BITMAP,
+                                              &config, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+  }
+
+  for (int run = 0; run < 2; ++run) {
+    LanceDBQuery* query = lancedb_query_new(table);
+    REQUIRE(query != nullptr);
+    REQUIRE(lancedb_query_where_filter(
+                query, "(rank BETWEEN 1 AND 4 OR rank IS NULL) AND NOT (bucket = 'b')",
+                &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+
+    char* plan = nullptr;
+    REQUIRE(lancedb_query_explain_plan(query, true, &plan, &error_message) == LANCEDB_SUCCESS);
+    REQUIRE(error_message == nullptr);
+    REQUIRE(plan != nullptr);
+    const std::string plan_text(plan);
+    lancedb_free_string(plan);
+    CAPTURE(plan_text);
+    REQUIRE(plan_text.find("rank_idx(Bitmap)") != std::string::npos);
+    REQUIRE(plan_text.find("bucket_idx(Bitmap)") != std::string::npos);
+
+    auto ids = ids_of(collect_query_rows(lancedb_query_execute(query)));
+    std::sort(ids.begin(), ids.end());
+    REQUIRE(ids == std::vector<int32_t>{1, 4});
+  }
+  lancedb_table_free(table);
+}
+
 TEST_CASE_METHOD(LanceDBFixture, "LanceDB Query - Where Filter no Index", "[query]") {
   const std::string table_name = "query_filter_no_index_test";
 
