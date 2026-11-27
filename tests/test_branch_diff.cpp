@@ -451,6 +451,60 @@ TEST_CASE_METHOD(LanceDBFixture,
 
 #ifndef _WIN32
 
+TEST_CASE("Remote tag checkout validates the snapshot before pinning", "[table]") {
+  LoopbackHttpServer server([](const HttpRequest& request) -> HttpResponse {
+    if (request.path == "/v1/table/my_table/tags/version/") {
+      if (request.body.find(R"("snapshot")") != std::string::npos) {
+        return {200, R"({"branch":"main","version":2})"};
+      }
+      if (request.body.find(R"("other_branch")") != std::string::npos) {
+        return {200, R"({"branch":"exp","version":3})"};
+      }
+      if (request.body.find(R"("expired")") != std::string::npos) {
+        return {200, R"({"branch":null,"version":99})"};
+      }
+    }
+    if (request.path == "/v1/table/my_table/describe/") {
+      if (request.body.find(R"("version":2)") != std::string::npos) {
+        return {200, R"({"version":2,"schema":{"fields":[]}})"};
+      }
+      if (request.body.find(R"("version":99)") != std::string::npos) {
+        return {404, "{}"};
+      }
+      return {200, R"({"version":7,"schema":{"fields":[]}})"};
+    }
+    if (request.path == "/v1/table/my_table/count_rows/" &&
+        request.body.find(R"("version":2)") != std::string::npos) {
+      return {200, "3"};
+    }
+    return {404, "{}"};
+  });
+  ConnectionPtr connection = open_remote_connection(server.url());
+  TablePtr table = open_remote_table(connection.get());
+
+  char* error_message = nullptr;
+  REQUIRE(lancedb_table_checkout_tag(table.get(), "snapshot", &error_message) ==
+          LANCEDB_SUCCESS);
+  REQUIRE(error_message == nullptr);
+  REQUIRE(lancedb_table_count_rows(table.get()) == 3);
+
+  SECTION("A tag on another branch fails with the original snapshot intact") {
+    REQUIRE(lancedb_table_checkout_tag(table.get(), "other_branch", &error_message) ==
+            LANCEDB_INVALID_INPUT);
+    REQUIRE(require_string(error_message).find("belongs to branch 'exp'") !=
+            std::string::npos);
+  }
+  SECTION("A tag pointing to a missing version fails with the original snapshot intact") {
+    REQUIRE(lancedb_table_checkout_tag(table.get(), "expired", &error_message) ==
+            LANCEDB_TABLE_NOT_FOUND);
+    REQUIRE(require_string(error_message).find("version: 99") != std::string::npos);
+  }
+
+  lancedb_free_string(error_message);
+  REQUIRE(lancedb_table_version(table.get()) == 2);
+  REQUIRE(lancedb_table_count_rows(table.get()) == 3);
+}
+
 TEST_CASE("Remote branch diff and cherry-pick forward SDK results", "[table]") {
   LoopbackHttpServer server(handle_request);
   ConnectionPtr connection = open_remote_connection(server.url());

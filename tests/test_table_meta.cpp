@@ -176,6 +176,19 @@ TEST_CASE_METHOD(LanceDBFixture, "LanceDB Table History", "[table]") {
     error_message = nullptr;
     REQUIRE(lancedb_table_count_rows(table) == 10);
 
+    const char* on_columns[] = {"key"};
+    auto merge_reader = create_reader_from_batch(pinned_batch);
+    REQUIRE(merge_reader != nullptr);
+    REQUIRE(lancedb_table_merge_insert(table, merge_reader, on_columns, 1, nullptr,
+                                       &error_message) == LANCEDB_INVALID_INPUT);
+    REQUIRE(error_message != nullptr);
+    REQUIRE(std::string(error_message).find("specific version is checked out") !=
+            std::string::npos);
+    lancedb_free_string(error_message);
+    error_message = nullptr;
+    REQUIRE(lancedb_table_count_rows(table) == 10);
+    REQUIRE(lancedb_table_version(table) == 1);
+
     REQUIRE(lancedb_table_checkout_latest(table, &error_message) == LANCEDB_SUCCESS);
     REQUIRE(error_message == nullptr);
     REQUIRE(lancedb_table_count_rows(table) == 15);
